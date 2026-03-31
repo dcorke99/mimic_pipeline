@@ -1,0 +1,15 @@
+# Ignore large data + pipeline outputs
+data/
+artifacts/
+
+# Common large file formats
+*.csv
+*.tsv
+*.parquet
+*.pkl
+*.hdf5
+*.feather
+
+# Python cache
+__pycache__/
+*.pyc
