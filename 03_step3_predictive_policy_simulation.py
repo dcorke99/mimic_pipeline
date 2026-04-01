@@ -8,7 +8,7 @@ import pandas as pd
 # Config
 # -----------------------------
 SEED = 42
-N_ROLLOUTS = 200
+N_ROLLOUTS = 50
 PROGRESS_EVERY = 100
 
 INDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
@@ -39,8 +39,8 @@ rng = np.random.default_rng(SEED)
 # -----------------------------
 # Same policies as Step-2
 # -----------------------------
-RISK_TAUS = [0.01, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
-
+# RISK_TAUS = [0.01, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
+RISK_TAUS = [0.01, 0.02]
 
 def policy_fixed_day_remove(days_in_state: int, remove_day: int) -> int:
     return 1 if days_in_state >= remove_day else 0
@@ -64,7 +64,7 @@ def policy_hybrid(
 POLICIES = [
     ("fixed_day3", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 3)),
     ("fixed_day5", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 5)),
-    ("fixed_day7", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 7)),
+    # ("fixed_day7", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 7)),
     *[
         (
             f"risk_tau_{tau:.2f}".replace(".", "_"),
@@ -72,15 +72,15 @@ POLICIES = [
         )
         for tau in RISK_TAUS
     ],
-    (
-        "hybrid_tau0_15_ratio1_0",
-        lambda r: policy_hybrid(
-            float(r["p_cauti_if_keep"]),
-            float(r["p_reins_if_remove"]),
-            tau_cauti=0.15,
-            ratio=1.0,
-        ),
-    ),
+    # (
+    #    "hybrid_tau0_15_ratio1_0",
+    #    lambda r: policy_hybrid(
+    #        float(r["p_cauti_if_keep"]),
+    #        float(r["p_reins_if_remove"]),
+    #        tau_cauti=0.15,
+    #        ratio=1.0,
+    #    ),
+    # ),
 ]
 
 # -----------------------------

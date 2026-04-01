@@ -85,6 +85,8 @@ EPISODE_KEYS = ["stay_id", "inserted"]
 # Number of OUT-state days after removal during which CAUTI is still considered possible
 POST_REMOVE_RISK_DAYS = 2
 
+TOP_FEATURES_TO_SAVE = 15
+
 # SHAP output controls
 SAVE_SHAP = True
 SHAP_SAMPLE_N = 2000
@@ -106,7 +108,7 @@ def _feature_cols(df: pd.DataFrame) -> list[str]:
 
 
 # Fit the chosen binary classifier pipeline after imputation and missingness indicators.
-def _fit_logit(X: pd.DataFrame, y: pd.Series) -> Pipeline:
+def _fit_model(X: pd.DataFrame, y: pd.Series) -> Pipeline:
     if MODEL_TYPE == "rf":
         pipe = Pipeline([
             ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
@@ -144,11 +146,6 @@ def _fit_logit(X: pd.DataFrame, y: pd.Series) -> Pipeline:
 # Predict class-1 probabilities from a fitted sklearn pipeline.
 def _predict_proba(pipe: Pipeline, X: pd.DataFrame) -> np.ndarray:
     return pipe.predict_proba(X.to_numpy(dtype=float))[:, 1]
-
-
-# Check that a binary target contains at least two classes before fitting.
-def _can_fit_binary(y: pd.Series) -> bool:
-    return pd.Series(y).dropna().nunique() >= 2
 
 
 # Normalise split labels in-place so train/test comparisons are reliable.
@@ -207,6 +204,56 @@ def _feature_importance_series(pipe: Pipeline, X_cols: list[str]) -> pd.Series:
         index=_model_feature_names(pipe, X_cols)
     ).sort_values(ascending=False)
 
+
+def _shap_importance_series(
+    pipe: Pipeline,
+    X: pd.DataFrame,
+    item_labels: dict[int, str],
+    sample_n: int = 2000,
+) -> pd.Series:
+    X_plot = X.sample(n=min(sample_n, len(X)), random_state=SEED).copy()
+
+    imputer = pipe.named_steps["imputer"]
+    X_imp = imputer.transform(X_plot.to_numpy(dtype=float))
+
+    # Build readable names first.
+    feature_names = _model_feature_names(pipe, list(X.columns))
+    feature_names = [_format_feature_name(name, item_labels) for name in feature_names]
+
+    # Build SHAP/XGBoost-safe names for the dataframe passed into TreeExplainer.
+    safe_feature_names = [_safe_shap_feature_name(name) for name in feature_names]
+
+    X_imp_df = pd.DataFrame(X_imp, columns=safe_feature_names)
+
+    estimator = pipe.named_steps["rf"] if MODEL_TYPE == "rf" else pipe.named_steps["xgb"]
+    explainer = shap.TreeExplainer(estimator)
+    explanation = explainer(X_imp_df)
+
+    vals = np.asarray(explanation.values)
+
+    if vals.ndim == 3:
+        if vals.shape[2] == 2:
+            vals = vals[:, :, 1]
+        else:
+            vals = vals.mean(axis=2)
+
+    shap_mean_abs = np.abs(vals).mean(axis=0)
+
+    # Return the series indexed by the original readable names, not the safe ones.
+    return pd.Series(shap_mean_abs, index=feature_names).sort_values(ascending=False)
+
+# Convert a ranked importance series into a tidy top-features table.
+def _top_series_df(
+    model_name: str,
+    importance_name: str,
+    s: pd.Series,
+    top_n: int,
+) -> pd.DataFrame:
+    out = s.head(top_n).reset_index()
+    out.columns = ["feature", importance_name]
+    out.insert(0, "rank", np.arange(1, len(out) + 1))
+    out.insert(0, "model", model_name)
+    return out
 
 # Clean feature names slightly so SHAP plotting is less brittle.
 def _safe_shap_feature_name(name: str) -> str:
@@ -529,7 +576,6 @@ def main() -> None:
     df_out = df[df[STATE_COL] == "out"].copy()
 
     # Reinsertion fit set excludes terminal OUT rows that only end because ICU follow-up stops.
-    # Those rows are not useful positive/negative reinsertion examples.
     df_out_fit = df_out[
         ~(
             (df_out[LAST_DAY_COL] == 1) &
@@ -537,10 +583,6 @@ def main() -> None:
             (df_out[Y_REINS] == 0)
         )
     ].copy()
-
-    # Optional consistency with the first-event CAUTI process:
-    # once CAUTI has already happened, later reinsertion rows are also excluded here.
-    df_out_fit = df_out_fit[df_out_fit["prior_cauti_count"] == 0].copy()
 
     # Initialise fitted-model placeholders and headline AUC outputs.
     remove_model = None
@@ -557,96 +599,78 @@ def main() -> None:
     X_test_out = None
 
     # Removal model on IN rows
-    if not df_in.empty:
-        X_train_remove = df_in.loc[df_in[SPLIT_COL] == "train", X_cols_remove]
-        y_train_remove = df_in.loc[df_in[SPLIT_COL] == "train", ACTION_COL].astype(int)
+    X_train_remove = df_in.loc[df_in[SPLIT_COL] == "train", X_cols_remove]
+    y_train_remove = df_in.loc[df_in[SPLIT_COL] == "train", ACTION_COL].astype(int)
 
-        X_test_remove = df_in.loc[df_in[SPLIT_COL] == "test", X_cols_remove]
-        y_test_remove = df_in.loc[df_in[SPLIT_COL] == "test", ACTION_COL].astype(int)
+    X_test_remove = df_in.loc[df_in[SPLIT_COL] == "test", X_cols_remove]
+    y_test_remove = df_in.loc[df_in[SPLIT_COL] == "test", ACTION_COL].astype(int)
 
-        print(f"Fitting removal model with {MODEL_TYPE}...", flush=True)
+    print(f"Fitting removal model with {MODEL_TYPE}...", flush=True)
 
-        if len(X_train_remove) == 0:
-            print("Warning: no removal training rows found.", flush=True)
-        elif _can_fit_binary(y_train_remove):
-            # Fit on TRAIN IN-state rows only.
-            remove_model = _fit_logit(X_train_remove, y_train_remove)
+    # Fit on TRAIN IN-state rows only.
+    remove_model = _fit_model(X_train_remove, y_train_remove)
 
-            # Score all eligible IN rows in the full dataset.
-            df.loc[df_in.index, "p_remove_obs"] = _predict_proba(remove_model, df_in[X_cols_remove])
+    # Score all eligible IN rows in the full dataset.
+    df.loc[df_in.index, "p_remove_obs"] = _predict_proba(remove_model, df_in[X_cols_remove])
 
-            # Compute headline ROC AUC on TEST rows.
-            if len(X_test_remove) > 0:
-                p_test_remove = _predict_proba(remove_model, X_test_remove)
-                auc_remove = roc_auc_score(y_test_remove, p_test_remove) if y_test_remove.nunique() > 1 else float("nan")
+    # Compute headline ROC AUC on TEST rows.
+    p_test_remove = _predict_proba(remove_model, X_test_remove)
+    auc_remove = roc_auc_score(y_test_remove, p_test_remove) if y_test_remove.nunique() > 1 else float("nan")
 
     # CAUTI transition model on risk rows
-    if not df_cauti.empty:
-        X_train_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "train", X_cols_cauti]
-        y_train_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "train", Y_CAUTI].astype(int)
+    X_train_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "train", X_cols_cauti]
+    y_train_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "train", Y_CAUTI].astype(int)
 
-        X_test_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "test", X_cols_cauti]
-        y_test_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "test", Y_CAUTI].astype(int)
+    X_test_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "test", X_cols_cauti]
+    y_test_cauti = df_cauti.loc[df_cauti[SPLIT_COL] == "test", Y_CAUTI].astype(int)
 
-        print(f"Fitting CAUTI transition model with {MODEL_TYPE}...", flush=True)
+    print(f"Fitting CAUTI transition model with {MODEL_TYPE}...", flush=True)
 
-        if len(X_train_cauti) == 0:
-            print("Warning: no CAUTI training rows found.", flush=True)
-        elif _can_fit_binary(y_train_cauti):
-            # Fit the CAUTI transition model on the CAUTI risk set.
-            cauti_model = _fit_logit(X_train_cauti, y_train_cauti)
+    # Fit the CAUTI transition model on the CAUTI risk set.
+    cauti_model = _fit_model(X_train_cauti, y_train_cauti)
 
-            # Score actual observed OUT rows, but only within the post-removal risk window.
-            df_out_cauti = df_out[df_out[DAYS_COL] <= POST_REMOVE_RISK_DAYS].copy()
-            if not df_out_cauti.empty:
-                df.loc[df_out_cauti.index, "p_cauti_if_out"] = _predict_proba(
-                    cauti_model,
-                    df_out_cauti[X_cols_cauti]
-                )
+    # Score actual observed OUT rows, but only within the post-removal risk window.
+    df_out_cauti = df_out[df_out[DAYS_COL] <= POST_REMOVE_RISK_DAYS].copy()
+    df.loc[df_out_cauti.index, "p_cauti_if_out"] = _predict_proba(
+        cauti_model,
+        df_out_cauti[X_cols_cauti]
+    )
 
-            # Score counterfactual CAUTI probabilities on IN rows under:
-            # - keep catheter in
-            # - remove now
-            if not df_in.empty:
-                X_keep = _make_cauti_keep_rows(df_in, X_cols_cauti)
-                X_remove = _make_cauti_remove_rows(df_in, X_cols_cauti)
+    # Score counterfactual CAUTI probabilities on IN rows under:
+    # - keep catheter in
+    # - remove now
+    X_keep = _make_cauti_keep_rows(df_in, X_cols_cauti)
+    X_remove = _make_cauti_remove_rows(df_in, X_cols_cauti)
 
-                df.loc[df_in.index, "p_cauti_if_keep"] = _predict_proba(cauti_model, X_keep)
-                df.loc[df_in.index, "p_cauti_if_remove"] = _predict_proba(cauti_model, X_remove)
+    df.loc[df_in.index, "p_cauti_if_keep"] = _predict_proba(cauti_model, X_keep)
+    df.loc[df_in.index, "p_cauti_if_remove"] = _predict_proba(cauti_model, X_remove)
 
-            # Compute headline ROC AUC on TEST risk rows.
-            if len(X_test_cauti) > 0:
-                p_test_cauti = _predict_proba(cauti_model, X_test_cauti)
-                auc_cauti = roc_auc_score(y_test_cauti, p_test_cauti) if y_test_cauti.nunique() > 1 else float("nan")
+    # Compute headline ROC AUC on TEST risk rows.
+    p_test_cauti = _predict_proba(cauti_model, X_test_cauti)
+    auc_cauti = roc_auc_score(y_test_cauti, p_test_cauti) if y_test_cauti.nunique() > 1 else float("nan")
 
     # Reinsertion model on OUT rows
-    if not df_out_fit.empty:
-        X_train_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "train", X_cols_reins]
-        y_train_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "train", Y_REINS].astype(int)
+    X_train_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "train", X_cols_reins]
+    y_train_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "train", Y_REINS].astype(int)
 
-        X_test_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "test", X_cols_reins]
-        y_test_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "test", Y_REINS].astype(int)
+    X_test_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "test", X_cols_reins]
+    y_test_out = df_out_fit.loc[df_out_fit[SPLIT_COL] == "test", Y_REINS].astype(int)
 
-        print(f"Fitting reinsertion model with {MODEL_TYPE}...", flush=True)
+    print(f"Fitting reinsertion model with {MODEL_TYPE}...", flush=True)
 
-        if len(X_train_out) == 0:
-            print("Warning: no reinsertion training rows found.", flush=True)
-        elif _can_fit_binary(y_train_out):
-            # Fit on TRAIN OUT-state rows only.
-            reins_model = _fit_logit(X_train_out, y_train_out)
+    # Fit on TRAIN OUT-state rows only.
+    reins_model = _fit_model(X_train_out, y_train_out)
 
-            # Score all observed OUT rows in the full panel.
-            df.loc[df_out.index, "p_reins_if_out"] = _predict_proba(reins_model, df_out[X_cols_reins])
+    # Score all observed OUT rows in the full panel.
+    df.loc[df_out.index, "p_reins_if_out"] = _predict_proba(reins_model, df_out[X_cols_reins])
 
-            # Compute headline ROC AUC on TEST rows.
-            if len(X_test_out) > 0:
-                p_test_reins = _predict_proba(reins_model, X_test_out)
-                auc_reins = roc_auc_score(y_test_out, p_test_reins) if y_test_out.nunique() > 1 else float("nan")
+    # Compute headline ROC AUC on TEST rows.
+    p_test_reins = _predict_proba(reins_model, X_test_out)
+    auc_reins = roc_auc_score(y_test_out, p_test_reins) if y_test_out.nunique() > 1 else float("nan")
 
-            # Score counterfactual reinsertion probability on IN rows if removed now.
-            if not df_in.empty:
-                X_cf = _make_reins_remove_rows(df_in, X_cols_reins)
-                df.loc[df_in.index, "p_reins_if_remove"] = _predict_proba(reins_model, X_cf)
+    # Score counterfactual reinsertion probability on IN rows if removed now.
+    X_cf = _make_reins_remove_rows(df_in, X_cols_reins)
+    df.loc[df_in.index, "p_reins_if_remove"] = _predict_proba(reins_model, X_cf)
 
     # Test-set evaluation outputs
 
@@ -679,8 +703,7 @@ def main() -> None:
     # OUT-state TEST rows, excluding terminal ICU-end rows with no reinsertion.
     reins_eval_test = df[
         (df[SPLIT_COL] == "test") &
-        (df[STATE_COL] == "out") &
-        (df["prior_cauti_count"] == 0)
+        (df[STATE_COL] == "out")
     ].copy()
 
     reins_eval_test = reins_eval_test[
@@ -752,8 +775,9 @@ def main() -> None:
         .drop(columns=["_orig_index", "prior_cauti_count", "cauti_risk_row", "state_is_out"])
     )
 
-    # Reporting: feature importance
-    print("\n--- Feature importance ---", flush=True)
+    # Build and save separate top-feature tables for model importance and SHAP importance.
+    model_feature_parts = []
+    shap_feature_parts = []
 
     if remove_model is not None:
         remove_importance = _feature_importance_series(remove_model, X_cols_remove)
@@ -761,8 +785,30 @@ def main() -> None:
             _format_feature_name(feature_name, item_labels)
             for feature_name in remove_importance.index
         ]
-        print("\nTop Removal features:", flush=True)
-        print(remove_importance.head(15), flush=True)
+        model_feature_parts.append(
+            _top_series_df(
+                model_name="removal",
+                importance_name="model_importance",
+                s=remove_importance,
+                top_n=TOP_FEATURES_TO_SAVE,
+            )
+        )
+
+        if X_test_remove is not None and len(X_test_remove) > 0:
+            remove_shap = _shap_importance_series(
+                pipe=remove_model,
+                X=X_test_remove,
+                item_labels=item_labels,
+                sample_n=SHAP_SAMPLE_N,
+            )
+            shap_feature_parts.append(
+                _top_series_df(
+                    model_name="removal",
+                    importance_name="shap_mean_abs",
+                    s=remove_shap,
+                    top_n=TOP_FEATURES_TO_SAVE,
+                )
+            )
 
     if cauti_model is not None:
         cauti_importance = _feature_importance_series(cauti_model, X_cols_cauti)
@@ -770,8 +816,30 @@ def main() -> None:
             _format_feature_name(feature_name, item_labels)
             for feature_name in cauti_importance.index
         ]
-        print("\nTop CAUTI features:", flush=True)
-        print(cauti_importance.head(15), flush=True)
+        model_feature_parts.append(
+            _top_series_df(
+                model_name="cauti",
+                importance_name="model_importance",
+                s=cauti_importance,
+                top_n=TOP_FEATURES_TO_SAVE,
+            )
+        )
+
+        if X_test_cauti is not None and len(X_test_cauti) > 0:
+            cauti_shap = _shap_importance_series(
+                pipe=cauti_model,
+                X=X_test_cauti,
+                item_labels=item_labels,
+                sample_n=SHAP_SAMPLE_N,
+            )
+            shap_feature_parts.append(
+                _top_series_df(
+                    model_name="cauti",
+                    importance_name="shap_mean_abs",
+                    s=cauti_shap,
+                    top_n=TOP_FEATURES_TO_SAVE,
+                )
+            )
 
     if reins_model is not None:
         reins_importance = _feature_importance_series(reins_model, X_cols_reins)
@@ -779,12 +847,42 @@ def main() -> None:
             _format_feature_name(feature_name, item_labels)
             for feature_name in reins_importance.index
         ]
-        print("\nTop Reinsertion features:", flush=True)
-        print(reins_importance.head(15), flush=True)
+        model_feature_parts.append(
+            _top_series_df(
+                model_name="reinsertion",
+                importance_name="model_importance",
+                s=reins_importance,
+                top_n=TOP_FEATURES_TO_SAVE,
+            )
+        )
 
-    # Optional SHAP plots
+        if X_test_out is not None and len(X_test_out) > 0:
+            reins_shap = _shap_importance_series(
+                pipe=reins_model,
+                X=X_test_out,
+                item_labels=item_labels,
+                sample_n=SHAP_SAMPLE_N,
+            )
+            shap_feature_parts.append(
+                _top_series_df(
+                    model_name="reinsertion",
+                    importance_name="shap_mean_abs",
+                    s=reins_shap,
+                    top_n=TOP_FEATURES_TO_SAVE,
+                )
+            )
+
+    if model_feature_parts:
+        model_feature_df = pd.concat(model_feature_parts, ignore_index=True)
+        _save_df(model_feature_df, OUTDIR / "step1_top_model_features.csv")
+
+    if shap_feature_parts:
+        shap_feature_df = pd.concat(shap_feature_parts, ignore_index=True)
+        _save_df(shap_feature_df, OUTDIR / "step1_top_shap_features.csv")
+
+    # SHAP plots
     if SAVE_SHAP:
-        if remove_model is not None and X_test_remove is not None and len(X_test_remove) > 0:
+        if X_test_remove is not None and len(X_test_remove) > 0:
             _save_shap_plots(
                 pipe=remove_model,
                 X=X_test_remove,
@@ -793,7 +891,7 @@ def main() -> None:
                 sample_n=SHAP_SAMPLE_N,
             )
 
-        if cauti_model is not None and X_test_cauti is not None and len(X_test_cauti) > 0:
+        if X_test_cauti is not None and len(X_test_cauti) > 0:
             _save_shap_plots(
                 pipe=cauti_model,
                 X=X_test_cauti,
@@ -802,7 +900,7 @@ def main() -> None:
                 sample_n=SHAP_SAMPLE_N,
             )
 
-        if reins_model is not None and X_test_out is not None and len(X_test_out) > 0:
+        if X_test_out is not None and len(X_test_out) > 0:
             _save_shap_plots(
                 pipe=reins_model,
                 X=X_test_out,
@@ -891,6 +989,8 @@ def main() -> None:
             "remove_by_day_test_csv": str(OUTDIR / "remove_by_day_test.csv"),
             "cauti_by_state_day_test_csv": str(OUTDIR / "cauti_by_state_day_test.csv"),
             "reinsertion_by_day_test_csv": str(OUTDIR / "reinsertion_by_day_test.csv"),
+            "top_model_features_csv": str(OUTDIR / "step1_top_model_features.csv"),
+            "top_shap_features_csv": str(OUTDIR / "step1_top_shap_features.csv"),
         },
         "scored_panel_schema": {
             "required_columns_present": all(col in df.columns for col in required_scored_cols),
