@@ -23,7 +23,7 @@ DP = 3
 KEEP_STATS = {"mean"}
 MIN_N_PER_GROUP = 20
 LATE_REMOVAL_DAY_THRESHOLD = 7
-AGE_THRESHOLD = 70
+AGE_THRESHOLD = 60
 TOP_N_COVARIATES = 20
 
 ID_COL = "subject_id"
@@ -39,6 +39,13 @@ LAST_DAY_COL = "is_last_day_of_episode"
 END_REASON_COL = "episode_end_reason"
 EPISODE_KEYS = ["stay_id", "inserted"]
 POST_REMOVE_RISK_DAYS = 2
+LATE_REMOVAL_COL = "late_removal_today"
+AGE_GROUP_COL = "age_ge_threshold"
+
+REMOVAL_FEATURE_NAME = "GCS - Verbal Response [mean]"
+CAUTI_BINARY_FEATURE_NAME = "sex_M"
+CAUTI_CONTINUOUS_FEATURE_NAME = "Anion gap [mean]"
+REINSERTION_FEATURE_NAME = "Bladder Scan Estimate [mean]"
 
 
 # Detect columns like itemid_<ID>__mean/min/max and return the matching columns plus metadata.
@@ -67,11 +74,6 @@ def load_item_labels(d_items_path: Path) -> dict[int, str]:
     d_items = d_items.dropna(subset=["itemid"])
     d_items["itemid"] = d_items["itemid"].astype(int)
     return d_items.set_index("itemid")["label"].to_dict()
-
-
-# Create readable names like "Heart Rate [mean]" for tables.
-def make_pretty_name(label: str, stat: str) -> str:
-    return f"{label} [{stat}]"
 
 
 # Normalise the split labels to avoid train/test mismatches.
@@ -175,17 +177,9 @@ def p_adjust_bh(pvalues: pd.Series) -> pd.Series:
 
 # Build first-event CAUTI and reinsertion fitting flags used by the current panel logic.
 def build_risk_sets(df: pd.DataFrame) -> pd.DataFrame:
-    out = (
-        df.sort_values(EPISODE_KEYS + ["day_end"])
-        .reset_index(drop=False)
-        .rename(columns={"index": "_orig_index"})
-        .copy()
-    )
-    out["prior_cauti_count"] = (
-        out.groupby(EPISODE_KEYS)[Y_CAUTI]
-        .cumsum()
-        .shift(fill_value=0)
-    )
+    out = df.sort_values(EPISODE_KEYS + ["day_end"]).copy()
+    y_cauti = pd.to_numeric(out[Y_CAUTI], errors="coerce").fillna(0)
+    out["prior_cauti_count"] = out.groupby(EPISODE_KEYS)[Y_CAUTI].cumsum() - y_cauti
     out["cauti_risk_row"] = (
         (out[STATE_COL] == "in") |
         ((out[STATE_COL] == "out") & (out[DAYS_COL] <= POST_REMOVE_RISK_DAYS))
@@ -247,16 +241,13 @@ def build_overview_tables(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
     }
     targets = {
         "removal_today_on_in_rows": ACTION_COL,
-        "late_removal_today_on_in_rows": ACTION_COL,
+        "late_removal_today_on_in_rows": LATE_REMOVAL_COL,
         "cauti_today_on_cauti_risk_rows": Y_CAUTI,
         "reinsertion_today_on_out_fit_rows": Y_REINS,
     }
     for name, mask in masks.items():
-        g = df.loc[mask].copy()
+        g = df.loc[mask]
         y_col = targets[name]
-        if name == "late_removal_today_on_in_rows":
-            g["late_removal_today"] = ((g[ACTION_COL] == 1) & (g[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype(int)
-            y_col = "late_removal_today"
         event_rows.append({
             "analysis_set": name,
             "rows": int(len(g)),
@@ -298,24 +289,215 @@ def build_day_rate_tables(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]
     )
     return cauti_day, reinsertion_day
 
+# Resolve one required feature name into an actual dataframe column.
+def resolve_required_feature_col(
+    feature_name: str,
+    pretty_to_raw: dict[str, str],
+    available_cols: set[str],
+) -> str:
+    if feature_name in available_cols:
+        return feature_name
 
-# Run a tidy 2x2 association test and return rates, odds ratio, and p-values.
-def binary_exposure_test(
+    raw = pretty_to_raw.get(feature_name)
+    if raw is not None and raw in available_cols:
+        return raw
+
+    raise ValueError(f"Required feature not found in panel columns: {feature_name}")
+
+
+# Collapse the panel to one row per catheter episode for simple episode-level testing.
+def build_episode_level_table(
     df: pd.DataFrame,
-    exposure: pd.Series,
-    outcome: pd.Series,
+    removal_feature_col: str,
+    cauti_binary_feature_col: str,
+    cauti_continuous_feature_col: str,
+    reinsertion_feature_col: str,
+) -> pd.DataFrame:
+    d = df.sort_values(EPISODE_KEYS + ["day_end"]).copy()
+
+    in_rows = d.loc[d[STATE_COL] == "in"].copy()
+    cauti_rows = d.loc[d["cauti_risk_row"] == 1].copy()
+    reinsertion_rows = d.loc[d["reinsertion_fit_row"] == 1].copy()
+
+    if in_rows.empty:
+        return pd.DataFrame(columns=EPISODE_KEYS + [
+            ID_COL,
+            "hadm_id",
+            "age",
+            "catheter_days",
+            "late_removal_episode",
+            "cauti_episode",
+            "reinsertion_episode",
+            removal_feature_col,
+            cauti_binary_feature_col,
+            cauti_continuous_feature_col,
+            reinsertion_feature_col,
+        ])
+
+    episode_age = d.groupby(EPISODE_KEYS, dropna=False)["age"].first().rename("age")
+    episode_subject = d.groupby(EPISODE_KEYS, dropna=False)[ID_COL].first().rename(ID_COL)
+    episode_hadm = d.groupby(EPISODE_KEYS, dropna=False)["hadm_id"].first().rename("hadm_id")
+
+    catheter_days = (
+        in_rows.groupby(EPISODE_KEYS, dropna=False)[DAYS_COL]
+        .max()
+        .rename("catheter_days")
+    )
+
+    late_removal_episode = (catheter_days >= LATE_REMOVAL_DAY_THRESHOLD).astype("int8").rename("late_removal_episode")
+
+    cauti_episode = (
+        d.groupby(EPISODE_KEYS, dropna=False)[Y_CAUTI]
+        .max()
+        .fillna(0)
+        .clip(0, 1)
+        .astype("int8")
+        .rename("cauti_episode")
+    )
+
+    reinsertion_episode = (
+        d.groupby(EPISODE_KEYS, dropna=False)[Y_REINS]
+        .max()
+        .fillna(0)
+        .clip(0, 1)
+        .astype("int8")
+        .rename("reinsertion_episode")
+    )
+
+    removal_feature_episode = (
+        in_rows.groupby(EPISODE_KEYS, dropna=False)[removal_feature_col]
+        .median()
+        .rename(removal_feature_col)
+    )
+
+    cauti_binary_feature_episode = (
+        d.groupby(EPISODE_KEYS, dropna=False)[cauti_binary_feature_col]
+        .first()
+        .rename(cauti_binary_feature_col)
+    )
+
+    cauti_continuous_feature_episode = (
+        cauti_rows.groupby(EPISODE_KEYS, dropna=False)[cauti_continuous_feature_col]
+        .median()
+        .rename(cauti_continuous_feature_col)
+    )
+
+    reinsertion_feature_episode = (
+        reinsertion_rows.groupby(EPISODE_KEYS, dropna=False)[reinsertion_feature_col]
+        .median()
+        .rename(reinsertion_feature_col)
+    )
+
+    out = pd.concat(
+        [
+            episode_subject,
+            episode_hadm,
+            episode_age,
+            catheter_days,
+            late_removal_episode,
+            cauti_episode,
+            reinsertion_episode,
+            removal_feature_episode,
+            cauti_binary_feature_episode,
+            cauti_continuous_feature_episode,
+            reinsertion_feature_episode,
+        ],
+        axis=1,
+    ).reset_index()
+
+    numeric_cols = [
+        "age",
+        "catheter_days",
+        "late_removal_episode",
+        "cauti_episode",
+        "reinsertion_episode",
+        removal_feature_col,
+        cauti_binary_feature_col,
+        cauti_continuous_feature_col,
+        reinsertion_feature_col,
+    ]
+    for col in numeric_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    for col in ["late_removal_episode", "cauti_episode", "reinsertion_episode", cauti_binary_feature_col]:
+        if col in out.columns:
+            out[col] = out[col].fillna(0).clip(0, 1).astype("int8")
+
+    out = out.dropna(subset=["catheter_days"]).copy()
+    return out
+
+
+# Mann-Whitney U test for a continuous value across a binary episode-level outcome.
+def mannwhitney_group_test(
+    df: pd.DataFrame,
+    value_col: str,
+    group_col: str,
     test_name: str,
     analysis_set: str,
 ) -> dict[str, object]:
-    tmp = pd.DataFrame({"exposure": exposure, "outcome": outcome}).dropna().copy()
-    tmp["exposure"] = pd.to_numeric(tmp["exposure"], errors="coerce")
-    tmp["outcome"] = pd.to_numeric(tmp["outcome"], errors="coerce")
-    tmp = tmp[tmp["exposure"].isin([0, 1]) & tmp["outcome"].isin([0, 1])].copy()
+    tmp = df[[value_col, group_col]].copy()
+    tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
+    tmp[group_col] = pd.to_numeric(tmp[group_col], errors="coerce")
+    tmp = tmp.dropna().copy()
+    tmp = tmp[tmp[group_col].isin([0, 1])]
+
+    x1 = tmp.loc[tmp[group_col] == 1, value_col].to_numpy(dtype=float)
+    x0 = tmp.loc[tmp[group_col] == 0, value_col].to_numpy(dtype=float)
+
+    u_stat = np.nan
+    p_value = np.nan
+    delta = np.nan
+
+    if x1.size >= MIN_N_PER_GROUP and x0.size >= MIN_N_PER_GROUP:
+        try:
+            u_stat, p_value = stats.mannwhitneyu(x1, x0, alternative="two-sided")
+            u_stat = float(u_stat)
+            p_value = float(p_value)
+        except Exception:
+            u_stat = np.nan
+            p_value = np.nan
+        delta = cliffs_delta(x1, x0)
+
+    return {
+        "test_name": test_name,
+        "test_type": "Mann-Whitney U",
+        "analysis_set": analysis_set,
+        "value_col": value_col,
+        "group_col": group_col,
+        "n_group_1": int(x1.size),
+        "n_group_0": int(x0.size),
+        "mean_group_1": float(np.mean(x1)) if x1.size else np.nan,
+        "mean_group_0": float(np.mean(x0)) if x0.size else np.nan,
+        "median_group_1": float(np.median(x1)) if x1.size else np.nan,
+        "median_group_0": float(np.median(x0)) if x0.size else np.nan,
+        "statistic": u_stat,
+        "p_value": p_value,
+        "cliffs_delta": delta,
+    }
+
+
+# Fisher exact test for a binary exposure across a binary episode-level outcome.
+def binary_group_test(
+    df: pd.DataFrame,
+    exposure_col: str,
+    outcome_col: str,
+    test_name: str,
+    analysis_set: str,
+) -> dict[str, object]:
+    tmp = df[[exposure_col, outcome_col]].copy()
+    tmp[exposure_col] = pd.to_numeric(tmp[exposure_col], errors="coerce")
+    tmp[outcome_col] = pd.to_numeric(tmp[outcome_col], errors="coerce")
+    tmp = tmp.dropna().copy()
+    tmp = tmp[tmp[exposure_col].isin([0, 1]) & tmp[outcome_col].isin([0, 1])]
 
     if tmp.empty:
         return {
             "test_name": test_name,
+            "test_type": "Fisher exact",
             "analysis_set": analysis_set,
+            "exposure_col": exposure_col,
+            "outcome_col": outcome_col,
             "n": 0,
             "exposed_n": 0,
             "unexposed_n": 0,
@@ -323,94 +505,56 @@ def binary_exposure_test(
             "event_rate_unexposed": np.nan,
             "odds_ratio": np.nan,
             "risk_difference": np.nan,
-            "fisher_p": np.nan,
-            "chi2_p": np.nan,
+            "statistic": np.nan,
+            "p_value": np.nan,
+            "chi2_p_value": np.nan,
         }
 
-    table = pd.crosstab(tmp["exposure"], tmp["outcome"]).reindex(index=[0, 1], columns=[0, 1], fill_value=0)
+    table = pd.crosstab(tmp[exposure_col], tmp[outcome_col]).reindex(index=[0, 1], columns=[0, 1], fill_value=0)
+
     a = int(table.loc[1, 1])
     b = int(table.loc[1, 0])
     c = int(table.loc[0, 1])
     d = int(table.loc[0, 0])
 
-    exposed_n = int(a + b)
-    unexposed_n = int(c + d)
+    exposed_n = a + b
+    unexposed_n = c + d
     event_rate_exposed = a / exposed_n if exposed_n > 0 else np.nan
     event_rate_unexposed = c / unexposed_n if unexposed_n > 0 else np.nan
     risk_difference = event_rate_exposed - event_rate_unexposed if exposed_n > 0 and unexposed_n > 0 else np.nan
 
-    fisher_p = np.nan
     odds_ratio = np.nan
-    if min(a + b, c + d) > 0:
+    fisher_p = np.nan
+    try:
         odds_ratio, fisher_p = stats.fisher_exact([[a, b], [c, d]])
+        odds_ratio = float(odds_ratio)
+        fisher_p = float(fisher_p)
+    except Exception:
+        odds_ratio = np.nan
+        fisher_p = np.nan
 
     chi2_p = np.nan
-    if (table.values >= 0).all() and table.values.sum() > 0:
-        try:
-            chi2_p = float(stats.chi2_contingency(table.values, correction=False)[1])
-        except ValueError:
-            chi2_p = np.nan
+    try:
+        chi2_p = float(stats.chi2_contingency(table.values, correction=False)[1])
+    except Exception:
+        chi2_p = np.nan
 
     return {
         "test_name": test_name,
+        "test_type": "Fisher exact",
         "analysis_set": analysis_set,
+        "exposure_col": exposure_col,
+        "outcome_col": outcome_col,
         "n": int(len(tmp)),
-        "exposed_n": exposed_n,
-        "unexposed_n": unexposed_n,
+        "exposed_n": int(exposed_n),
+        "unexposed_n": int(unexposed_n),
         "event_rate_exposed": event_rate_exposed,
         "event_rate_unexposed": event_rate_unexposed,
-        "odds_ratio": float(odds_ratio) if pd.notna(odds_ratio) else np.nan,
+        "odds_ratio": odds_ratio,
         "risk_difference": risk_difference,
-        "fisher_p": float(fisher_p) if pd.notna(fisher_p) else np.nan,
-        "chi2_p": chi2_p,
-    }
-
-
-# Compare a continuous variable between outcome groups using Welch and Mann-Whitney tests.
-def continuous_group_test(
-    df: pd.DataFrame,
-    value_col: str,
-    outcome_col: str,
-    test_name: str,
-    analysis_set: str,
-) -> dict[str, object]:
-    tmp = df[[value_col, outcome_col]].copy()
-    tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
-    tmp[outcome_col] = pd.to_numeric(tmp[outcome_col], errors="coerce")
-    tmp = tmp.dropna().copy()
-    tmp = tmp[tmp[outcome_col].isin([0, 1])]
-
-    x1 = tmp.loc[tmp[outcome_col] == 1, value_col].to_numpy(dtype=float)
-    x0 = tmp.loc[tmp[outcome_col] == 0, value_col].to_numpy(dtype=float)
-
-    welch_p = np.nan
-    mw_p = np.nan
-    delta = np.nan
-
-    if x1.size >= MIN_N_PER_GROUP and x0.size >= MIN_N_PER_GROUP:
-        try:
-            welch_p = float(stats.ttest_ind(x1, x0, equal_var=False).pvalue)
-        except Exception:
-            welch_p = np.nan
-        try:
-            mw_p = float(stats.mannwhitneyu(x1, x0, alternative="two-sided").pvalue)
-        except Exception:
-            mw_p = np.nan
-        delta = cliffs_delta(x1, x0)
-
-    return {
-        "test_name": test_name,
-        "analysis_set": analysis_set,
-        "value_col": value_col,
-        "n_event_1": int(x1.size),
-        "n_event_0": int(x0.size),
-        "mean_event_1": float(np.mean(x1)) if x1.size else np.nan,
-        "mean_event_0": float(np.mean(x0)) if x0.size else np.nan,
-        "median_event_1": float(np.median(x1)) if x1.size else np.nan,
-        "median_event_0": float(np.median(x0)) if x0.size else np.nan,
-        "welch_p": welch_p,
-        "mannwhitney_p": mw_p,
-        "cliffs_delta": delta,
+        "statistic": odds_ratio,
+        "p_value": fisher_p,
+        "chi2_p_value": chi2_p,
     }
 
 
@@ -520,7 +664,7 @@ def describe_selected_covariates(
     return out
 
 
-# Save a simple bar plot of event rates by days_in_state for the main event processes.
+# Save a simple line plot of event rates by days_in_state for the main event processes.
 def plot_event_rates(cauti_day: pd.DataFrame, reinsertion_day: pd.DataFrame, outdir: Path) -> None:
     fig, ax = plt.subplots(figsize=(8, 5))
     in_rows = cauti_day[cauti_day[STATE_COL] == "in"]
@@ -542,12 +686,9 @@ def plot_event_rates(cauti_day: pd.DataFrame, reinsertion_day: pd.DataFrame, out
 
 # Save a simple age-group bar plot for late removal.
 def plot_age_group_late_removal(df_in: pd.DataFrame, outdir: Path) -> None:
-    tmp = df_in.copy()
-    tmp["age_ge_70"] = (tmp["age"] >= AGE_THRESHOLD).astype(int)
-    tmp["late_removal_today"] = ((tmp[ACTION_COL] == 1) & (tmp[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype(int)
-    rates = tmp.groupby("age_ge_70")["late_removal_today"].mean().reindex([0, 1])
+    rates = df_in.groupby(AGE_GROUP_COL)[LATE_REMOVAL_COL].mean().reindex([0, 1])
     fig, ax = plt.subplots(figsize=(6, 4))
-    ax.bar(["<70", "≥70"], rates.fillna(0).to_numpy(dtype=float))
+    ax.bar([f"<{AGE_THRESHOLD}", f"≥{AGE_THRESHOLD}"], rates.fillna(0).to_numpy(dtype=float))
     ax.set_ylabel("late removal rate")
     ax.set_title(f"Late removal (day ≥ {LATE_REMOVAL_DAY_THRESHOLD}) by age group")
     fig.tight_layout()
@@ -581,13 +722,15 @@ def main() -> None:
 
     itemid_to_label = load_item_labels(D_ITEMS_PATH)
     cov_meta["label"] = cov_meta["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
-    cov_meta["pretty_name"] = cov_meta.apply(lambda r: make_pretty_name(str(r["label"]), str(r["stat"])), axis=1)
+    cov_meta["pretty_name"] = cov_meta["label"].astype(str) + " [" + cov_meta["stat"].astype(str) + "]"
     covariate_name_map = dict(zip(cov_meta["col"], cov_meta["pretty_name"]))
     pretty_to_raw = {v: k for k, v in covariate_name_map.items()}
 
-    numeric_cols = [TIME_COL, DAYS_COL, INTERVAL_COL, ACTION_COL, Y_CAUTI, Y_REINS, LAST_DAY_COL, "age", "hadm_id", "stay_id"] + cov_cols
+    numeric_cols = [
+        TIME_COL, DAYS_COL, INTERVAL_COL, ACTION_COL, Y_CAUTI, Y_REINS,
+        LAST_DAY_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE_NAME,
+    ] + cov_cols
     coerce_numeric(df, numeric_cols)
-    df[cov_cols] = df[cov_cols].fillna(np.nan)
 
     covariate_count = df[cov_cols].notna().sum(axis=1).astype("int32")
     age_numeric = pd.to_numeric(df["age"], errors="coerce")
@@ -595,9 +738,9 @@ def main() -> None:
 
     derived_cols = pd.DataFrame({
         "covariate_count": covariate_count,
-        "any_covariate": (covariate_count > 0).astype("int8"),
-        "age_ge_70": (age_numeric >= AGE_THRESHOLD).astype("int8"),
+        AGE_GROUP_COL: (age_numeric >= AGE_THRESHOLD).astype("int8"),
         "high_covariate_count": high_covariate_count,
+        LATE_REMOVAL_COL: ((df[ACTION_COL] == 1) & (df[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype("int8"),
     }, index=df.index)
 
     df = pd.concat([df, derived_cols], axis=1).copy()
@@ -609,6 +752,12 @@ def main() -> None:
 
     step1_top_model_features = load_step1_top_features(STEP1_TOP_MODEL_FEATURES_FILE)
     step1_top_shap_features = load_step1_top_features(STEP1_TOP_SHAP_FEATURES_FILE)
+
+    available_cols = set(df.columns)
+    removal_feature_col = resolve_required_feature_col(REMOVAL_FEATURE_NAME, pretty_to_raw, available_cols)
+    cauti_binary_feature_col = resolve_required_feature_col(CAUTI_BINARY_FEATURE_NAME, pretty_to_raw, available_cols)
+    cauti_continuous_feature_col = resolve_required_feature_col(CAUTI_CONTINUOUS_FEATURE_NAME, pretty_to_raw, available_cols)
+    reinsertion_feature_col = resolve_required_feature_col(REINSERTION_FEATURE_NAME, pretty_to_raw, available_cols)
 
     cov_meta.sort_values(["label", "itemid", "stat"]).to_csv(RESULTS_DIR / "00_covariate_dictionary.csv", index=False)
 
@@ -622,20 +771,19 @@ def main() -> None:
     cauti_day.round(DP).to_csv(RESULTS_DIR / "05_cauti_event_rates_by_state_and_day.csv", index=False)
     reinsertion_day.round(DP).to_csv(RESULTS_DIR / "06_reinsertion_event_rates_by_day.csv", index=False)
 
-    # Simple descriptive tables aligned to current panel structure.
-    in_rows = df[df[STATE_COL] == "in"].copy()
-    out_rows = df[df[STATE_COL] == "out"].copy()
-    cauti_rows = df[df["cauti_risk_row"] == 1].copy()
-    out_fit_rows = df[df["reinsertion_fit_row"] == 1].copy()
+    analysis_sets = {
+        "overall": df,
+        "in_rows": df.loc[df[STATE_COL] == "in"],
+        "out_rows": df.loc[df[STATE_COL] == "out"],
+        "cauti_risk_rows": df.loc[df["cauti_risk_row"] == 1],
+        "reinsertion_fit_rows": df.loc[df["reinsertion_fit_row"] == 1],
+    }
+    in_rows = analysis_sets["in_rows"]
+    cauti_rows = analysis_sets["cauti_risk_rows"]
+    out_fit_rows = analysis_sets["reinsertion_fit_rows"]
 
     desc_rows = []
-    for name, g in [
-        ("overall", df),
-        ("in_rows", in_rows),
-        ("out_rows", out_rows),
-        ("cauti_risk_rows", cauti_rows),
-        ("reinsertion_fit_rows", out_fit_rows),
-    ]:
+    for name, g in analysis_sets.items():
         desc_rows.append({
             "analysis_set": name,
             "rows": int(len(g)),
@@ -648,89 +796,50 @@ def main() -> None:
         })
     pd.DataFrame(desc_rows).round(DP).to_csv(RESULTS_DIR / "07_core_descriptives.csv", index=False)
 
-    # Example binary hypothesis tests for supervisor discussion.
-    binary_tests = pd.DataFrame([
-        binary_exposure_test(
-            in_rows,
-            in_rows["age_ge_70"],
-            ((in_rows[ACTION_COL] == 1) & (in_rows[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype(int),
-            test_name=f"Age ≥ {AGE_THRESHOLD} vs late removal today (day ≥ {LATE_REMOVAL_DAY_THRESHOLD})",
-            analysis_set="in_rows",
+    episode_df = build_episode_level_table(
+        df=df,
+        removal_feature_col=removal_feature_col,
+        cauti_binary_feature_col=cauti_binary_feature_col,
+        cauti_continuous_feature_col=cauti_continuous_feature_col,
+        reinsertion_feature_col=reinsertion_feature_col,
+    )
+    episode_df.to_csv(RESULTS_DIR / "08_episode_level_analysis_table.csv", index=False)
+
+    episode_tests = pd.DataFrame([
+        mannwhitney_group_test(
+            episode_df,
+            value_col=removal_feature_col,
+            group_col="late_removal_episode",
+            test_name=f"{REMOVAL_FEATURE_NAME} by late removal episode (catheter days >= {LATE_REMOVAL_DAY_THRESHOLD})",
+            analysis_set="episode_level",
         ),
-        binary_exposure_test(
-            in_rows,
-            in_rows["age_ge_70"],
-            in_rows[ACTION_COL],
-            test_name=f"Age ≥ {AGE_THRESHOLD} vs removal today",
-            analysis_set="in_rows",
+        binary_group_test(
+            episode_df,
+            exposure_col=cauti_binary_feature_col,
+            outcome_col="cauti_episode",
+            test_name=f"{CAUTI_BINARY_FEATURE_NAME} by CAUTI episode",
+            analysis_set="episode_level",
         ),
-        binary_exposure_test(
-            cauti_rows,
-            cauti_rows["age_ge_70"],
-            cauti_rows[Y_CAUTI],
-            test_name=f"Age ≥ {AGE_THRESHOLD} vs CAUTI today",
-            analysis_set="cauti_risk_rows",
+        mannwhitney_group_test(
+            episode_df,
+            value_col=cauti_continuous_feature_col,
+            group_col="cauti_episode",
+            test_name=f"{CAUTI_CONTINUOUS_FEATURE_NAME} by CAUTI episode",
+            analysis_set="episode_level",
         ),
-        binary_exposure_test(
-            out_fit_rows,
-            out_fit_rows["age_ge_70"],
-            out_fit_rows[Y_REINS],
-            test_name=f"Age ≥ {AGE_THRESHOLD} vs reinsertion today",
-            analysis_set="reinsertion_fit_rows",
-        ),
-        binary_exposure_test(
-            in_rows,
-            in_rows["high_covariate_count"],
-            ((in_rows[ACTION_COL] == 1) & (in_rows[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype(int),
-            test_name=f"High covariate count vs late removal today (day ≥ {LATE_REMOVAL_DAY_THRESHOLD})",
-            analysis_set="in_rows",
+        mannwhitney_group_test(
+            episode_df,
+            value_col=reinsertion_feature_col,
+            group_col="reinsertion_episode",
+            test_name=f"{REINSERTION_FEATURE_NAME} by reinsertion episode",
+            analysis_set="episode_level",
         ),
     ])
-    binary_tests["fisher_p_adj_bh"] = p_adjust_bh(binary_tests["fisher_p"])
-    binary_tests.round(DP).to_csv(RESULTS_DIR / "08_binary_hypothesis_tests.csv", index=False)
+    episode_tests["p_value_adj_bh"] = p_adjust_bh(episode_tests["p_value"])
+    episode_tests["p_value"] = episode_tests["p_value"].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
+    episode_tests["p_value_adj_bh"] = episode_tests["p_value_adj_bh"].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
+    episode_tests.to_csv(RESULTS_DIR / "09_episode_hypothesis_tests.csv", index=False)
 
-    # Continuous-variable examples for the same outcomes.
-    continuous_tests = pd.DataFrame([
-        continuous_group_test(
-            in_rows.assign(late_removal_today=((in_rows[ACTION_COL] == 1) & (in_rows[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype(int)),
-            value_col="age",
-            outcome_col="late_removal_today",
-            test_name=f"Age by late removal today (day ≥ {LATE_REMOVAL_DAY_THRESHOLD})",
-            analysis_set="in_rows",
-        ),
-        continuous_group_test(
-            in_rows,
-            value_col="age",
-            outcome_col=ACTION_COL,
-            test_name="Age by removal today",
-            analysis_set="in_rows",
-        ),
-        continuous_group_test(
-            cauti_rows,
-            value_col="age",
-            outcome_col=Y_CAUTI,
-            test_name="Age by CAUTI today",
-            analysis_set="cauti_risk_rows",
-        ),
-        continuous_group_test(
-            out_fit_rows,
-            value_col="age",
-            outcome_col=Y_REINS,
-            test_name="Age by reinsertion today",
-            analysis_set="reinsertion_fit_rows",
-        ),
-        continuous_group_test(
-            in_rows.assign(late_removal_today=((in_rows[ACTION_COL] == 1) & (in_rows[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype(int)),
-            value_col="covariate_count",
-            outcome_col="late_removal_today",
-            test_name=f"Covariate count by late removal today (day ≥ {LATE_REMOVAL_DAY_THRESHOLD})",
-            analysis_set="in_rows",
-        ),
-    ])
-    continuous_tests["mannwhitney_p_adj_bh"] = p_adjust_bh(continuous_tests["mannwhitney_p"])
-    continuous_tests.round(DP).to_csv(RESULTS_DIR / "09_continuous_hypothesis_tests.csv", index=False)
-
-    # Univariable covariate screening, top signals only, to keep the output tidy.
     top_removal = top_covariate_screen(
         df=in_rows,
         covariates=cov_cols,
@@ -759,54 +868,32 @@ def main() -> None:
         RESULTS_DIR / "10_top_univariable_covariate_signals.csv", index=False
     )
 
-    # Describe the influential features loaded from Step 1 model and SHAP CSVs.
     xgb_desc_parts = []
+    model_describe_configs = [
+        ("removal", "in_rows"),
+        ("cauti", "cauti_risk_rows"),
+        ("reinsertion", "reinsertion_fit_rows"),
+    ]
+    available_cols = set(df.columns)
 
     for feature_source, step1_features in [
         ("model_importance", step1_top_model_features),
         ("shap_importance", step1_top_shap_features),
     ]:
-        removal_feature_names = get_step1_feature_names(step1_features, "removal")
-        cauti_feature_names = get_step1_feature_names(step1_features, "cauti")
-        reinsertion_feature_names = get_step1_feature_names(step1_features, "reinsertion")
-
-        removal_top_cols = resolve_feature_cols(removal_feature_names, pretty_to_raw, set(df.columns))
-        cauti_top_cols = resolve_feature_cols(cauti_feature_names, pretty_to_raw, set(df.columns))
-        reinsertion_top_cols = resolve_feature_cols(reinsertion_feature_names, pretty_to_raw, set(df.columns))
-
-        xgb_desc_parts.append(
-            describe_selected_covariates(
-                df=in_rows,
-                value_cols=removal_top_cols,
-                pretty_name_map=covariate_name_map,
-                analysis_set_name="in_rows",
-                model_name="removal",
-                feature_source=feature_source,
-                dp=DP,
+        for model_name, analysis_set_name in model_describe_configs:
+            feature_names = get_step1_feature_names(step1_features, model_name)
+            value_cols = resolve_feature_cols(feature_names, pretty_to_raw, available_cols)
+            xgb_desc_parts.append(
+                describe_selected_covariates(
+                    df=analysis_sets[analysis_set_name],
+                    value_cols=value_cols,
+                    pretty_name_map=covariate_name_map,
+                    analysis_set_name=analysis_set_name,
+                    model_name=model_name,
+                    feature_source=feature_source,
+                    dp=DP,
+                )
             )
-        )
-        xgb_desc_parts.append(
-            describe_selected_covariates(
-                df=cauti_rows,
-                value_cols=cauti_top_cols,
-                pretty_name_map=covariate_name_map,
-                analysis_set_name="cauti_risk_rows",
-                model_name="cauti",
-                feature_source=feature_source,
-                dp=DP,
-            )
-        )
-        xgb_desc_parts.append(
-            describe_selected_covariates(
-                df=out_fit_rows,
-                value_cols=reinsertion_top_cols,
-                pretty_name_map=covariate_name_map,
-                analysis_set_name="reinsertion_fit_rows",
-                model_name="reinsertion",
-                feature_source=feature_source,
-                dp=DP,
-            )
-        )
 
     pd.concat(xgb_desc_parts, ignore_index=True).to_csv(
         RESULTS_DIR / "11_xgb_influential_covariate_descriptives.csv",
@@ -827,6 +914,12 @@ def main() -> None:
         "n_covariates": int(len(cov_cols)),
         "late_removal_threshold_day": int(LATE_REMOVAL_DAY_THRESHOLD),
         "age_threshold": int(AGE_THRESHOLD),
+        "episode_test_features": {
+            "removal_feature": REMOVAL_FEATURE_NAME,
+            "cauti_binary_feature": CAUTI_BINARY_FEATURE_NAME,
+            "cauti_continuous_feature": CAUTI_CONTINUOUS_FEATURE_NAME,
+            "reinsertion_feature": REINSERTION_FEATURE_NAME,
+        },
         "outputs": [
             "00_covariate_dictionary.csv",
             "01_cohort_overview.csv",
@@ -836,8 +929,8 @@ def main() -> None:
             "05_cauti_event_rates_by_state_and_day.csv",
             "06_reinsertion_event_rates_by_day.csv",
             "07_core_descriptives.csv",
-            "08_binary_hypothesis_tests.csv",
-            "09_continuous_hypothesis_tests.csv",
+            "08_episode_level_analysis_table.csv",
+            "09_episode_hypothesis_tests.csv",
             "10_top_univariable_covariate_signals.csv",
             "11_xgb_influential_covariate_descriptives.csv",
             "plot_event_rates_by_days_in_state.png",
@@ -846,10 +939,11 @@ def main() -> None:
     }
     (RESULTS_DIR / "analysis_manifest.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    print(f"[DONE] Outputs saved to: {RESULTS_DIR}")
-    print(f"[INFO] N covariates analysed: {len(cov_cols)}")
-    print(f"[INFO] Late removal threshold: day >= {LATE_REMOVAL_DAY_THRESHOLD}")
-    print(f"[INFO] Age threshold for example tests: >= {AGE_THRESHOLD}")
+    print(f"Outputs saved to: {RESULTS_DIR}")
+    print(f"Number of covariates analysed: {len(cov_cols)}")
+    print(f"Late removal threshold: day >= {LATE_REMOVAL_DAY_THRESHOLD}")
+    print(f"Age threshold for grouping plot: >= {AGE_THRESHOLD}")
+    print("Episode-level hypothesis tests saved to: 09_episode_hypothesis_tests.csv")
 
 
 if __name__ == "__main__":
