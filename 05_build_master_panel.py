@@ -20,6 +20,7 @@ import pandas as pd
 # Configuration constants
 
 MIMIC_DIR = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1")
+CLEANED_CHART_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\cleaned_chart_covariates.csv")
 PATIENT_DAY_SECONDS = 86400
 FOLEY_ITEMID = 229351
 CHUNK_ROWS_CHARTEVENTS = 1_000_000
@@ -349,16 +350,15 @@ def main():
 
     print("[EHR] Aggregating chartevents covariates...")
 
-    usecols_ce = ["stay_id", "itemid", "charttime", "valuenum", "value"]
+    usecols_ce = ["stay_id", "itemid", "charttime", "valuenum"]
     partial_stats = []
 
-    p_chartevents = MIMIC_DIR / "icu/chartevents.csv"
     kept_rows_total = 0
     chunk_idx = 0
     t0 = time.time()
 
     for chunk in pd.read_csv(
-        p_chartevents,
+        CLEANED_CHART_FILE,
         usecols=usecols_ce,
         chunksize=CHUNK_ROWS_CHARTEVENTS,
         low_memory=False,
@@ -373,8 +373,6 @@ def main():
 
         chunk_filtered["charttime"] = pd.to_datetime(chunk_filtered["charttime"], errors="coerce")
         chunk_filtered["valuenum"] = pd.to_numeric(chunk_filtered["valuenum"], errors="coerce")
-        fallback_values = pd.to_numeric(chunk_filtered["value"], errors="coerce")
-        chunk_filtered["valuenum"] = chunk_filtered["valuenum"].fillna(fallback_values)
 
         chunk_filtered = chunk_filtered.dropna(subset=["stay_id", "itemid", "charttime", "valuenum"])
         if len(chunk_filtered) == 0:

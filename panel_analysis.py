@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import json
 import re
 import numpy as np
 import pandas as pd
@@ -12,7 +11,7 @@ import matplotlib.pyplot as plt
 
 # Config
 DATA_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\filtered_panel.csv")
-RESULTS_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\00_panel_analysis")
+RESULTS_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\panel_analysis")
 D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
 
 STEP1_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
@@ -42,10 +41,10 @@ POST_REMOVE_RISK_DAYS = 2
 LATE_REMOVAL_COL = "late_removal_today"
 AGE_GROUP_COL = "age_ge_threshold"
 
-REMOVAL_FEATURE_NAME = "GCS - Verbal Response [mean]"
-CAUTI_BINARY_FEATURE_NAME = "sex_M"
-CAUTI_CONTINUOUS_FEATURE_NAME = "Anion gap [mean]"
-REINSERTION_FEATURE_NAME = "Bladder Scan Estimate [mean]"
+REMOVAL_FEATURE = "GCS - Verbal Response [mean]"
+CAUTI_BINARY_FEATURE = "sex_M"
+CAUTI_CONTINUOUS_FEATURE = "Anion gap [mean]"
+REINSERTION_FEATURE = "Bladder Scan Estimate [mean]"
 
 
 # Detect columns like itemid_<ID>__mean/min/max and return the matching columns plus metadata.
@@ -260,6 +259,10 @@ def build_overview_tables(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
         {"metric": "all_rows", "value": int(len(df))},
         {"metric": "in_rows", "value": int((df[STATE_COL] == "in").sum())},
         {"metric": "out_rows", "value": int((df[STATE_COL] == "out").sum())},
+        {
+            "metric": "out_rows_days_in_state_le_2",
+            "value": int(((df[STATE_COL] == "out") & (df[DAYS_COL] <= POST_REMOVE_RISK_DAYS)).sum()),
+        },
         {"metric": "cauti_risk_rows", "value": int(df["cauti_risk_row"].sum())},
         {"metric": "removal_fit_rows", "value": int(df["removal_fit_row"].sum())},
         {"metric": "reinsertion_fit_rows", "value": int(df["reinsertion_fit_row"].sum())},
@@ -308,10 +311,10 @@ def resolve_required_feature_col(
 # Collapse the panel to one row per catheter episode for simple episode-level testing.
 def build_episode_level_table(
     df: pd.DataFrame,
-    removal_feature_col: str,
-    cauti_binary_feature_col: str,
-    cauti_continuous_feature_col: str,
-    reinsertion_feature_col: str,
+    removal_feature: str,
+    cauti_binary_feature: str,
+    cauti_continuous_feature: str,
+    reinsertion_feature: str,
 ) -> pd.DataFrame:
     d = df.sort_values(EPISODE_KEYS + ["day_end"]).copy()
 
@@ -328,10 +331,10 @@ def build_episode_level_table(
             "late_removal_episode",
             "cauti_episode",
             "reinsertion_episode",
-            removal_feature_col,
-            cauti_binary_feature_col,
-            cauti_continuous_feature_col,
-            reinsertion_feature_col,
+            removal_feature,
+            cauti_binary_feature,
+            cauti_continuous_feature,
+            reinsertion_feature,
         ])
 
     episode_age = d.groupby(EPISODE_KEYS, dropna=False)["age"].first().rename("age")
@@ -365,27 +368,27 @@ def build_episode_level_table(
     )
 
     removal_feature_episode = (
-        in_rows.groupby(EPISODE_KEYS, dropna=False)[removal_feature_col]
+        in_rows.groupby(EPISODE_KEYS, dropna=False)[removal_feature]
         .median()
-        .rename(removal_feature_col)
+        .rename(removal_feature)
     )
 
     cauti_binary_feature_episode = (
-        d.groupby(EPISODE_KEYS, dropna=False)[cauti_binary_feature_col]
+        d.groupby(EPISODE_KEYS, dropna=False)[cauti_binary_feature]
         .first()
-        .rename(cauti_binary_feature_col)
+        .rename(cauti_binary_feature)
     )
 
     cauti_continuous_feature_episode = (
-        cauti_rows.groupby(EPISODE_KEYS, dropna=False)[cauti_continuous_feature_col]
+        cauti_rows.groupby(EPISODE_KEYS, dropna=False)[cauti_continuous_feature]
         .median()
-        .rename(cauti_continuous_feature_col)
+        .rename(cauti_continuous_feature)
     )
 
     reinsertion_feature_episode = (
-        reinsertion_rows.groupby(EPISODE_KEYS, dropna=False)[reinsertion_feature_col]
+        reinsertion_rows.groupby(EPISODE_KEYS, dropna=False)[reinsertion_feature]
         .median()
-        .rename(reinsertion_feature_col)
+        .rename(reinsertion_feature)
     )
 
     out = pd.concat(
@@ -411,16 +414,16 @@ def build_episode_level_table(
         "late_removal_episode",
         "cauti_episode",
         "reinsertion_episode",
-        removal_feature_col,
-        cauti_binary_feature_col,
-        cauti_continuous_feature_col,
-        reinsertion_feature_col,
+        removal_feature,
+        cauti_binary_feature,
+        cauti_continuous_feature,
+        reinsertion_feature,
     ]
     for col in numeric_cols:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    for col in ["late_removal_episode", "cauti_episode", "reinsertion_episode", cauti_binary_feature_col]:
+    for col in ["late_removal_episode", "cauti_episode", "reinsertion_episode", cauti_binary_feature]:
         if col in out.columns:
             out[col] = out[col].fillna(0).clip(0, 1).astype("int8")
 
@@ -626,7 +629,7 @@ def resolve_feature_cols(
 def describe_selected_covariates(
     df: pd.DataFrame,
     value_cols: list[str],
-    pretty_name_map: dict[str, str],
+    description_map: dict[str, str],
     analysis_set_name: str,
     model_name: str,
     feature_source: str,
@@ -645,7 +648,7 @@ def describe_selected_covariates(
             "model": model_name,
             "feature_source": feature_source,
             "analysis_set": analysis_set_name,
-            "covariate": pretty_name_map.get(col, col),
+            "covariate": description_map.get(col, col),
             "col": col,
             "N": n,
             "mean": float(s.mean()) if n else np.nan,
@@ -722,13 +725,13 @@ def main() -> None:
 
     itemid_to_label = load_item_labels(D_ITEMS_PATH)
     cov_meta["label"] = cov_meta["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
-    cov_meta["pretty_name"] = cov_meta["label"].astype(str) + " [" + cov_meta["stat"].astype(str) + "]"
-    covariate_name_map = dict(zip(cov_meta["col"], cov_meta["pretty_name"]))
+    cov_meta["description"] = cov_meta["label"].astype(str) + " [" + cov_meta["stat"].astype(str) + "]"
+    covariate_name_map = dict(zip(cov_meta["col"], cov_meta["description"]))
     pretty_to_raw = {v: k for k, v in covariate_name_map.items()}
 
     numeric_cols = [
         TIME_COL, DAYS_COL, INTERVAL_COL, ACTION_COL, Y_CAUTI, Y_REINS,
-        LAST_DAY_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE_NAME,
+        LAST_DAY_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
     ] + cov_cols
     coerce_numeric(df, numeric_cols)
 
@@ -754,10 +757,10 @@ def main() -> None:
     step1_top_shap_features = load_step1_top_features(STEP1_TOP_SHAP_FEATURES_FILE)
 
     available_cols = set(df.columns)
-    removal_feature_col = resolve_required_feature_col(REMOVAL_FEATURE_NAME, pretty_to_raw, available_cols)
-    cauti_binary_feature_col = resolve_required_feature_col(CAUTI_BINARY_FEATURE_NAME, pretty_to_raw, available_cols)
-    cauti_continuous_feature_col = resolve_required_feature_col(CAUTI_CONTINUOUS_FEATURE_NAME, pretty_to_raw, available_cols)
-    reinsertion_feature_col = resolve_required_feature_col(REINSERTION_FEATURE_NAME, pretty_to_raw, available_cols)
+    removal_feature = resolve_required_feature_col(REMOVAL_FEATURE, pretty_to_raw, available_cols)
+    cauti_binary_feature = resolve_required_feature_col(CAUTI_BINARY_FEATURE, pretty_to_raw, available_cols)
+    cauti_continuous_feature = resolve_required_feature_col(CAUTI_CONTINUOUS_FEATURE, pretty_to_raw, available_cols)
+    reinsertion_feature = resolve_required_feature_col(REINSERTION_FEATURE, pretty_to_raw, available_cols)
 
     cov_meta.sort_values(["label", "itemid", "stat"]).to_csv(RESULTS_DIR / "00_covariate_dictionary.csv", index=False)
 
@@ -782,63 +785,64 @@ def main() -> None:
     cauti_rows = analysis_sets["cauti_risk_rows"]
     out_fit_rows = analysis_sets["reinsertion_fit_rows"]
 
-    desc_rows = []
-    for name, g in analysis_sets.items():
-        desc_rows.append({
-            "analysis_set": name,
-            "rows": int(len(g)),
-            "mean_age": float(pd.to_numeric(g["age"], errors="coerce").mean()),
-            "median_age": float(pd.to_numeric(g["age"], errors="coerce").median()),
-            "mean_days_in_state": float(pd.to_numeric(g[DAYS_COL], errors="coerce").mean()),
-            "median_days_in_state": float(pd.to_numeric(g[DAYS_COL], errors="coerce").median()),
-            "mean_interval_hours": float(pd.to_numeric(g[INTERVAL_COL], errors="coerce").mean()),
-            "mean_covariate_count": float(pd.to_numeric(g["covariate_count"], errors="coerce").mean()),
-        })
-    pd.DataFrame(desc_rows).round(DP).to_csv(RESULTS_DIR / "07_core_descriptives.csv", index=False)
-
     episode_df = build_episode_level_table(
         df=df,
-        removal_feature_col=removal_feature_col,
-        cauti_binary_feature_col=cauti_binary_feature_col,
-        cauti_continuous_feature_col=cauti_continuous_feature_col,
-        reinsertion_feature_col=reinsertion_feature_col,
+        removal_feature=removal_feature,
+        cauti_binary_feature=cauti_binary_feature,
+        cauti_continuous_feature=cauti_continuous_feature,
+        reinsertion_feature=reinsertion_feature,
     )
-    episode_df.to_csv(RESULTS_DIR / "08_episode_level_analysis_table.csv", index=False)
+    episode_df_export = episode_df.copy()
+    episode_feature_cols = [
+        removal_feature,
+        cauti_continuous_feature,
+        reinsertion_feature,
+    ]
+    for col in episode_feature_cols:
+        if col in episode_df_export.columns:
+            episode_df_export[col] = pd.to_numeric(episode_df_export[col], errors="coerce").round(DP)
+    episode_df_export.to_csv(RESULTS_DIR / "08_episode_level_analysis_table.csv", index=False)
 
     episode_tests = pd.DataFrame([
         mannwhitney_group_test(
             episode_df,
-            value_col=removal_feature_col,
+            value_col=removal_feature,
             group_col="late_removal_episode",
-            test_name=f"{REMOVAL_FEATURE_NAME} by late removal episode (catheter days >= {LATE_REMOVAL_DAY_THRESHOLD})",
+            test_name=f"{REMOVAL_FEATURE} by late removal episode (catheter days >= {LATE_REMOVAL_DAY_THRESHOLD})",
             analysis_set="episode_level",
         ),
         binary_group_test(
             episode_df,
-            exposure_col=cauti_binary_feature_col,
+            exposure_col=cauti_binary_feature,
             outcome_col="cauti_episode",
-            test_name=f"{CAUTI_BINARY_FEATURE_NAME} by CAUTI episode",
+            test_name=f"{CAUTI_BINARY_FEATURE} by CAUTI episode",
             analysis_set="episode_level",
         ),
         mannwhitney_group_test(
             episode_df,
-            value_col=cauti_continuous_feature_col,
+            value_col=cauti_continuous_feature,
             group_col="cauti_episode",
-            test_name=f"{CAUTI_CONTINUOUS_FEATURE_NAME} by CAUTI episode",
+            test_name=f"{CAUTI_CONTINUOUS_FEATURE} by CAUTI episode",
             analysis_set="episode_level",
         ),
         mannwhitney_group_test(
             episode_df,
-            value_col=reinsertion_feature_col,
+            value_col=reinsertion_feature,
             group_col="reinsertion_episode",
-            test_name=f"{REINSERTION_FEATURE_NAME} by reinsertion episode",
+            test_name=f"{REINSERTION_FEATURE} by reinsertion episode",
             analysis_set="episode_level",
         ),
     ])
     episode_tests["p_value_adj_bh"] = p_adjust_bh(episode_tests["p_value"])
-    episode_tests["p_value"] = episode_tests["p_value"].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
-    episode_tests["p_value_adj_bh"] = episode_tests["p_value_adj_bh"].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
-    episode_tests.to_csv(RESULTS_DIR / "09_episode_hypothesis_tests.csv", index=False)
+    episode_tests_export = episode_tests.copy()
+    numeric_cols = [
+        col for col in episode_tests_export.select_dtypes(include=[np.number]).columns
+        if col not in {"p_value", "p_value_adj_bh"}
+    ]
+    episode_tests_export[numeric_cols] = episode_tests_export[numeric_cols].round(DP)
+    episode_tests_export["p_value"] = episode_tests["p_value"].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
+    episode_tests_export["p_value_adj_bh"] = episode_tests["p_value_adj_bh"].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
+    episode_tests_export.to_csv(RESULTS_DIR / "09_episode_hypothesis_tests.csv", index=False)
 
     top_removal = top_covariate_screen(
         df=in_rows,
@@ -864,9 +868,12 @@ def main() -> None:
         analysis_set="cauti_risk_rows_cauti_today",
         top_n=TOP_N_COVARIATES,
     )
-    pd.concat([top_removal, top_reins, top_cauti], ignore_index=True).round(DP).to_csv(
-        RESULTS_DIR / "10_top_univariable_covariate_signals.csv", index=False
-    )
+    top_signals = pd.concat([top_removal, top_reins, top_cauti], ignore_index=True)
+    top_signals_export = top_signals.round(DP).copy()
+    for col in ["mannwhitney_p", "mannwhitney_p_adj_bh"]:
+        if col in top_signals_export.columns:
+            top_signals_export[col] = top_signals[col].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
+    top_signals_export.to_csv(RESULTS_DIR / "10_top_univariable_covariate_signals.csv", index=False)
 
     xgb_desc_parts = []
     model_describe_configs = [
@@ -887,7 +894,7 @@ def main() -> None:
                 describe_selected_covariates(
                     df=analysis_sets[analysis_set_name],
                     value_cols=value_cols,
-                    pretty_name_map=covariate_name_map,
+                    description_map=covariate_name_map,
                     analysis_set_name=analysis_set_name,
                     model_name=model_name,
                     feature_source=feature_source,
@@ -902,42 +909,6 @@ def main() -> None:
 
     plot_event_rates(cauti_day, reinsertion_day, RESULTS_DIR)
     plot_age_group_late_removal(in_rows, RESULTS_DIR)
-
-    summary = {
-        "data_file": str(DATA_FILE),
-        "results_dir": str(RESULTS_DIR),
-        "step1_top_model_features_file": str(STEP1_TOP_MODEL_FEATURES_FILE),
-        "step1_top_shap_features_file": str(STEP1_TOP_SHAP_FEATURES_FILE),
-        "n_rows": int(len(df)),
-        "n_patients": int(df[ID_COL].nunique()),
-        "n_episodes": int(df[EPISODE_KEYS].drop_duplicates().shape[0]),
-        "n_covariates": int(len(cov_cols)),
-        "late_removal_threshold_day": int(LATE_REMOVAL_DAY_THRESHOLD),
-        "age_threshold": int(AGE_THRESHOLD),
-        "episode_test_features": {
-            "removal_feature": REMOVAL_FEATURE_NAME,
-            "cauti_binary_feature": CAUTI_BINARY_FEATURE_NAME,
-            "cauti_continuous_feature": CAUTI_CONTINUOUS_FEATURE_NAME,
-            "reinsertion_feature": REINSERTION_FEATURE_NAME,
-        },
-        "outputs": [
-            "00_covariate_dictionary.csv",
-            "01_cohort_overview.csv",
-            "02_state_overview.csv",
-            "03_event_overview.csv",
-            "04_risk_set_summary.csv",
-            "05_cauti_event_rates_by_state_and_day.csv",
-            "06_reinsertion_event_rates_by_day.csv",
-            "07_core_descriptives.csv",
-            "08_episode_level_analysis_table.csv",
-            "09_episode_hypothesis_tests.csv",
-            "10_top_univariable_covariate_signals.csv",
-            "11_xgb_influential_covariate_descriptives.csv",
-            "plot_event_rates_by_days_in_state.png",
-            "plot_late_removal_by_age_group.png",
-        ],
-    }
-    (RESULTS_DIR / "analysis_manifest.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print(f"Outputs saved to: {RESULTS_DIR}")
     print(f"Number of covariates analysed: {len(cov_cols)}")

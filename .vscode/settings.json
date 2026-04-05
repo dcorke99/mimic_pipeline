@@ -1,0 +1,8 @@
+{
+  "python.terminal.activateEnvironment": true,
+  "python.debugpy.debugJustMyCode": true,
+  "code-runner.runInTerminal": true,
+  "code-runner.executorMap": {
+    "python": "\"${command:python.interpreterPath}\" -u"
+  }
+}

@@ -505,21 +505,31 @@ def main() -> None:
     X_cols_cauti = [TIME_COL, DAYS_COL, "state_is_out", *feat]
     X_cols_reins = [DAYS_COL, *feat]
 
-    # Collect all columns that must be numeric for downstream fitting/scoring.
-    X_cols_all = list(dict.fromkeys(
-        X_cols_remove + X_cols_cauti + X_cols_reins + [ACTION_COL, Y_CAUTI, Y_REINS, LAST_DAY_COL]
-    ))
+    # Coerce feature columns to numeric but KEEP missing values as NaN
+    # so the imputer + missingness indicators can work properly.
+    feature_cols_all = list(dict.fromkeys(X_cols_remove + X_cols_cauti + X_cols_reins))
 
-    # Coerce all model and target columns to numeric.
-    for col in X_cols_all:
+    for col in feature_cols_all:
         if df[col].dtype == object:
             df[col] = df[col].replace({
                 "TRUE": 1, "FALSE": 0,
                 "True": 1, "False": 0,
                 "true": 1, "false": 0,
             })
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Coerce true binary targets / flags to numeric and fill missing with 0.
+    target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, LAST_DAY_COL]
+
+    for col in target_flag_cols:
+        if df[col].dtype == object:
+            df[col] = df[col].replace({
+                "TRUE": 1, "FALSE": 0,
+                "True": 1, "False": 0,
+                "true": 1, "false": 0,
+            })
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    print("Feature missingness preserved:", int(df[feature_cols_all].isna().sum().sum()))
     # Create empty score columns that will later be filled by the fitted models.
     score_cols = pd.DataFrame(
         {
