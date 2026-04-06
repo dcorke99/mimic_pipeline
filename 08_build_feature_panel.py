@@ -1,13 +1,6 @@
 
 """
-00_build_step1_feature_panel.py
-
-Build a Step-1-ready feature panel from filtered_panel.csv.
-
-Purpose
--------
-Move deterministic preprocessing out of Step 1 so the modelling script does not
-silently create new predictor columns. This script:
+This script:
 
 1. Standardises key identifier/state columns
 2. Normalises the train/test split labels
@@ -19,22 +12,25 @@ silently create new predictor columns. This script:
 
 Outputs
 -------
-- data/step1_feature_panel.csv
-- artifacts/step1/step1_feature_spec.json
+- data/feature_panel.csv
+- data/feature_spec.json
 """
 
 from __future__ import annotations
 from pathlib import Path
 import json
+import re
 import pandas as pd
 
 
 # Global configuration
 INDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
-OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
+OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
 INFILE = INDIR / "filtered_panel.csv"
-OUTFILE = INDIR / "step1_feature_panel.csv"
-FEATURE_SPEC_FILE = OUTDIR / "step1_feature_spec.json"
+OUTFILE = INDIR / "feature_panel.csv"
+FEATURE_SPEC_FILE = OUTDIR / "feature_spec.json"
+COVARIATE_DICT_FILE = OUTDIR / "covariate_dictionary.csv"
+D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
 
 ID_COL = "subject_id"
 TIME_COL = "episode_index"
@@ -49,6 +45,7 @@ LAST_DAY_COL = "is_last_day_of_episode"
 END_REASON_COL = "episode_end_reason"
 
 POST_REMOVE_RISK_DAYS = 2
+KEEP_STATS = {"mean"}
 
 
 def _validate_split(df: pd.DataFrame) -> None:
@@ -115,6 +112,20 @@ def _build_missing_indicators(df: pd.DataFrame, cols: list[str]) -> tuple[pd.Dat
     return pd.concat(indicator_series, axis=1), indicator_cols
 
 
+def _detect_covariate_cols(columns: list[str], keep_stats: set[str]) -> pd.DataFrame:
+    pattern = re.compile(r"^itemid_(\d+)__(mean|min|max)$", flags=re.IGNORECASE)
+    rows = []
+    for col in columns:
+        match = pattern.match(str(col))
+        if not match:
+            continue
+        itemid = int(match.group(1))
+        stat = match.group(2).lower()
+        if stat in keep_stats:
+            rows.append({"col": col, "itemid": itemid, "stat": stat})
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
     OUTDIR.mkdir(exist_ok=True, parents=True)
 
@@ -154,6 +165,18 @@ def main() -> None:
 
     df.to_csv(OUTFILE, index=False)
 
+    covariate_dict = _detect_covariate_cols(df.columns.tolist(), KEEP_STATS)
+    d_items = pd.read_csv(D_ITEMS_PATH, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
+    d_items["itemid"] = pd.to_numeric(d_items["itemid"], errors="coerce")
+    d_items = d_items.dropna(subset=["itemid"])
+    d_items["itemid"] = d_items["itemid"].astype(int)
+    itemid_to_label = d_items.set_index("itemid")["label"].to_dict()
+    covariate_dict["label"] = covariate_dict["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
+    covariate_dict["description"] = covariate_dict["label"].astype(str) + " [" + covariate_dict["stat"].astype(str) + "]"
+    covariate_dict.sort_values(["label", "itemid", "stat"]).drop(columns=["stat", "description"]).to_csv(
+        COVARIATE_DICT_FILE, index=False
+    )
+
     spec = {
         "id_col": ID_COL,
         "time_col": TIME_COL,
@@ -177,12 +200,13 @@ def main() -> None:
     }
     FEATURE_SPEC_FILE.write_text(json.dumps(_json_ready(spec), indent=2), encoding="utf-8")
 
-    print(f"[SAVE] Step 1 feature panel: {OUTFILE}")
-    print(f"[SAVE] Step 1 feature spec: {FEATURE_SPEC_FILE}")
+    print(f"[SAVE] feature panel: {OUTFILE}")
+    print(f"[SAVE] feature spec: {FEATURE_SPEC_FILE}")
+    print(f"[SAVE] covariate dictionary: {COVARIATE_DICT_FILE}")
     print(f"Rows: {len(df)}")
     print(f"Base features: {len(base_feat)}")
     print(f"Missingness indicators created: {len(missing_indicator_cols)}")
-    print(f"Total Step 1 features: {len(feat)}")
+    print(f"Total features: {len(feat)}")
 
 
 if __name__ == "__main__":
