@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # Config
-DATA_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\filtered_panel.csv")
+DATA_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\step1_feature_panel.csv")
 RESULTS_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\panel_analysis")
 D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
 
@@ -728,6 +728,12 @@ def main() -> None:
     cov_meta["description"] = cov_meta["label"].astype(str) + " [" + cov_meta["stat"].astype(str) + "]"
     covariate_name_map = dict(zip(cov_meta["col"], cov_meta["description"]))
     pretty_to_raw = {v: k for k, v in covariate_name_map.items()}
+
+    missing_name_map = {
+        f"{raw_col}__missing": f"{desc} [missing]"
+        for raw_col, desc in covariate_name_map.items()
+    }
+    covariate_name_map.update(missing_name_map)
 
     numeric_cols = [
         TIME_COL, DAYS_COL, INTERVAL_COL, ACTION_COL, Y_CAUTI, Y_REINS,
