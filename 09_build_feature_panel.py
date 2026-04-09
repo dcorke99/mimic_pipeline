@@ -7,8 +7,7 @@ This script:
 3. Derives explicit model columns such as state_is_out
 4. Coerces predictor columns to numeric
 5. Coerces binary targets/flags to numeric 0/1
-6. Creates explicit missingness-indicator columns for predictor columns
-7. Saves a feature-panel CSV and a feature-spec JSON used by Step 1
+6. Saves a feature-panel CSV and a feature-spec JSON used by Step 1
 
 Outputs
 -------
@@ -88,32 +87,8 @@ def _json_ready(obj):
     if isinstance(obj, list):
         return [_json_ready(v) for v in obj]
     return obj
-
-
-def _build_missing_indicators(df: pd.DataFrame, cols: list[str]) -> tuple[pd.DataFrame, list[str]]:
-    indicator_series: list[pd.Series] = []
-    indicator_cols: list[str] = []
-
-    for col in cols:
-        if col not in df.columns:
-            continue
-        if col.endswith("__missing") or col.endswith("_missing"):
-            continue
-        if not df[col].isna().any():
-            continue
-
-        miss_col = f"{col}__missing"
-        indicator_series.append(df[col].isna().astype(int).rename(miss_col))
-        indicator_cols.append(miss_col)
-
-    if not indicator_series:
-        return pd.DataFrame(index=df.index), indicator_cols
-
-    return pd.concat(indicator_series, axis=1), indicator_cols
-
-
 def _detect_covariate_cols(columns: list[str], keep_stats: set[str]) -> pd.DataFrame:
-    pattern = re.compile(r"^itemid_(\d+)__(mean|min|max)$", flags=re.IGNORECASE)
+    pattern = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
     rows = []
     for col in columns:
         match = pattern.match(str(col))
@@ -148,12 +123,7 @@ def main() -> None:
     target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, LAST_DAY_COL]
     _coerce_numeric(df, target_flag_cols, fill_missing_with_zero=True)
 
-    missing_source_cols = base_feat + [TIME_COL, DAYS_COL]
-    missing_indicator_df, missing_indicator_cols = _build_missing_indicators(df, missing_source_cols)
-    if not missing_indicator_df.empty:
-        df = pd.concat([df, missing_indicator_df], axis=1)
-
-    feat = list(base_feat) + missing_indicator_cols
+    feat = list(base_feat)
     x_cols_remove = [TIME_COL, DAYS_COL, *feat]
     x_cols_cauti = [TIME_COL, DAYS_COL, "state_is_out", *feat]
     x_cols_reins = [DAYS_COL, *feat]
@@ -190,7 +160,6 @@ def main() -> None:
         "end_reason_col": END_REASON_COL,
         "post_remove_risk_days": POST_REMOVE_RISK_DAYS,
         "base_feature_cols": base_feat,
-        "missing_indicator_cols": missing_indicator_cols,
         "features": feat,
         "x_cols_remove": x_cols_remove,
         "x_cols_cauti": x_cols_cauti,
@@ -205,7 +174,6 @@ def main() -> None:
     print(f"[SAVE] covariate dictionary: {COVARIATE_DICT_FILE}")
     print(f"Rows: {len(df)}")
     print(f"Base features: {len(base_feat)}")
-    print(f"Missingness indicators created: {len(missing_indicator_cols)}")
     print(f"Total features: {len(feat)}")
 
 

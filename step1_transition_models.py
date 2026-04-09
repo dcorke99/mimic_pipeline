@@ -140,14 +140,28 @@ def _top_series_df(
 
 
 def _add_feature_descriptions(feature_df, covariate_dict):
-    covariate_desc = (
-        covariate_dict.assign(description=lambda x: x["label"].astype(str) + " [mean]")
-        .set_index("col")["description"]
-        .to_dict()
-    )
+    covariate_desc = {}
+
+    for row in covariate_dict.itertuples(index=False):
+        label = str(row.label)
+        covariate_desc[str(row.col)] = label
+
+        if hasattr(row, "itemid") and pd.notna(row.itemid):
+            itemid = int(row.itemid)
+            covariate_desc[f"itemid_{itemid}__mean"] = f"{label} [mean]"
+            covariate_desc[f"itemid_{itemid}__min"] = f"{label} [min]"
+            covariate_desc[f"itemid_{itemid}__max"] = f"{label} [max]"
+            covariate_desc[f"itemid_{itemid}__count"] = f"{label} [count]"
+            covariate_desc[f"itemid_{itemid}__std"] = f"{label} [std]"
+            covariate_desc[f"itemid_{itemid}__first"] = f"{label} [first]"
+            covariate_desc[f"itemid_{itemid}__last"] = f"{label} [last]"
+            covariate_desc[f"itemid_{itemid}__delta"] = f"{label} [delta]"
+            covariate_desc[f"itemid_{itemid}__range"] = f"{label} [range]"
+            covariate_desc[f"itemid_{itemid}__slope_per_hour"] = f"{label} [slope_per_hour]"
+
     covariate_desc.update({
-        f"{col}__missing": f"{description} [missing]"
-        for col, description in covariate_desc.items()
+        f"{feature}__missing": f"{description} [missing]"
+        for feature, description in list(covariate_desc.items())
     })
 
     feature_df = feature_df.copy()

@@ -32,13 +32,13 @@ REQUIRED_ITEMIDS = [
     220210,
     220546,
     227457,
-    223761,
+    223762,
     225668,
     225643,
 ]
 
 # Limit the summary to __mean columns only
-MEAN_ONLY = True
+MEAN_ONLY = False
 
 # Load the column names first so covariate columns can be selected cheaply.
 cols = pd.read_csv(DATASET_PATH, nrows=0).columns.tolist()
@@ -49,7 +49,7 @@ cols = pd.read_csv(DATASET_PATH, nrows=0).columns.tolist()
 if MEAN_ONLY:
     pat = re.compile(r"^itemid_(\d+)__mean$")
 else:
-    pat = re.compile(r"^itemid_(\d+)__(mean|min|max)$")
+    pat = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
 
 cov_cols = []
 itemids = []

@@ -13,9 +13,6 @@ SUMMARY_CSV = DATA_DIR / "covariate_retention_log.csv"
 OUT_DATASET = DATA_DIR / "filtered_panel.csv"
 SPLIT_CSV = DATA_DIR / "train_test_split.csv"
 
-# Covariate statistics to keep
-KEEP_STATS = ["mean"]
-
 # Decimal places for retained covariates
 ROUND_DP = 3
 
@@ -23,19 +20,6 @@ ROUND_DP = 3
 SUBJECT_ID_COL = "subject_id"
 TEST_SIZE = 0.20
 SEED = 42
-
-
-# Extract itemid and statistic name from a covariate column
-def parse_itemid_and_stat(col: str):
-    if not col.startswith("itemid_") or "__" not in col:
-        return None, None
-    left, stat = col.split("__", 1)
-    try:
-        itemid = int(left.split("_", 1)[1])
-        return itemid, stat.lower()
-    except (IndexError, ValueError):
-        return None, None
-
 
 # Create a patient-level train/test split
 def create_patient_split(df: pd.DataFrame) -> pd.DataFrame:
@@ -56,18 +40,13 @@ def create_patient_split(df: pd.DataFrame) -> pd.DataFrame:
 
 # Run the retention filter, round retained covariates, and assign train/test splits.
 def main():
-    keep_stats = [s.lower() for s in KEEP_STATS]
-
     # Load retain and drop decisions
     summary = pd.read_csv(SUMMARY_CSV, low_memory=False)
 
-    # Collect itemids marked for retention
-    # Build the retained itemid set from the selection log generated upstream.
-    retain_itemids = set(
-        summary.loc[
-            summary["decision"].astype(str).str.lower() == "retain", "itemid"
-        ].astype(int)
-    )
+    # Collect retained covariate columns directly from the selection log.
+    retained_cov_cols = summary.loc[
+        summary["decision"].astype(str).str.lower() == "retain", "column_name"
+    ].astype(str).tolist()
 
     # Load the master dataset
     df = pd.read_csv(MASTER_DATASET, low_memory=False)
@@ -79,12 +58,9 @@ def main():
     cov_cols = [c for c in df.columns if c.startswith("itemid_") and "__" in c]
     base_cols = [c for c in df.columns if c not in cov_cols]
 
-    # Keep retained covariates matching the requested statistics
-    kept_cov_cols = []
-    for c in cov_cols:
-        itemid, stat = parse_itemid_and_stat(c)
-        if itemid in retain_itemids and stat in keep_stats:
-            kept_cov_cols.append(c)
+    # Keep the retained covariate columns that are present in the dataset.
+    retained_cov_set = set(retained_cov_cols)
+    kept_cov_cols = [c for c in cov_cols if c in retained_cov_set]
 
     out_df = df[base_cols + kept_cov_cols].copy()
 
@@ -113,8 +89,7 @@ def main():
     test_rows = int((out_df["split"] == "test").sum())
 
     print(f"[READ]  {MASTER_DATASET} rows={len(df):,} cols={len(df.columns):,}")
-    print(f"[KEEP]  retained itemids={len(retain_itemids):,}")
-    print(f"[KEEP]  stats={keep_stats} covariate columns={len(kept_cov_cols):,}")
+    print(f"[KEEP]  retained covariate columns={len(kept_cov_cols):,}")
     print(f"[SPLIT] patients total={n_patients:,} train={n_train_patients:,} test={n_test_patients:,}")
     print(f"[SPLIT] rows train={train_rows:,} test={test_rows:,}")
     print(f"[WRITE] {OUT_DATASET} rows={len(out_df):,} cols={len(out_df.columns):,}")
