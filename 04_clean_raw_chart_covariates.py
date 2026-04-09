@@ -31,7 +31,7 @@ import pandas as pd
 
 DATADIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
 
-INFILE = DATADIR / "raw_chart_covariates.csv"
+INFILE = DATADIR / "preprocessed_raw_chart_covariates.csv"
 OUTFILE = DATADIR / "cleaned_chart_covariates.csv"
 RULES_OUTFILE = DATADIR / "chart_covariate_cleaning_rules.csv"
 AUDIT_OUTFILE = DATADIR / "chart_covariate_cleaning_audit.csv"

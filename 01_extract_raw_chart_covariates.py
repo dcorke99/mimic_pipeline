@@ -1,125 +1,115 @@
 """
 Extract raw chart-event covariates for the CAUTI analysis cohort.
 
-Creates a raw long-format chart-events file for the ICU stays that contribute
-catheter episodes to the downstream panel.
+Creates a raw long-format chart-events file restricted to the catheter episodes
+selected for the downstream panel by 00_identify_required_catheter_episodes.py.
 """
 
 from pathlib import Path
 import time
+
 import pandas as pd
 
-# Configuration constants
-
 MIMIC_DIR = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1")
-PATIENT_DAY_SECONDS = 86400
-FOLEY_ITEMID = 229351
+EPISODE_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\required_catheter_episodes.csv")
 CHUNK_ROWS_CHARTEVENTS = 1_000_000
+LOOKBACK_HOURS = 24
+SAMPLE_ROWS = 1000
 
 
-def collapse_foley_events(df):
-    episodes = []
+def build_chart_extraction_windows(
+    episodes: pd.DataFrame,
+    lookback_hours: int = LOOKBACK_HOURS,
+) -> pd.DataFrame:
+    # Start from the saved catheter-episode cohort.
+    windows = episodes.copy()
+    # End each extraction window at reinsertion if present, otherwise ICU discharge.
+    window_end = windows["reinsertion_time"].where(windows["reinsertion_time"].notna(), windows["ICU_out"])
+    # Begin each extraction window lookback_hours before insertion.
+    window_start = windows["inserted"] - pd.Timedelta(hours=lookback_hours)
+    # Cap the lookback at ICU admission time.
+    window_start = windows[["ICU_in"]].assign(window_start=window_start).max(axis=1)
 
-    for stay_id, stay_events in df.groupby("stay_id"):
-        stay_events = stay_events.sort_values("inserted")
+    # Store the computed bounds and drop rows without a valid interval.
+    windows = windows.assign(window_start=window_start, window_end=window_end)
+    windows = windows.dropna(subset=["window_start", "window_end"]).copy()
+    windows = windows[windows["window_end"] > windows["window_start"]].copy()
 
+    merged_windows = []
+
+    # Merge overlapping windows within each stay before scanning chartevents.
+    for stay_id, stay_windows in windows.groupby("stay_id"):
+        # Sort windows by start time within the stay.
+        stay_windows = stay_windows.sort_values("window_start")
         current_start = None
         current_end = None
 
-        for event in stay_events.itertuples():
+        for row in stay_windows.itertuples():
             if current_start is None:
-                current_start = event.inserted
-                current_end = event.removed
+                # Initialise the first merged window.
+                current_start = row.window_start
+                current_end = row.window_end
                 continue
 
-            if event.inserted <= current_end:
-                if pd.isna(current_end):
-                    current_end = event.removed
-                elif pd.notna(event.removed) and event.removed > current_end:
-                    current_end = event.removed
+            if row.window_start <= current_end:
+                # Extend the current merged window when windows overlap.
+                current_end = max(current_end, row.window_end)
             else:
-                episodes.append((stay_id, current_start, current_end))
-                current_start = event.inserted
-                current_end = event.removed
+                # Save the completed merged window and start a new one.
+                merged_windows.append((stay_id, current_start, current_end))
+                current_start = row.window_start
+                current_end = row.window_end
 
         if current_start is not None:
-            episodes.append((stay_id, current_start, current_end))
+            # Save the final merged window for the stay.
+            merged_windows.append((stay_id, current_start, current_end))
 
-    out = pd.DataFrame(episodes, columns=["stay_id", "inserted", "removed"])
-    return out
+    return pd.DataFrame(merged_windows, columns=["stay_id", "window_start", "window_end"])
 
 
-def main():
+def main() -> None:
     print("[CONFIG]", MIMIC_DIR)
 
-    icu = pd.read_csv(
-        MIMIC_DIR / "icu/icustays.csv",
-        usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime"]
-    )
+    # Read the saved catheter-episode cohort.
+    episodes = pd.read_csv(EPISODE_FILE, low_memory=False)
+    # Parse the episode timing columns used for window construction.
+    for col in ["inserted", "removed", "reinsertion_time", "ICU_in", "ICU_out"]:
+        episodes[col] = pd.to_datetime(episodes[col], errors="coerce")
 
-    icu["intime"] = pd.to_datetime(icu["intime"], errors="coerce")
-    icu["outtime"] = pd.to_datetime(icu["outtime"], errors="coerce")
-    icu = icu.dropna(subset=["stay_id", "intime", "outtime"])
+    # Build the per-stay chart extraction windows from the episode table.
+    windows = build_chart_extraction_windows(episodes)
 
-    print("[ICU stays]", len(icu))
-
-    procedure_events = pd.read_csv(
-        MIMIC_DIR / "icu/procedureevents.csv",
-        usecols=["subject_id", "hadm_id", "stay_id", "itemid", "starttime", "endtime"]
-    )
-
-    procedure_events = procedure_events[procedure_events["itemid"] == FOLEY_ITEMID]
-
-    procedure_events["starttime"] = pd.to_datetime(procedure_events["starttime"], errors="coerce")
-    procedure_events["endtime"] = pd.to_datetime(procedure_events["endtime"], errors="coerce")
-
-    procedure_events = procedure_events.merge(
-        icu[["stay_id", "subject_id", "hadm_id", "intime", "outtime"]],
-        on="stay_id",
-        how="left"
-    )
-
-    procedure_events = procedure_events.rename(columns={"intime": "ICU_in", "outtime": "ICU_out"})
-
-    procedure_events["inserted"] = procedure_events["starttime"]
-    procedure_events["removed"] = procedure_events["endtime"]
-    procedure_events.loc[procedure_events["removed"].isna(), "removed"] = procedure_events["ICU_out"]
-
-    procedure_events = procedure_events.dropna(subset=["inserted", "removed", "ICU_out"])
-    procedure_events = procedure_events.sort_values(["stay_id", "inserted"])
-
-    collapsed = collapse_foley_events(procedure_events)
-
-    catheterised = collapsed.merge(
-        icu[["stay_id", "subject_id", "hadm_id", "outtime"]],
-        on="stay_id"
-    )
-    catheterised = catheterised.rename(columns={"outtime": "ICU_out"})
-
-    episode_duration_seconds = (catheterised["removed"] - catheterised["inserted"]).dt.total_seconds()
-    catheterised = catheterised[episode_duration_seconds >= PATIENT_DAY_SECONDS]
-
-    print("[Catheter episodes]", len(catheterised))
-
-    stay_ids = set(catheterised["stay_id"].dropna().astype(int).unique())
-
+    print("[Catheter episodes]", len(episodes))
+    print("[Chart windows]", len(windows))
     print("[EHR] Extracting raw chartevents covariates...")
 
-    usecols_ce = ["subject_id", "hadm_id", "stay_id", "itemid", "charttime", "storetime", "valuenum", "value", "valueuom"]
+    # Read the chart-event columns needed for downstream cleaning and aggregation.
+    usecols_ce = [
+        "subject_id", "hadm_id", "stay_id", "itemid", "charttime",
+        "storetime", "valuenum", "value", "valueuom",
+    ]
 
+    # Create the output directory and reset any previous output file.
     outdir = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
     outdir.mkdir(exist_ok=True)
 
     outfile = outdir / "raw_chart_covariates.csv"
+    sample_outfile = outdir / "raw_chart_covariates__first_1000_rows.csv"
     if outfile.exists():
         outfile.unlink()
+    if sample_outfile.exists():
+        sample_outfile.unlink()
 
+    # Track the ICU stays that appear in the extraction windows.
+    stay_ids = set(windows["stay_id"].dropna().astype(int).unique())
     p_chartevents = MIMIC_DIR / "icu/chartevents.csv"
     kept_rows_total = 0
     chunk_idx = 0
     t0 = time.time()
     first_write = True
+    sample_rows_written = 0
 
+    # Stream chartevents in chunks to avoid loading the full file into memory.
     for chunk in pd.read_csv(
         p_chartevents,
         usecols=usecols_ce,
@@ -129,15 +119,39 @@ def main():
         chunk_idx += 1
         t_chunk0 = time.time()
 
+        # Restrict the chunk to stays that appear in the episode windows.
         chunk_filtered = chunk[chunk["stay_id"].isin(stay_ids)].copy()
+
+        if len(chunk_filtered) > 0:
+            # Parse chart timestamps before time-window filtering.
+            chunk_filtered["charttime"] = pd.to_datetime(chunk_filtered["charttime"], errors="coerce")
+            chunk_filtered["storetime"] = pd.to_datetime(chunk_filtered["storetime"], errors="coerce")
+
+            # Drop rows without the stay/time fields needed for matching.
+            chunk_filtered = chunk_filtered.dropna(subset=["stay_id", "charttime"]).copy()
+
+            if len(chunk_filtered) > 0:
+                # Join the chunk to the extraction windows by stay.
+                matched = chunk_filtered.merge(windows, on="stay_id", how="inner")
+                # Keep only chart rows that fall inside a valid extraction window.
+                matched = matched[
+                    (matched["charttime"] >= matched["window_start"]) &
+                    (matched["charttime"] < matched["window_end"])
+                ].copy()
+
+                if len(matched) > 0:
+                    # Restore the original output columns and drop duplicate matches.
+                    chunk_filtered = matched[usecols_ce].drop_duplicates()
+                else:
+                    # Replace with an empty frame when nothing matched the windows.
+                    chunk_filtered = chunk_filtered.iloc[0:0].copy()
+
+        # Track the number of extracted rows across chunks.
         kept = len(chunk_filtered)
         kept_rows_total += kept
 
         if kept > 0:
-            chunk_filtered["charttime"] = pd.to_datetime(chunk_filtered["charttime"], errors="coerce")
-            if "storetime" in chunk_filtered.columns:
-                chunk_filtered["storetime"] = pd.to_datetime(chunk_filtered["storetime"], errors="coerce")
-
+            # Write the first chunk with a header and append subsequent chunks.
             chunk_filtered.to_csv(
                 outfile,
                 mode="w" if first_write else "a",
@@ -146,13 +160,26 @@ def main():
             )
             first_write = False
 
+            # Write the first SAMPLE_ROWS extracted rows to a separate sample file.
+            if sample_rows_written < SAMPLE_ROWS:
+                sample_chunk = chunk_filtered.head(SAMPLE_ROWS - sample_rows_written).copy()
+                sample_chunk.to_csv(
+                    sample_outfile,
+                    mode="w" if sample_rows_written == 0 else "a",
+                    header=sample_rows_written == 0,
+                    index=False,
+                )
+                sample_rows_written += len(sample_chunk)
+
         print(
             f"[EHR][{chunk_idx}] read={len(chunk):,} keep={kept:,} "
             f"cum_keep={kept_rows_total:,} dt={time.time()-t_chunk0:.1f}s"
         )
 
+    # Print the final extraction summary.
     print(f"[EHR] Raw chart covariates extracted. Total time: {time.time()-t0:.1f}s")
     print("[SAVE]", outfile)
+    print("[SAVE SAMPLE]", sample_outfile)
     print("Rows:", kept_rows_total)
     print("[DONE]")
 

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
 
 # Config
-DATA_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\raw_chart_covariates.csv")
+DATA_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\preprocessed_raw_chart_covariates.csv")
 OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
 D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
 
@@ -20,6 +20,7 @@ D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_i
 BOUNDS_FILE = OUTDIR / "panel_covariate_bounds.csv"
 
 DP = 3
+CHUNK_ROWS = 1_000_000
 
 
 # Load d_items labels for readability.
@@ -65,27 +66,23 @@ def load_bounds(bounds_file: Path) -> dict[int, tuple[float, float]]:
 
 
 # Build the raw long-format audit table.
-def build_raw_value_audit(
-    df: pd.DataFrame,
+def build_raw_value_audit_from_parts(
+    value_parts: dict[int, list[pd.Series]],
+    row_counts: dict[int, int],
+    unit_counts_by_itemid: dict[int, dict[str, int]],
     itemid_to_label: dict[int, str],
     bounds_by_itemid: dict[int, tuple[float, float]],
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
 
-    grouped = df.groupby("itemid", dropna=False)
+    for itemid in sorted(row_counts):
+        non_missing = (
+            pd.concat(value_parts[itemid], ignore_index=True)
+            if value_parts[itemid]
+            else pd.Series(dtype=float)
+        )
 
-    for itemid, g in grouped:
-        if pd.isna(itemid):
-            continue
-
-        itemid_num = pd.to_numeric(pd.Series([itemid]), errors="coerce").iloc[0]
-        if pd.isna(itemid_num):
-            continue
-        itemid = int(itemid_num)
-        s = pd.to_numeric(g["valuenum"], errors="coerce")
-        non_missing = s.dropna()
-
-        rows_for_itemid = int(len(g))
+        rows_for_itemid = int(row_counts[itemid])
         non_missing_n = int(non_missing.shape[0])
         pct_missing = float((1.0 - (non_missing_n / rows_for_itemid)) * 100.0) if rows_for_itemid > 0 else np.nan
 
@@ -121,9 +118,7 @@ def build_raw_value_audit(
             n_out_of_range = np.nan
             pct_out_of_range_non_missing = np.nan
 
-        unit_non_missing = g["valueuom"].fillna("").astype(str).str.strip()
-        unit_non_missing = unit_non_missing[unit_non_missing != ""]
-        unit_counts = unit_non_missing.value_counts()
+        unit_counts = pd.Series(unit_counts_by_itemid[itemid]).sort_values(ascending=False)
 
         if len(unit_counts) > 0:
             n_unique_units = int(unit_counts.shape[0])
@@ -169,22 +164,29 @@ def build_raw_value_audit(
 
 
 # Build an explicit itemid x unit table for unit-mix review.
-def build_unit_audit(df: pd.DataFrame, itemid_to_label: dict[int, str]) -> pd.DataFrame:
-    tmp = df.copy()
-    tmp["itemid"] = pd.to_numeric(tmp["itemid"], errors="coerce")
-    tmp["valueuom"] = tmp["valueuom"].fillna("").astype(str).str.strip()
-    tmp = tmp.dropna(subset=["itemid"]).copy()
-    tmp["itemid"] = tmp["itemid"].astype(int)
+def build_unit_audit_from_parts(
+    unit_counts_by_itemid: dict[int, dict[str, int]],
+    itemid_to_label: dict[int, str],
+) -> pd.DataFrame:
+    rows = []
 
-    out = (
-        tmp.groupby(["itemid", "valueuom"], dropna=False)
-        .size()
-        .reset_index(name="n_rows")
-        .sort_values(["itemid", "n_rows", "valueuom"], ascending=[True, False, True])
-        .reset_index(drop=True)
-    )
-    out["label"] = out["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
-    return out[["itemid", "label", "valueuom", "n_rows"]]
+    for itemid in sorted(unit_counts_by_itemid):
+        for unit, n_rows in unit_counts_by_itemid[itemid].items():
+            rows.append({
+                "itemid": itemid,
+                "label": itemid_to_label.get(itemid, "UNKNOWN ITEMID"),
+                "valueuom": unit,
+                "n_rows": n_rows,
+            })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out.reindex(columns=["itemid", "label", "valueuom", "n_rows"])
+
+    return out.sort_values(
+        ["itemid", "n_rows", "valueuom"],
+        ascending=[True, False, True]
+    ).reset_index(drop=True)
 
 
 def main() -> None:
@@ -210,28 +212,39 @@ def main() -> None:
     if "valuenum" not in available_cols and "value" not in available_cols:
         raise ValueError("Raw chart file must contain at least one of 'valuenum' or 'value'.")
 
-    df = pd.read_csv(DATA_FILE, usecols=usecols, low_memory=False)
-    df.columns = df.columns.str.strip()
-
-    if "valuenum" not in df.columns:
-        df["valuenum"] = np.nan
-    if "value" not in df.columns:
-        df["value"] = np.nan
-    if "valueuom" not in df.columns:
-        df["valueuom"] = ""
-    if "stay_id" not in df.columns:
-        df["stay_id"] = np.nan
-    if "charttime" not in df.columns:
-        df["charttime"] = pd.NaT
-
-    df["itemid"] = pd.to_numeric(df["itemid"], errors="coerce")
-    df["valuenum"] = pd.to_numeric(df["valuenum"], errors="coerce")
-
     itemid_to_label = load_item_labels(D_ITEMS_PATH)
     bounds_by_itemid = load_bounds(BOUNDS_FILE)
+    row_counts: dict[int, int] = defaultdict(int)
+    value_parts: dict[int, list[pd.Series]] = defaultdict(list)
+    unit_counts_by_itemid: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
-    audit = build_raw_value_audit(
-        df=df,
+    for chunk in pd.read_csv(DATA_FILE, usecols=usecols, chunksize=CHUNK_ROWS, low_memory=False):
+        chunk.columns = chunk.columns.str.strip()
+        chunk["itemid"] = pd.to_numeric(chunk["itemid"], errors="coerce")
+        chunk["valuenum"] = pd.to_numeric(chunk["valuenum"], errors="coerce")
+        chunk["valueuom"] = chunk["valueuom"].fillna("").astype(str).str.strip()
+
+        chunk = chunk.dropna(subset=["itemid"]).copy()
+        chunk["itemid"] = chunk["itemid"].astype(int)
+
+        row_count_chunk = chunk.groupby("itemid").size()
+        for itemid, count in row_count_chunk.items():
+            row_counts[int(itemid)] += int(count)
+
+        numeric_chunk = chunk.dropna(subset=["valuenum"])
+        for itemid, g in numeric_chunk.groupby("itemid", sort=False):
+            value_parts[int(itemid)].append(g["valuenum"].reset_index(drop=True))
+
+        unit_chunk = chunk.loc[chunk["valueuom"] != "", ["itemid", "valueuom"]].copy()
+        if len(unit_chunk) > 0:
+            unit_count_chunk = unit_chunk.groupby(["itemid", "valueuom"]).size()
+            for (itemid, unit), count in unit_count_chunk.items():
+                unit_counts_by_itemid[int(itemid)][str(unit)] += int(count)
+
+    audit = build_raw_value_audit_from_parts(
+        value_parts=value_parts,
+        row_counts=row_counts,
+        unit_counts_by_itemid=unit_counts_by_itemid,
         itemid_to_label=itemid_to_label,
         bounds_by_itemid=bounds_by_itemid,
     )
@@ -259,7 +272,7 @@ def main() -> None:
     audit_problem = audit_problem.sort_values(sort_cols, ascending=[False, False, False, False, False, False])
     audit_problem.to_csv(OUTDIR / "raw_chart_integrity_audit__sorted_problem_first.csv", index=False)
 
-    unit_audit = build_unit_audit(df, itemid_to_label)
+    unit_audit = build_unit_audit_from_parts(unit_counts_by_itemid, itemid_to_label)
     unit_audit.to_csv(OUTDIR / "raw_chart_units_by_itemid.csv", index=False)
 
     print(f"Saved: {OUTDIR / 'raw_chart_integrity.csv'}")
