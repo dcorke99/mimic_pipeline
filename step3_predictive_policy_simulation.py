@@ -22,10 +22,10 @@ PANEL_FILE = INDIR / "step1_scored_panel.csv"
 TRAJ_KEYS = ["subject_id", "hadm_id", "stay_id", "inserted"]
 
 TIME_COL = "episode_index"
-START_COL = "day_start"
+START_COL = "period_start"
 INSERTED_COL = "inserted"
 STATE_COL = "catheter_state"
-DAYS_COL = "days_in_state"
+PERIODS_COL = "periods_in_state"
 INTERVAL_COL = "interval_hours"
 SPLIT_COL = "split"
 
@@ -42,8 +42,8 @@ rng = np.random.default_rng(SEED)
 # RISK_TAUS = [0.01, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
 RISK_TAUS = [0.01, 0.02]
 
-def policy_fixed_day_remove(days_in_state: int, remove_day: int) -> int:
-    return 1 if days_in_state >= remove_day else 0
+def policy_fixed_period_remove(periods_in_state: int, remove_period: int) -> int:
+    return 1 if periods_in_state >= remove_period else 0
 
 
 def policy_risk_threshold(p_cauti_keep: float, tau: float) -> int:
@@ -62,9 +62,9 @@ def policy_hybrid(
 
 
 POLICIES = [
-    ("fixed_day3", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 3)),
-    ("fixed_day5", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 5)),
-    # ("fixed_day7", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 7)),
+    ("fixed_period3", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 3)),
+    ("fixed_period5", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 5)),
+    # ("fixed_period7", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 7)),
     *[
         (
             f"risk_tau_{tau:.2f}".replace(".", "_"),
@@ -251,7 +251,7 @@ def main() -> None:
     df[INSERTED_COL] = pd.to_datetime(df[INSERTED_COL], errors="coerce")
 
     df[TIME_COL] = pd.to_numeric(df[TIME_COL], errors="coerce")
-    df[DAYS_COL] = pd.to_numeric(df[DAYS_COL], errors="coerce")
+    df[PERIODS_COL] = pd.to_numeric(df[PERIODS_COL], errors="coerce")
     df[INTERVAL_COL] = pd.to_numeric(df[INTERVAL_COL], errors="coerce")
 
     df["subject_id"] = df["subject_id"].astype(str).str.strip()
@@ -263,7 +263,7 @@ def main() -> None:
             START_COL,
             INSERTED_COL,
             TIME_COL,
-            DAYS_COL,
+            PERIODS_COL,
             INTERVAL_COL,
             "hadm_id",
             "stay_id",
@@ -271,7 +271,7 @@ def main() -> None:
     ).copy()
 
     df[TIME_COL] = df[TIME_COL].astype("int64")
-    df[DAYS_COL] = df[DAYS_COL].astype("int64")
+    df[PERIODS_COL] = df[PERIODS_COL].astype("int64")
     df["hadm_id"] = df["hadm_id"].astype("int64")
     df["stay_id"] = df["stay_id"].astype("int64")
 

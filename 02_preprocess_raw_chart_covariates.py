@@ -22,12 +22,14 @@ TEMP_C_ITEMID = 223762
 
 
 def fahrenheit_to_celsius(values: pd.Series) -> pd.Series:
+    # Convert Fahrenheit temperatures to Celsius.
     return (values - 32.0) * (5.0 / 9.0)
 
 
 def main() -> None:
     DATADIR.mkdir(exist_ok=True, parents=True)
 
+    # Replace any previous outputs so this step always writes a fresh file.
     if OUTFILE.exists():
         OUTFILE.unlink()
     if SAMPLE_OUTFILE.exists():
@@ -38,13 +40,14 @@ def main() -> None:
     converted_rows_total = 0
     sample_rows_written = 0
 
+    # Stream the raw chart file so temperature conversion scales to large extracts.
     for chunk in pd.read_csv(INFILE, chunksize=CHUNK_ROWS, low_memory=False):
         chunk_idx += 1
 
         # Standardise units and itemids before identifying Fahrenheit rows.
         unit_clean = chunk["valueuom"].fillna("").astype(str).str.strip().str.upper()
-        itemid_numeric = pd.to_numeric(chunk["itemid"], errors="coerce")
-        fahrenheit_mask = unit_clean.isin(FAHRENHEIT_UNITS) | itemid_numeric.eq(TEMP_F_ITEMID)
+        itemids = pd.to_numeric(chunk["itemid"], errors="coerce")
+        fahrenheit_mask = unit_clean.isin(FAHRENHEIT_UNITS) | itemids.eq(TEMP_F_ITEMID)
 
         if fahrenheit_mask.any():
             # Convert numeric Fahrenheit values to Celsius.
@@ -68,6 +71,7 @@ def main() -> None:
             chunk.loc[fahrenheit_mask, "valueuom"] = CELSIUS_UNIT
             converted_rows_total += int(fahrenheit_mask.sum())
 
+        # Save the full converted chunk.
         chunk.to_csv(
             OUTFILE,
             mode="w" if first_write else "a",
@@ -75,6 +79,7 @@ def main() -> None:
             index=False,
         )
 
+        # Save the first SAMPLE_ROWS rows as a lightweight inspection file.
         if sample_rows_written < SAMPLE_ROWS:
             sample_chunk = chunk.head(SAMPLE_ROWS - sample_rows_written).copy()
             sample_chunk.to_csv(

@@ -84,7 +84,7 @@ def main() -> None:
     print("[EHR] Extracting raw chartevents covariates...")
 
     # Read the chart-event columns needed for downstream cleaning and aggregation.
-    usecols_ce = [
+    chart_cols = [
         "subject_id", "hadm_id", "stay_id", "itemid", "charttime",
         "storetime", "valuenum", "value", "valueuom",
     ]
@@ -112,7 +112,7 @@ def main() -> None:
     # Stream chartevents in chunks to avoid loading the full file into memory.
     for chunk in pd.read_csv(
         p_chartevents,
-        usecols=usecols_ce,
+        usecols=chart_cols,
         chunksize=CHUNK_ROWS_CHARTEVENTS,
         low_memory=False,
     ):
@@ -121,8 +121,9 @@ def main() -> None:
 
         # Restrict the chunk to stays that appear in the episode windows.
         chunk_filtered = chunk[chunk["stay_id"].isin(stay_ids)].copy()
-
-        if len(chunk_filtered) > 0:
+        if len(chunk_filtered) == 0:
+            kept = 0
+        else:
             # Parse chart timestamps before time-window filtering.
             chunk_filtered["charttime"] = pd.to_datetime(chunk_filtered["charttime"], errors="coerce")
             chunk_filtered["storetime"] = pd.to_datetime(chunk_filtered["storetime"], errors="coerce")
@@ -130,24 +131,23 @@ def main() -> None:
             # Drop rows without the stay/time fields needed for matching.
             chunk_filtered = chunk_filtered.dropna(subset=["stay_id", "charttime"]).copy()
 
-            if len(chunk_filtered) > 0:
+            if len(chunk_filtered) == 0:
+                kept = 0
+            else:
                 # Join the chunk to the extraction windows by stay.
                 matched = chunk_filtered.merge(windows, on="stay_id", how="inner")
+
                 # Keep only chart rows that fall inside a valid extraction window.
                 matched = matched[
                     (matched["charttime"] >= matched["window_start"]) &
                     (matched["charttime"] < matched["window_end"])
                 ].copy()
 
-                if len(matched) > 0:
-                    # Restore the original output columns and drop duplicate matches.
-                    chunk_filtered = matched[usecols_ce].drop_duplicates()
-                else:
-                    # Replace with an empty frame when nothing matched the windows.
-                    chunk_filtered = chunk_filtered.iloc[0:0].copy()
+                # Restore the original output columns and drop duplicate matches.
+                chunk_filtered = matched[chart_cols].drop_duplicates()
+                kept = len(chunk_filtered)
 
         # Track the number of extracted rows across chunks.
-        kept = len(chunk_filtered)
         kept_rows_total += kept
 
         if kept > 0:

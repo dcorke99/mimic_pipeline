@@ -19,12 +19,13 @@ MODEL_FILE = MODEL_DIR / "transition_models.pkl"
 TRAJ_KEYS = ["subject_id", "hadm_id", "stay_id", "inserted"]
 STATE_COL = "catheter_state"
 TIME_COL = "episode_index"
-START_COL = "day_start"
-END_COL = "day_end"
+START_COL = "period_start"
+END_COL = "period_end"
 INSERTED_COL = "inserted"
-DAYS_COL = "days_in_state"
+PERIODS_COL = "periods_in_state"
 INTERVAL_HOURS_COL = "interval_hours"
 SPLIT_COL = "split"
+PERIOD_HOURS = 24
 
 EPS = 1e-12
 
@@ -40,8 +41,8 @@ RISK_TAUS = [0.01, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
 # -----------------------------
 # Policies
 # -----------------------------
-def policy_fixed_day_remove(days_in_state: int, remove_day: int = 3) -> int:
-    return 1 if days_in_state >= remove_day else 0
+def policy_fixed_period_remove(periods_in_state: int, remove_period: int = 3) -> int:
+    return 1 if periods_in_state >= remove_period else 0
 
 
 def policy_risk_threshold(p_cauti_keep: float, tau: float = 0.20) -> int:
@@ -60,9 +61,9 @@ def policy_hybrid(
 
 
 POLICIES = [
-    ("fixed_day3", lambda row: policy_fixed_day_remove(int(row[DAYS_COL]), remove_day=3)),
-    ("fixed_day5", lambda row: policy_fixed_day_remove(int(row[DAYS_COL]), remove_day=5)),
-    ("fixed_day7", lambda row: policy_fixed_day_remove(int(row[DAYS_COL]), remove_day=7)),
+    ("fixed_period3", lambda row: policy_fixed_period_remove(int(row[PERIODS_COL]), remove_period=3)),
+    ("fixed_period5", lambda row: policy_fixed_period_remove(int(row[PERIODS_COL]), remove_period=5)),
+    ("fixed_period7", lambda row: policy_fixed_period_remove(int(row[PERIODS_COL]), remove_period=7)),
     *[
         (
             f"risk_tau_{tau:.2f}".replace(".", "_"),
@@ -134,7 +135,7 @@ def _build_feature_frame(
     anchor_row: pd.Series,
     x_cols: list[str],
     time_value: int,
-    days_value: int,
+    periods_value: int,
     state_is_out: int | None = None,
 ) -> pd.DataFrame:
     data: dict[str, float] = {}
@@ -142,8 +143,8 @@ def _build_feature_frame(
     for c in x_cols:
         if c == TIME_COL:
             data[c] = float(time_value)
-        elif c == DAYS_COL:
-            data[c] = float(days_value)
+        elif c == PERIODS_COL:
+            data[c] = float(periods_value)
         elif c == "state_is_out":
             if state_is_out is None:
                 raise ValueError("state_is_out was requested but not supplied.")
@@ -157,7 +158,7 @@ def _build_feature_frame(
 def score_in_state(
     anchor_row: pd.Series,
     time_value: int,
-    in_day: int,
+    in_period: int,
     cauti_model,
     reins_model,
     x_cols_cauti: list[str],
@@ -173,7 +174,7 @@ def score_in_state(
         anchor_row=anchor_row,
         x_cols=x_cols_cauti,
         time_value=time_value,
-        days_value=in_day,
+        periods_value=in_period,
         state_is_out=0,
     )
     p_cauti_if_keep = _clip01(_predict_proba(cauti_model, X_keep))
@@ -182,7 +183,7 @@ def score_in_state(
         anchor_row=anchor_row,
         x_cols=x_cols_cauti,
         time_value=time_value,
-        days_value=1,
+        periods_value=1,
         state_is_out=1,
     )
     p_cauti_if_remove = _clip01(_predict_proba(cauti_model, X_remove_cauti))
@@ -191,7 +192,7 @@ def score_in_state(
         anchor_row=anchor_row,
         x_cols=x_cols_reins,
         time_value=time_value,
-        days_value=1,
+        periods_value=1,
         state_is_out=None,
     )
     p_reins_if_remove = _clip01(_predict_proba(reins_model, X_remove_reins))
@@ -202,7 +203,7 @@ def score_in_state(
 def score_out_state(
     anchor_row: pd.Series,
     time_value: int,
-    out_day: int,
+    out_period: int,
     cauti_model,
     reins_model,
     x_cols_cauti: list[str],
@@ -217,7 +218,7 @@ def score_out_state(
         anchor_row=anchor_row,
         x_cols=x_cols_cauti,
         time_value=time_value,
-        days_value=out_day,
+        periods_value=out_period,
         state_is_out=1,
     )
     p_cauti_if_out = _clip01(_predict_proba(cauti_model, X_out_cauti))
@@ -226,7 +227,7 @@ def score_out_state(
         anchor_row=anchor_row,
         x_cols=x_cols_reins,
         time_value=time_value,
-        days_value=out_day,
+        periods_value=out_period,
         state_is_out=None,
     )
     p_reins_if_out = _clip01(_predict_proba(reins_model, X_out_reins))
@@ -258,7 +259,7 @@ def _get_anchor_row(g: pd.DataFrame, t: pd.Timestamp) -> pd.Series:
 
 def _combine_nodes(nodes: list[dict]) -> list[dict]:
     """
-    Combine nodes with the same state and day-in-state.
+    Combine nodes with the same state and period-in-state.
     """
     agg: dict[tuple[str, int], float] = {}
 
@@ -266,12 +267,12 @@ def _combine_nodes(nodes: list[dict]) -> list[dict]:
         mass = float(node["mass"])
         if mass <= EPS:
             continue
-        key = (str(node["state"]), int(node["days_in_state"]))
+        key = (str(node["state"]), int(node["periods_in_state"]))
         agg[key] = agg.get(key, 0.0) + mass
 
     out = [
-        {"state": state, "days_in_state": day, "mass": mass}
-        for (state, day), mass in sorted(agg.items(), key=lambda x: (x[0][0], x[0][1]))
+        {"state": state, "periods_in_state": period, "mass": mass}
+        for (state, period), mass in sorted(agg.items(), key=lambda x: (x[0][0], x[0][1]))
         if mass > EPS
     ]
     return out
@@ -287,6 +288,7 @@ def propagate_trajectory_counterfactual(
     reins_model,
     x_cols_cauti: list[str],
     x_cols_reins: list[str],
+    period_hours: int,
 ) -> pd.DataFrame:
     """
     Proper state/timing propagation within the current Step-1-only setup.
@@ -306,12 +308,12 @@ def propagate_trajectory_counterfactual(
     horizon = _get_horizon(g)
 
     first_state = str(g[STATE_COL].iloc[0]).strip().lower()
-    first_day = int(g[DAYS_COL].iloc[0])
+    first_period = int(g[PERIODS_COL].iloc[0])
 
     active_nodes = [
         {
             "state": first_state,
-            "days_in_state": first_day,
+            "periods_in_state": first_period,
             "mass": 1.0,
         }
     ]
@@ -326,7 +328,7 @@ def propagate_trajectory_counterfactual(
     exp_out_days = 0.0
 
     while (t < horizon) and active_nodes:
-        next_t = min(t + pd.Timedelta(hours=24), horizon)
+        next_t = min(t + pd.Timedelta(hours=period_hours), horizon)
         interval_hours = (next_t - t).total_seconds() / 3600.0
         interval_days = interval_hours / 24.0
 
@@ -345,7 +347,7 @@ def propagate_trajectory_counterfactual(
 
         for node in active_nodes:
             state = str(node["state"])
-            day_in_state = int(node["days_in_state"])
+            periods_in_state = int(node["periods_in_state"])
             mass = float(node["mass"])
 
             if mass <= EPS:
@@ -358,7 +360,7 @@ def propagate_trajectory_counterfactual(
                 p_keep, p_cauti_remove, p_reins_remove = score_in_state(
                     anchor_row=anchor_row,
                     time_value=cf_time_index,
-                    in_day=day_in_state,
+                    in_period=periods_in_state,
                     cauti_model=cauti_model,
                     reins_model=reins_model,
                     x_cols_cauti=x_cols_cauti,
@@ -367,7 +369,7 @@ def propagate_trajectory_counterfactual(
 
                 policy_ctx = pd.Series(
                     {
-                        DAYS_COL: day_in_state,
+                        PERIODS_COL: periods_in_state,
                         "p_cauti_if_keep": p_keep,
                         "p_cauti_if_remove": p_cauti_remove,
                         "p_reins_if_remove": p_reins_remove,
@@ -387,7 +389,7 @@ def propagate_trajectory_counterfactual(
                         next_nodes.append(
                             {
                                 "state": "in",
-                                "days_in_state": day_in_state + 1,
+                                "periods_in_state": periods_in_state + 1,
                                 "mass": survive_mass,
                             }
                         )
@@ -415,7 +417,7 @@ def propagate_trajectory_counterfactual(
                         next_nodes.append(
                             {
                                 "state": "in",
-                                "days_in_state": 1,
+                                "periods_in_state": 1,
                                 "mass": reins_mass,
                             }
                         )
@@ -424,7 +426,7 @@ def propagate_trajectory_counterfactual(
                         next_nodes.append(
                             {
                                 "state": "out",
-                                "days_in_state": 2,
+                                "periods_in_state": 2,
                                 "mass": out_survive_mass,
                             }
                         )
@@ -436,7 +438,7 @@ def propagate_trajectory_counterfactual(
                 p_cauti_out, p_reins_out = score_out_state(
                     anchor_row=anchor_row,
                     time_value=cf_time_index,
-                    out_day=day_in_state,
+                    out_period=periods_in_state,
                     cauti_model=cauti_model,
                     reins_model=reins_model,
                     x_cols_cauti=x_cols_cauti,
@@ -460,7 +462,7 @@ def propagate_trajectory_counterfactual(
                     next_nodes.append(
                         {
                             "state": "in",
-                            "days_in_state": 1,
+                            "periods_in_state": 1,
                             "mass": reins_mass,
                         }
                     )
@@ -469,7 +471,7 @@ def propagate_trajectory_counterfactual(
                     next_nodes.append(
                         {
                             "state": "out",
-                            "days_in_state": day_in_state + 1,
+                            "periods_in_state": periods_in_state + 1,
                             "mass": out_survive_mass,
                         }
                     )
@@ -481,7 +483,7 @@ def propagate_trajectory_counterfactual(
 
         rows.append(
             {
-                "day_index": cf_time_index,
+                "period_index": cf_time_index,
                 "interval_start": t,
                 "interval_end": next_t,
                 "interval_hours": float(interval_hours),
@@ -525,6 +527,7 @@ def main() -> None:
     x_cols_cauti = bundle["x_cols_cauti"]
     x_cols_reins = bundle["x_cols_reins"]
     feature_cols = bundle["features"]
+    period_hours = int(bundle.get("period_hours", PERIOD_HOURS))
 
     if cauti_model is None or reins_model is None:
         raise ValueError("transition_models.pkl does not contain the required fitted CAUTI/reinsertion models.")
@@ -534,7 +537,7 @@ def main() -> None:
     df[INSERTED_COL] = pd.to_datetime(df[INSERTED_COL], errors="coerce")
 
     df[TIME_COL] = pd.to_numeric(df[TIME_COL], errors="coerce")
-    df[DAYS_COL] = pd.to_numeric(df[DAYS_COL], errors="coerce")
+    df[PERIODS_COL] = pd.to_numeric(df[PERIODS_COL], errors="coerce")
     df[INTERVAL_HOURS_COL] = pd.to_numeric(df[INTERVAL_HOURS_COL], errors="coerce")
 
     df["subject_id"] = df["subject_id"].astype(str).str.strip()
@@ -543,7 +546,7 @@ def main() -> None:
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
 
     # Coerce the Step-1 feature columns to numeric.
-    cols_to_numeric = list(dict.fromkeys(feature_cols + [TIME_COL, DAYS_COL, INTERVAL_HOURS_COL]))
+    cols_to_numeric = list(dict.fromkeys(feature_cols + [TIME_COL, PERIODS_COL, INTERVAL_HOURS_COL]))
     for c in cols_to_numeric:
         if c not in df.columns:
             continue
@@ -563,7 +566,7 @@ def main() -> None:
             END_COL,
             INSERTED_COL,
             TIME_COL,
-            DAYS_COL,
+            PERIODS_COL,
             INTERVAL_HOURS_COL,
             "hadm_id",
             "stay_id",
@@ -571,7 +574,7 @@ def main() -> None:
     ).copy()
 
     df[TIME_COL] = df[TIME_COL].astype("int64")
-    df[DAYS_COL] = df[DAYS_COL].astype("int64")
+    df[PERIODS_COL] = df[PERIODS_COL].astype("int64")
     df["hadm_id"] = df["hadm_id"].astype("int64")
     df["stay_id"] = df["stay_id"].astype("int64")
 
@@ -607,6 +610,7 @@ def main() -> None:
                 reins_model=reins_model,
                 x_cols_cauti=x_cols_cauti,
                 x_cols_reins=x_cols_reins,
+                period_hours=period_hours,
             )
 
             subj = str(g["subject_id"].iloc[0])  # pyright: ignore[reportArgumentType]

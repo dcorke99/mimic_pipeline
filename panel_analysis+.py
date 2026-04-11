@@ -26,17 +26,17 @@ TOP_N_COVARIATES = 20
 ID_COL = "subject_id"
 TIME_COL = "episode_index"
 STATE_COL = "catheter_state"
-DAYS_COL = "days_in_state"
+PERIODS_COL = "periods_in_state"
 INTERVAL_COL = "interval_hours"
-ACTION_COL = "removed_today"
+ACTION_COL = "removed_in_period"
 SPLIT_COL = "split"
-Y_CAUTI = "cauti_today"
-Y_REINS = "reinsertion_today"
-LAST_DAY_COL = "is_last_day_of_episode"
+Y_CAUTI = "cauti_in_period"
+Y_REINS = "reinsertion_in_period"
+LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
 EPISODE_KEYS = ["stay_id", "inserted"]
-POST_REMOVE_RISK_DAYS = 2
-LATE_REMOVAL_COL = "late_removal_today"
+POST_REMOVE_RISK_PERIODS = 2
+LATE_REMOVAL_COL = "late_removal_in_period"
 AGE_GROUP_COL = "age_ge_threshold"
 
 REMOVAL_FEATURE = "GCS - Verbal Response [mean]"
@@ -138,17 +138,17 @@ def p_adjust_bh(pvalues):
 # Build first-event CAUTI and reinsertion fitting flags used by the current panel logic.
 def build_risk_sets(df):
     # Mark which rows belong to each event process.
-    out = df.sort_values(EPISODE_KEYS + ["day_end"]).copy()
+    out = df.sort_values(EPISODE_KEYS + ["period_end"]).copy()
     y_cauti = pd.to_numeric(out[Y_CAUTI], errors="coerce").fillna(0)
     out["prior_cauti_count"] = out.groupby(EPISODE_KEYS)[Y_CAUTI].cumsum() - y_cauti
     out["cauti_risk_row"] = (
         (out[STATE_COL] == "in") |
-        ((out[STATE_COL] == "out") & (out[DAYS_COL] <= POST_REMOVE_RISK_DAYS))
+        ((out[STATE_COL] == "out") & (out[PERIODS_COL] <= POST_REMOVE_RISK_PERIODS))
     ).astype(int)
     out["reinsertion_fit_row"] = (
         (out[STATE_COL] == "out") &
         ~(
-            (out[LAST_DAY_COL] == 1) &
+            (out[LAST_PERIOD_COL] == 1) &
             (out[END_REASON_COL] == "icu_end") &
             (out[Y_REINS] == 0)
         )
@@ -198,16 +198,16 @@ def build_overview_tables(df):
     # Summarise event counts on the relevant row subsets.
     event_rows = []
     masks = {
-        "removal_today_on_in_rows": df[STATE_COL] == "in",
-        "late_removal_today_on_in_rows": (df[STATE_COL] == "in") & (df[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD),
-        "cauti_today_on_cauti_risk_rows": df["cauti_risk_row"] == 1,
-        "reinsertion_today_on_out_fit_rows": df["reinsertion_fit_row"] == 1,
+        "removal_in_period_on_in_rows": df[STATE_COL] == "in",
+        "late_removal_in_period_on_in_rows": (df[STATE_COL] == "in") & (df[PERIODS_COL] >= LATE_REMOVAL_DAY_THRESHOLD),
+        "cauti_in_period_on_cauti_risk_rows": df["cauti_risk_row"] == 1,
+        "reinsertion_in_period_on_out_fit_rows": df["reinsertion_fit_row"] == 1,
     }
     targets = {
-        "removal_today_on_in_rows": ACTION_COL,
-        "late_removal_today_on_in_rows": LATE_REMOVAL_COL,
-        "cauti_today_on_cauti_risk_rows": Y_CAUTI,
-        "reinsertion_today_on_out_fit_rows": Y_REINS,
+        "removal_in_period_on_in_rows": ACTION_COL,
+        "late_removal_in_period_on_in_rows": LATE_REMOVAL_COL,
+        "cauti_in_period_on_cauti_risk_rows": Y_CAUTI,
+        "reinsertion_in_period_on_out_fit_rows": Y_REINS,
     }
     for name, mask in masks.items():
         g = df.loc[mask]
@@ -226,8 +226,8 @@ def build_overview_tables(df):
         {"metric": "in_rows", "value": int((df[STATE_COL] == "in").sum())},
         {"metric": "out_rows", "value": int((df[STATE_COL] == "out").sum())},
         {
-            "metric": "out_rows_days_in_state_le_2",
-            "value": int(((df[STATE_COL] == "out") & (df[DAYS_COL] <= POST_REMOVE_RISK_DAYS)).sum()),
+            "metric": "out_rows_periods_in_state_le_2",
+            "value": int(((df[STATE_COL] == "out") & (df[PERIODS_COL] <= POST_REMOVE_RISK_PERIODS)).sum()),
         },
         {"metric": "cauti_risk_rows", "value": int(df["cauti_risk_row"].sum())},
         {"metric": "removal_fit_rows", "value": int(df["removal_fit_row"].sum())},
@@ -250,8 +250,8 @@ def build_episode_level_table(
     cauti_continuous_feature,
     reinsertion_feature,
 ):
-    # Collapse daily rows down to one row per episode.
-    d = df.sort_values(EPISODE_KEYS + ["day_end"]).copy()
+    # Collapse panel periods down to one row per episode.
+    d = df.sort_values(EPISODE_KEYS + ["period_end"]).copy()
 
     in_rows = d.loc[d[STATE_COL] == "in"].copy()
     cauti_rows = d.loc[d["cauti_risk_row"] == 1].copy()
@@ -263,7 +263,7 @@ def build_episode_level_table(
     episode_hadm = d.groupby(EPISODE_KEYS, dropna=False)["hadm_id"].first().rename("hadm_id")
 
     catheter_days = (
-        in_rows.groupby(EPISODE_KEYS, dropna=False)[DAYS_COL]
+        in_rows.groupby(EPISODE_KEYS, dropna=False)[PERIODS_COL]
         .max()
         .rename("catheter_days")
     )
@@ -553,20 +553,20 @@ def save_csv(df, path, round_dp=None, sci_cols=None):
     out.to_csv(path, index=False)
 
 
-# Save a simple line plot of event rates by days_in_state for the main event processes.
-def plot_event_rates(cauti_day, reinsertion_day, outdir):
+# Save a simple line plot of event rates by periods_in_state for the main event processes.
+def plot_event_rates(cauti_period, reinsertion_period, outdir):
     fig, ax = plt.subplots(figsize=(8, 5))
-    in_rows = cauti_day[cauti_day[STATE_COL] == "in"]
-    out_rows = cauti_day[cauti_day[STATE_COL] == "out"]
-    ax.plot(in_rows[DAYS_COL], in_rows["event_rate"], marker="o", label="CAUTI risk set: IN")
-    ax.plot(out_rows[DAYS_COL], out_rows["event_rate"], marker="o", label="CAUTI risk set: OUT")
-    ax.plot(reinsertion_day[DAYS_COL], reinsertion_day["event_rate"], marker="o", label="Reinsertion on OUT fit rows")
-    ax.set_xlabel("days_in_state")
+    in_rows = cauti_period[cauti_period[STATE_COL] == "in"]
+    out_rows = cauti_period[cauti_period[STATE_COL] == "out"]
+    ax.plot(in_rows[PERIODS_COL], in_rows["event_rate"], marker="o", label="CAUTI risk set: IN")
+    ax.plot(out_rows[PERIODS_COL], out_rows["event_rate"], marker="o", label="CAUTI risk set: OUT")
+    ax.plot(reinsertion_period[PERIODS_COL], reinsertion_period["event_rate"], marker="o", label="Reinsertion on OUT fit rows")
+    ax.set_xlabel("periods_in_state")
     ax.set_ylabel("event rate")
-    ax.set_title("Event rates by days_in_state")
+    ax.set_title("Event rates by periods_in_state")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(outdir / "plot_event_rates_by_days_in_state.png", dpi=150)
+    fig.savefig(outdir / "plot_event_rates_by_periods_in_state.png", dpi=150)
     plt.close(fig)
 
 
@@ -592,8 +592,8 @@ def main():
 
     # Coerce the core numeric inputs.
     numeric_cols = [
-        TIME_COL, DAYS_COL, INTERVAL_COL, ACTION_COL, Y_CAUTI, Y_REINS,
-        LAST_DAY_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
+        TIME_COL, PERIODS_COL, INTERVAL_COL, ACTION_COL, Y_CAUTI, Y_REINS,
+        LAST_PERIOD_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
     ] + cov_cols
     coerce_numeric(df, numeric_cols)
 
@@ -607,13 +607,13 @@ def main():
         "covariate_count": covariate_count,
         AGE_GROUP_COL: (age_numeric >= AGE_THRESHOLD).astype("int8"),
         "high_covariate_count": high_covariate_count,
-        LATE_REMOVAL_COL: ((df[ACTION_COL] == 1) & (df[DAYS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype("int8"),
+        LATE_REMOVAL_COL: ((df[ACTION_COL] == 1) & (df[PERIODS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype("int8"),
     }, index=df.index)
 
     df = pd.concat([df, derived_cols], axis=1).copy()
 
     # Normalise datetime fields before grouping.
-    df["day_end"] = pd.to_datetime(df["day_end"], errors="coerce")
+    df["period_end"] = pd.to_datetime(df["period_end"], errors="coerce")
     df["inserted"] = pd.to_datetime(df["inserted"], errors="coerce")
 
     df = build_risk_sets(df)
@@ -637,21 +637,21 @@ def main():
     ]:
         save_csv(table, RESULTS_DIR / name, round_dp=DP)
 
-    # Summarise event rates by day in state.
-    cauti_day = (
+    # Summarise event rates by period in state.
+    cauti_period = (
         df.loc[df["cauti_risk_row"] == 1]
-        .groupby([STATE_COL, DAYS_COL], dropna=False)[Y_CAUTI]
+        .groupby([STATE_COL, PERIODS_COL], dropna=False)[Y_CAUTI]
         .agg(rows="count", events="sum", event_rate="mean")
         .reset_index()
     )
-    reinsertion_day = (
+    reinsertion_period = (
         df.loc[df["reinsertion_fit_row"] == 1]
-        .groupby(DAYS_COL, dropna=False)[Y_REINS]
+        .groupby(PERIODS_COL, dropna=False)[Y_REINS]
         .agg(rows="count", events="sum", event_rate="mean")
         .reset_index()
     )
-    save_csv(cauti_day, RESULTS_DIR / "05_cauti_event_rates_by_state_and_day.csv", round_dp=DP)
-    save_csv(reinsertion_day, RESULTS_DIR / "06_reinsertion_event_rates_by_day.csv", round_dp=DP)
+    save_csv(cauti_period, RESULTS_DIR / "05_cauti_event_rates_by_state_and_period.csv", round_dp=DP)
+    save_csv(reinsertion_period, RESULTS_DIR / "06_reinsertion_event_rates_by_period.csv", round_dp=DP)
 
     # Reuse these row subsets across later outputs.
     analysis_sets = {
@@ -780,9 +780,9 @@ def main():
         [
             top_covariate_screen(df_slice, cov_cols, outcome_col, analysis_set, TOP_N_COVARIATES)
             for df_slice, outcome_col, analysis_set in [
-                (in_rows, ACTION_COL, "in_rows_removal_today"),
-                (out_fit_rows, Y_REINS, "out_fit_rows_reinsertion_today"),
-                (cauti_rows, Y_CAUTI, "cauti_risk_rows_cauti_today"),
+                (in_rows, ACTION_COL, "in_rows_removal_in_period"),
+                (out_fit_rows, Y_REINS, "out_fit_rows_reinsertion_in_period"),
+                (cauti_rows, Y_CAUTI, "cauti_risk_rows_cauti_in_period"),
             ]
         ],
         ignore_index=True,
@@ -795,11 +795,11 @@ def main():
     )
 
     # Save the summary figures.
-    plot_event_rates(cauti_day, reinsertion_day, RESULTS_DIR)
+    plot_event_rates(cauti_period, reinsertion_period, RESULTS_DIR)
 
     print(f"Outputs saved to: {RESULTS_DIR}")
     print(f"Number of covariates analysed: {len(cov_cols)}")
-    print(f"Late removal threshold: day >= {LATE_REMOVAL_DAY_THRESHOLD}")
+    print(f"Late removal threshold: period >= {LATE_REMOVAL_DAY_THRESHOLD}")
     
 if __name__ == "__main__":
     main()

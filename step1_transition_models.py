@@ -27,18 +27,18 @@ COVARIATE_DICT_FILE = INDIR / "covariate_dictionary.csv"
 ID_COL = "subject_id"
 TIME_COL = "episode_index"
 STATE_COL = "catheter_state"
-DAYS_COL = "days_in_state"
+PERIODS_COL = "periods_in_state"
 SPLIT_COL = "split"
 
-ACTION_COL = "removed_today"
-Y_CAUTI = "cauti_today"
-Y_REINS = "reinsertion_today"
+ACTION_COL = "removed_in_period"
+Y_CAUTI = "cauti_in_period"
+Y_REINS = "reinsertion_in_period"
 
-LAST_DAY_COL = "is_last_day_of_episode"
+LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
 
 EPISODE_KEYS = ["stay_id", "inserted"]
-POST_REMOVE_RISK_DAYS = 2
+POST_REMOVE_RISK_PERIODS = 2
 
 TOP_FEATURES_TO_SAVE = 15
 
@@ -257,21 +257,21 @@ def _calibration_table(
     return calib_df
 
 
-def _metrics_by_day(
+def _metrics_by_period(
     df,
-    day_col,
+    periods_col,
     outcome_col,
     pred_col,
     group_cols=None,
 ):
-    # Track predictive performance across days in state.
+    # Track predictive performance across periods in state.
     eval_df = df.copy()
     eval_df[outcome_col] = pd.to_numeric(eval_df[outcome_col], errors="coerce")
     eval_df[pred_col] = pd.to_numeric(eval_df[pred_col], errors="coerce").clip(0.0, 1.0)
-    eval_df = eval_df.dropna(subset=[day_col, outcome_col, pred_col]).copy()
+    eval_df = eval_df.dropna(subset=[periods_col, outcome_col, pred_col]).copy()
     eval_df[outcome_col] = eval_df[outcome_col].astype(int)
 
-    groupers = list(group_cols or []) + [day_col]
+    groupers = list(group_cols or []) + [periods_col]
     rows = []
 
     for keys, group_df in eval_df.groupby(groupers, observed=False):
@@ -357,7 +357,7 @@ def main():
 
     # Sort into episode-time order for transition logic.
     df = (
-        df.sort_values(EPISODE_KEYS + ["day_end"])
+        df.sort_values(EPISODE_KEYS + ["period_end"])
         .reset_index(drop=False)
         .rename(columns={"index": "_orig_index"})
         .copy()
@@ -372,7 +372,7 @@ def main():
 
     df["cauti_risk_row"] = (
         (df[STATE_COL] == "in") |
-        ((df[STATE_COL] == "out") & (df[DAYS_COL] <= POST_REMOVE_RISK_DAYS))
+        ((df[STATE_COL] == "out") & (df[PERIODS_COL] <= POST_REMOVE_RISK_PERIODS))
     ).astype(int)
 
     df_cauti = df[
@@ -389,7 +389,7 @@ def main():
 
     df_out_fit = df_out[
         ~(
-            (df_out[LAST_DAY_COL] == 1) &
+            (df_out[LAST_PERIOD_COL] == 1) &
             (df_out[END_REASON_COL] == "icu_end") &
             (df_out[Y_REINS] == 0)
         )
@@ -420,7 +420,7 @@ def main():
     print(f"Fitting CAUTI transition model with {MODEL_TYPE}...", flush=True)
     cauti_model = _fit_model(cauti_train_features, cauti_train_target)
 
-    df_out_cauti = df_out[df_out[DAYS_COL] <= POST_REMOVE_RISK_DAYS].copy()
+    df_out_cauti = df_out[df_out[PERIODS_COL] <= POST_REMOVE_RISK_PERIODS].copy()
     df.loc[df_out_cauti.index, "p_cauti_if_out"] = _predict_proba(
         cauti_model,
         df_out_cauti[cauti_feature_cols]
@@ -430,7 +430,7 @@ def main():
     cauti_keep_features["state_is_out"] = 0
 
     cauti_remove_features = df_in[cauti_feature_cols].copy()
-    cauti_remove_features[DAYS_COL] = 1
+    cauti_remove_features[PERIODS_COL] = 1
     cauti_remove_features["state_is_out"] = 1
 
     df.loc[df_in.index, "p_cauti_if_keep"] = _predict_proba(cauti_model, cauti_keep_features)
@@ -455,7 +455,7 @@ def main():
     auc_reins = roc_auc_score(reins_test_target, reins_test_pred) if reins_test_target.nunique() > 1 else np.nan
 
     reins_remove_features = df_in[reins_feature_cols].copy()
-    reins_remove_features[DAYS_COL] = 1
+    reins_remove_features[PERIODS_COL] = 1
     df.loc[df_in.index, "p_reins_if_remove"] = _predict_proba(reins_model, reins_remove_features)
 
     # Build the held-out evaluation frames.
@@ -484,7 +484,7 @@ def main():
 
     reins_eval_test = reins_eval_test[
         ~(
-            (reins_eval_test[LAST_DAY_COL] == 1) &
+            (reins_eval_test[LAST_PERIOD_COL] == 1) &
             (reins_eval_test[END_REASON_COL] == "icu_end") &
             (reins_eval_test[Y_REINS] == 0)
         )
@@ -505,24 +505,24 @@ def main():
         reins_eval_test, Y_REINS, "p_reins_if_out", bins=CALIBRATION_BINS
     )
 
-    remove_by_day = _metrics_by_day(
+    remove_by_period = _metrics_by_period(
         remove_eval_test,
-        DAYS_COL,
+        PERIODS_COL,
         ACTION_COL,
         "p_remove_obs",
     )
 
-    cauti_by_state_day = _metrics_by_day(
+    cauti_by_state_period = _metrics_by_period(
         cauti_eval_test,
-        DAYS_COL,
+        PERIODS_COL,
         Y_CAUTI,
         "p_cauti_obs_eval",
         group_cols=[STATE_COL],
     )
 
-    reins_by_day = _metrics_by_day(
+    reins_by_period = _metrics_by_period(
         reins_eval_test,
-        DAYS_COL,
+        PERIODS_COL,
         Y_REINS,
         "p_reins_if_out",
     )
@@ -531,9 +531,9 @@ def main():
     _save_df(cauti_cal, OUTDIR / "cauti_calibration_test.csv")
     _save_df(reins_cal, OUTDIR / "reinsertion_calibration_test.csv")
 
-    _save_df(remove_by_day, OUTDIR / "remove_by_day_test.csv")
-    _save_df(cauti_by_state_day, OUTDIR / "cauti_by_state_day_test.csv")
-    _save_df(reins_by_day, OUTDIR / "reinsertion_by_day_test.csv")
+    _save_df(remove_by_period, OUTDIR / "remove_by_period_test.csv")
+    _save_df(cauti_by_state_period, OUTDIR / "cauti_by_state_period_test.csv")
+    _save_df(reins_by_period, OUTDIR / "reinsertion_by_period_test.csv")
 
     # Restore the original row order before saving outputs.
     df = (
@@ -634,7 +634,8 @@ def main():
             "id_col": ID_COL,
             "time_col": TIME_COL,
             "split_col": SPLIT_COL,
-            "post_remove_risk_days": POST_REMOVE_RISK_DAYS,
+            "period_hours": feature_spec.get("period_hours"),
+            "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
             "feature_panel_file": str(INFILE),
             "feature_spec_file": str(FEATURE_SPEC_FILE),
         },
@@ -646,7 +647,7 @@ def main():
         "stay_id",
         "hadm_id",
         STATE_COL,
-        DAYS_COL,
+        PERIODS_COL,
         TIME_COL,
         SPLIT_COL,
         ACTION_COL,
@@ -663,7 +664,8 @@ def main():
     metrics = {
         "seed": SEED,
         "model_type": MODEL_TYPE,
-        "post_remove_risk_days": POST_REMOVE_RISK_DAYS,
+        "period_hours": feature_spec.get("period_hours"),
+        "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
         "split": {
             "method": "precomputed patient-level split from step1_feature_panel.csv",
             "train_rows": int((df[SPLIT_COL] == "train").sum()),
@@ -699,9 +701,9 @@ def main():
             "remove_calibration_test_csv": str(OUTDIR / "remove_calibration_test.csv"),
             "cauti_calibration_test_csv": str(OUTDIR / "cauti_calibration_test.csv"),
             "reinsertion_calibration_test_csv": str(OUTDIR / "reinsertion_calibration_test.csv"),
-            "remove_by_day_test_csv": str(OUTDIR / "remove_by_day_test.csv"),
-            "cauti_by_state_day_test_csv": str(OUTDIR / "cauti_by_state_day_test.csv"),
-            "reinsertion_by_day_test_csv": str(OUTDIR / "reinsertion_by_day_test.csv"),
+            "remove_by_period_test_csv": str(OUTDIR / "remove_by_period_test.csv"),
+            "cauti_by_state_period_test_csv": str(OUTDIR / "cauti_by_state_period_test.csv"),
+            "reinsertion_by_period_test_csv": str(OUTDIR / "reinsertion_by_period_test.csv"),
             "top_model_features_csv": str(OUTDIR / "top_model_features.csv"),
             "top_shap_features_csv": str(OUTDIR / "top_shap_features.csv"),
         },

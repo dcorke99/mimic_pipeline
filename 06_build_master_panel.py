@@ -26,10 +26,11 @@ AGG_STATS = [
 
 
 def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
+    # Reduce the panel down to the row-level covariate windows we need to score.
     windows = panel[["row_id", "stay_id", "cov_start", "cov_end"]].copy()
     stay_ids = set(windows["stay_id"].dropna().astype(int).unique())
 
-    usecols_ce = ["stay_id", "itemid", "charttime", "valuenum"]
+    chart_cols = ["stay_id", "itemid", "charttime", "valuenum"]
     partial_stats = []
     first_obs_parts = []
     last_obs_parts = []
@@ -43,18 +44,20 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
 
     for chunk in pd.read_csv(
         CLEANED_CHART_FILE,
-        usecols=usecols_ce,
+        usecols=chart_cols,
         chunksize=CHUNK_ROWS_CHARTEVENTS,
         low_memory=False,
     ):
         chunk_idx += 1
         t_chunk0 = time.time()
 
+        # Keep only chart rows from stays that appear in the panel.
         chunk_filtered = chunk[chunk["stay_id"].isin(stay_ids)].copy()
         if len(chunk_filtered) == 0:
             print(f"[EHR][{chunk_idx}] read={len(chunk):,} keep=0 dt={time.time()-t_chunk0:.1f}s")
             continue
 
+        # Parse the measurement fields needed for interval matching and aggregation.
         chunk_filtered["charttime"] = pd.to_datetime(chunk_filtered["charttime"], errors="coerce")
         chunk_filtered["valuenum"] = pd.to_numeric(chunk_filtered["valuenum"], errors="coerce")
         chunk_filtered = chunk_filtered.dropna(subset=["stay_id", "itemid", "charttime", "valuenum"]).copy()
@@ -63,6 +66,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
             print(f"[EHR][{chunk_idx}] read={len(chunk):,} numeric_keep=0 dt={time.time()-t_chunk0:.1f}s")
             continue
 
+        # Join each chart row to the panel windows for the same stay and keep interval matches.
         merged = chunk_filtered.merge(windows, on="stay_id", how="inner")
         merged = merged[
             (merged["charttime"] >= merged["cov_start"]) &
@@ -73,11 +77,13 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
         kept_rows_total += kept
 
         if kept > 0:
+            # Precompute the sums needed for chunk-wise descriptive stats and slopes.
             merged["charttime_seconds"] = merged["charttime"].astype("int64") / 1_000_000_000.0
             merged["valuenum_sq"] = merged["valuenum"] * merged["valuenum"]
             merged["charttime_sq"] = merged["charttime_seconds"] * merged["charttime_seconds"]
             merged["charttime_value"] = merged["charttime_seconds"] * merged["valuenum"]
 
+            # Aggregate chunk-level partial sums that can be combined across chunks.
             item_summary = (
                 merged.groupby(["row_id", "itemid"])
                 .agg(
@@ -94,6 +100,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
             )
             partial_stats.append(item_summary)
 
+            # Preserve the first observed value per row_id/itemid across chunks.
             first_obs = (
                 merged.sort_values(["row_id", "itemid", "charttime"])
                 .drop_duplicates(["row_id", "itemid"], keep="first")
@@ -102,6 +109,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
             )
             first_obs_parts.append(first_obs)
 
+            # Preserve the last observed value per row_id/itemid across chunks.
             last_obs = (
                 merged.sort_values(["row_id", "itemid", "charttime"])
                 .drop_duplicates(["row_id", "itemid"], keep="last")
@@ -119,6 +127,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
         print(f"[EHR] No chartevents matched windows. Total time: {time.time()-t0:.1f}s")
         return panel
 
+    # Combine the chunk-level summaries into one row_id/itemid summary table.
     agg = pd.concat(partial_stats, ignore_index=True)
     agg = (
         agg.groupby(["row_id", "itemid"])
@@ -135,6 +144,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
+    # Derive final summary statistics from the saved sums.
     agg["mean"] = agg["total"] / agg["count"]
     agg["range"] = agg["max"] - agg["min"]
 
@@ -146,6 +156,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
     )
 
     if first_obs_parts:
+        # Keep the earliest observation seen across all chunks.
         first_obs = (
             pd.concat(first_obs_parts, ignore_index=True)
             .sort_values(["row_id", "itemid", "first_time"])
@@ -154,6 +165,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
         agg = agg.merge(first_obs[["row_id", "itemid", "first"]], on=["row_id", "itemid"], how="left")
 
     if last_obs_parts:
+        # Keep the latest observation seen across all chunks.
         last_obs = (
             pd.concat(last_obs_parts, ignore_index=True)
             .sort_values(["row_id", "itemid", "last_time"])
@@ -171,6 +183,7 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
         np.nan,
     )
 
+    # Pivot the long item summaries back to one row per panel window.
     value_cols = [c for c in AGG_STATS if c in agg.columns]
     wide = agg.pivot_table(
         index="row_id",
@@ -187,17 +200,21 @@ def aggregate_itemid_covariates(panel: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
+    # Load the base panel and parse the interval boundaries used for aggregation.
     panel = pd.read_csv(BASE_PANEL_FILE, low_memory=False)
-    for col in ["inserted", "removed", "reinsertion_time", "day_start", "day_end", "cov_start", "cov_end"]:
+    for col in ["inserted", "removed", "reinsertion_time", "period_start", "period_end", "cov_start", "cov_end"]:
         panel[col] = pd.to_datetime(panel[col], errors="coerce")
 
+    # Join the chart-derived covariates onto the base panel.
     panel = aggregate_itemid_covariates(panel)
     panel = panel.drop(columns=["cov_start", "cov_end", "row_id"])
 
+    # Keep base columns first and itemid covariates after them.
     covariate_cols = sorted([c for c in panel.columns if c.startswith("itemid_")])
     base_cols = [c for c in panel.columns if not c.startswith("itemid_")]
     panel = panel[base_cols + covariate_cols]
 
+    # Save the master panel.
     outdir = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
     outdir.mkdir(exist_ok=True)
 
@@ -205,11 +222,11 @@ def main():
     panel.to_csv(outfile, index=False)
 
     print("[SAVE]", outfile)
-    print("Removals:", panel["removed_today"].sum())
-    print("Reinsertions:", panel["reinsertion_today"].sum())
-    print("CAUTI:", panel["cauti_today"].sum())
-    print("ICU end rows:", panel["icu_end_today"].sum())
-    print("Last episode days:", panel["is_last_day_of_episode"].sum())
+    print("Removals:", panel["removed_in_period"].sum())
+    print("Reinsertions:", panel["reinsertion_in_period"].sum())
+    print("CAUTI:", panel["cauti_in_period"].sum())
+    print("ICU end rows:", panel["icu_end_in_period"].sum())
+    print("Last episode periods:", panel["is_last_period_of_episode"].sum())
     print("Rows:", len(panel))
     print("[DONE]")
 

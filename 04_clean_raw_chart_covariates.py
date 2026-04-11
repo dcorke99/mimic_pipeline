@@ -53,6 +53,7 @@ NEVER_ZERO_TO_MISSING = set()
 # ============================================================
 
 def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
+    # Read only the item/value columns needed to fit item-level cleaning rules.
     slim = pd.read_csv(
         infile,
         usecols=[ITEM_COL, VALUE_COL],
@@ -68,6 +69,7 @@ def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
 
     slim["is_zero"] = slim[VALUE_COL].eq(0)
 
+    # Measure zero frequency for each itemid.
     base_stats = (
         slim.groupby(ITEM_COL, sort=False)
         .agg(
@@ -76,6 +78,7 @@ def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
         )
     )
 
+    # Use the non-zero distribution to decide whether zeros look like placeholders.
     nonzero = slim[slim[VALUE_COL] != 0].copy()
     if nonzero.empty:
         p5_nonzero = pd.Series(dtype=float, name="p5_nonzero")
@@ -89,6 +92,7 @@ def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
     rules = base_stats.join(p5_nonzero, how="left")
     rules["zero_to_missing"] = False
 
+    # Flag low-frequency zeros as missing when the observed scale is otherwise positive.
     auto_zero_mask = (
         (rules["n_non_missing"] >= MIN_N_FOR_RULES)
         & (rules["p5_nonzero"] > 0)
@@ -102,6 +106,7 @@ def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
     if NEVER_ZERO_TO_MISSING:
         rules.loc[rules.index.isin(NEVER_ZERO_TO_MISSING), "zero_to_missing"] = False
 
+    # Refit tail thresholds after removing itemids whose zeros should be ignored.
     fit_df = slim[[ITEM_COL, VALUE_COL]].merge(
         rules[["zero_to_missing"]],
         left_on=ITEM_COL,
@@ -131,6 +136,7 @@ def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
     too_few_mask = rules["n_for_thresholds"].fillna(0) < MIN_N_FOR_RULES
     rules.loc[too_few_mask, "status"] = "too_few_values_for_thresholds"
 
+    # Store both clip thresholds and wider delete thresholds for each itemid.
     iqr = rules["q3"] - rules["q1"]
     tail_span = rules["p99"] - rules["p1"]
     spread = pd.concat([iqr, tail_span], axis=1).max(axis=1)
@@ -172,6 +178,7 @@ def apply_cleaning_rules(
     audit_parts = []
     first_write = True
 
+    # Apply the fitted rules chunk-by-chunk to the full long-format file.
     for chunk in pd.read_csv(
         infile,
         chunksize=CHUNK_ROWS,
@@ -187,6 +194,7 @@ def apply_cleaning_rules(
             how="left",
         )
 
+        # Track which cleaning action each row receives.
         action = pd.Series("unchanged", index=chunk.index, dtype="object")
         action.loc[chunk[VALUE_COL].isna()] = "original_missing_or_non_numeric"
 
@@ -242,7 +250,7 @@ def apply_cleaning_rules(
         clip_mask = (clip_low_mask | clip_high_mask) & action.eq("unchanged")
         action.loc[clip_mask] = "tail_clipped"
 
-        # audit
+        # Summarise the cleaning actions for this chunk.
         audit_chunk = (
             pd.DataFrame({
                 ITEM_COL: chunk[ITEM_COL],
@@ -255,7 +263,7 @@ def apply_cleaning_rules(
         )
         audit_parts.append(audit_chunk)
 
-        # write only original columns back out
+        # Write back only the original columns so the output schema stays unchanged.
         chunk = chunk[original_columns]
 
         chunk.to_csv(
@@ -273,6 +281,7 @@ def apply_cleaning_rules(
         .reset_index()
     )
 
+    # Pivot the action summary wide so it can be merged with the rule table.
     audit_wide = audit_long.pivot(
         index=ITEM_COL,
         columns="action",
@@ -318,6 +327,7 @@ def apply_cleaning_rules(
         .merge(after_counts, on=ITEM_COL, how="left")
     )
 
+    # Fill missing action counts with zero while leaving rule parameters untouched.
     for col in audit.columns:
         if col not in {
             ITEM_COL,
@@ -346,11 +356,13 @@ def apply_cleaning_rules(
 # ============================================================
 
 def main():
+    # Fit the item-level rules and save them for inspection.
     print("[FIT RULES]", INFILE)
     rules = fit_cleaning_rules(INFILE)
     rules.to_csv(RULES_OUTFILE, index=False)
     print("[SAVE RULES]", RULES_OUTFILE)
 
+    # Apply the rules to the full file and save the cleaning audit.
     print("[APPLY RULES]", INFILE)
     audit = apply_cleaning_rules(INFILE, OUTFILE, rules)
     print("[SAVE CLEANED]", OUTFILE)

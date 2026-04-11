@@ -34,24 +34,31 @@ D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_i
 ID_COL = "subject_id"
 TIME_COL = "episode_index"
 STATE_COL = "catheter_state"
-DAYS_COL = "days_in_state"
+PERIODS_COL = "periods_in_state"
 SPLIT_COL = "split"
 
-ACTION_COL = "removed_today"
-Y_CAUTI = "cauti_today"
-Y_REINS = "reinsertion_today"
-LAST_DAY_COL = "is_last_day_of_episode"
+ACTION_COL = "removed_in_period"
+Y_CAUTI = "cauti_in_period"
+Y_REINS = "reinsertion_in_period"
+LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
 
-POST_REMOVE_RISK_DAYS = 2
+POST_REMOVE_RISK_PERIODS = 2
 KEEP_STATS = {"mean"}
 
 
 def _validate_split(df: pd.DataFrame) -> None:
+    # Standardise split labels and fail if unexpected values are present.
     df[SPLIT_COL] = df[SPLIT_COL].astype(str).str.strip().str.lower()
+    valid_splits = {"train", "test"}
+    found_splits = set(df[SPLIT_COL].dropna().unique())
+    invalid_splits = sorted(found_splits - valid_splits)
+    if invalid_splits:
+        raise ValueError(f"Unexpected split values in {SPLIT_COL}: {invalid_splits}")
 
 
 def _base_feature_cols(df: pd.DataFrame) -> list[str]:
+    # Keep demographic and itemid-derived predictors in a stable order.
     cols = [
         c for c in df.columns
         if c.startswith("itemid_") or c.startswith("sex_") or c.startswith("ethnicity_")
@@ -67,6 +74,7 @@ def _base_feature_cols(df: pd.DataFrame) -> list[str]:
 
 
 def _coerce_numeric(df: pd.DataFrame, cols: list[str], fill_missing_with_zero: bool) -> None:
+    # Convert model inputs and binary targets to numeric values.
     for col in cols:
         if col not in df.columns:
             continue
@@ -87,7 +95,10 @@ def _json_ready(obj):
     if isinstance(obj, list):
         return [_json_ready(v) for v in obj]
     return obj
+
+
 def _detect_covariate_cols(columns: list[str], keep_stats: set[str]) -> pd.DataFrame:
+    # Parse itemid summary columns so they can be labelled in the dictionary file.
     pattern = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
     rows = []
     for col in columns:
@@ -104,6 +115,7 @@ def _detect_covariate_cols(columns: list[str], keep_stats: set[str]) -> pd.DataF
 def main() -> None:
     OUTDIR.mkdir(exist_ok=True, parents=True)
 
+    # Load the filtered panel and normalise the core identifier columns.
     df = pd.read_csv(INFILE, low_memory=False)
     df.columns = df.columns.str.strip()
 
@@ -114,58 +126,73 @@ def main() -> None:
 
     _validate_split(df)
 
+    # Add the explicit out-state feature used by the downstream models.
     df["state_is_out"] = (df[STATE_COL] == "out").astype(int)
 
-    base_feat = _base_feature_cols(df)
+    base_feature_cols = _base_feature_cols(df)
 
-    _coerce_numeric(df, base_feat + [TIME_COL, DAYS_COL, "state_is_out"], fill_missing_with_zero=False)
+    # Coerce the model feature columns and time counters.
+    _coerce_numeric(df, base_feature_cols + [TIME_COL, PERIODS_COL, "state_is_out"], fill_missing_with_zero=False)
 
-    target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, LAST_DAY_COL]
+    # Coerce binary targets and flags to 0/1 integers.
+    target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, LAST_PERIOD_COL]
     _coerce_numeric(df, target_flag_cols, fill_missing_with_zero=True)
 
-    feat = list(base_feat)
-    x_cols_remove = [TIME_COL, DAYS_COL, *feat]
-    x_cols_cauti = [TIME_COL, DAYS_COL, "state_is_out", *feat]
-    x_cols_reins = [DAYS_COL, *feat]
+    feature_cols = list(base_feature_cols)
+    x_cols_remove = [TIME_COL, PERIODS_COL, *feature_cols]
+    x_cols_cauti = [TIME_COL, PERIODS_COL, "state_is_out", *feature_cols]
+    x_cols_reins = [PERIODS_COL, *feature_cols]
 
     required_feature_cols = sorted(set(x_cols_remove + x_cols_cauti + x_cols_reins))
     missing_required = [c for c in required_feature_cols if c not in df.columns]
     if missing_required:
         raise ValueError(f"Missing required Step 1 feature columns after preprocessing: {missing_required}")
 
+    # Save the cleaned feature panel before writing the metadata side files.
     df.to_csv(OUTFILE, index=False)
 
+    period_hours = int(
+        pd.to_numeric(df["interval_hours"], errors="coerce")
+        .dropna()
+        .mode()
+        .iloc[0]
+    )
+
     covariate_dict = _detect_covariate_cols(df.columns.tolist(), KEEP_STATS)
-    d_items = pd.read_csv(D_ITEMS_PATH, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
-    d_items["itemid"] = pd.to_numeric(d_items["itemid"], errors="coerce")
-    d_items = d_items.dropna(subset=["itemid"])
-    d_items["itemid"] = d_items["itemid"].astype(int)
-    itemid_to_label = d_items.set_index("itemid")["label"].to_dict()
+    d_items_df = pd.read_csv(D_ITEMS_PATH, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
+    d_items_df["itemid"] = pd.to_numeric(d_items_df["itemid"], errors="coerce")
+    d_items_df = d_items_df.dropna(subset=["itemid"]).copy()
+    d_items_df["itemid"] = d_items_df["itemid"].astype(int)
+    itemid_to_label = d_items_df.set_index("itemid")["label"].to_dict()
+
+    # Build a readable mapping from itemid feature columns to MIMIC labels.
     covariate_dict["label"] = covariate_dict["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
     covariate_dict["description"] = covariate_dict["label"].astype(str) + " [" + covariate_dict["stat"].astype(str) + "]"
     covariate_dict.sort_values(["label", "itemid", "stat"]).drop(columns=["stat", "description"]).to_csv(
         COVARIATE_DICT_FILE, index=False
     )
 
+    # Save the feature specification consumed by Step 1.
     spec = {
         "id_col": ID_COL,
         "time_col": TIME_COL,
         "state_col": STATE_COL,
-        "days_col": DAYS_COL,
+        "periods_col": PERIODS_COL,
         "split_col": SPLIT_COL,
         "action_col": ACTION_COL,
         "y_cauti": Y_CAUTI,
         "y_reins": Y_REINS,
-        "last_day_col": LAST_DAY_COL,
+        "last_period_col": LAST_PERIOD_COL,
         "end_reason_col": END_REASON_COL,
-        "post_remove_risk_days": POST_REMOVE_RISK_DAYS,
-        "base_feature_cols": base_feat,
-        "features": feat,
+        "period_hours": period_hours,
+        "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
+        "base_feature_cols": base_feature_cols,
+        "features": feature_cols,
         "x_cols_remove": x_cols_remove,
         "x_cols_cauti": x_cols_cauti,
         "x_cols_reins": x_cols_reins,
         "n_rows": int(len(df)),
-        "n_features": int(len(feat)),
+        "n_features": int(len(feature_cols)),
     }
     FEATURE_SPEC_FILE.write_text(json.dumps(_json_ready(spec), indent=2), encoding="utf-8")
 
@@ -173,8 +200,8 @@ def main() -> None:
     print(f"[SAVE] feature spec: {FEATURE_SPEC_FILE}")
     print(f"[SAVE] covariate dictionary: {COVARIATE_DICT_FILE}")
     print(f"Rows: {len(df)}")
-    print(f"Base features: {len(base_feat)}")
-    print(f"Total features: {len(feat)}")
+    print(f"Base features: {len(base_feature_cols)}")
+    print(f"Total features: {len(feature_cols)}")
 
 
 if __name__ == "__main__":

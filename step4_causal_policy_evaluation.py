@@ -37,8 +37,8 @@ BOOT_PROGRESS_EVERY = 25
 
 # Clipping sensitivity settings
 SENSITIVITY_POLICIES = {
-    "fixed_day5",
-    "fixed_day7",
+    "fixed_period5",
+    "fixed_period7",
     "risk_tau_0_05",
     "risk_tau_0_10",
     "risk_tau_0_15",
@@ -57,16 +57,16 @@ ID_COL = "subject_id"
 TRAJ_KEYS = ["subject_id", "hadm_id", "stay_id", "inserted"]
 
 TIME_COL = "episode_index"
-START_COL = "day_start"
+START_COL = "period_start"
 INSERTED_COL = "inserted"
 STATE_COL = "catheter_state"
-DAYS_COL = "days_in_state"
+PERIODS_COL = "periods_in_state"
 INTERVAL_COL = "interval_hours"
 SPLIT_COL = "split"
 
-A_COL = "removed_today"
-CAUTI_TODAY = "cauti_today"
-REINS_TODAY = "reinsertion_today"
+A_COL = "removed_in_period"
+CAUTI_TODAY = "cauti_in_period"
+REINS_TODAY = "reinsertion_in_period"
 
 # Utility weights
 W_CAUTI = 10.0
@@ -79,8 +79,8 @@ W_CATH_DAYS = 1.0
 RISK_TAUS = [0.01, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
 
 
-def policy_fixed_day_remove(days_in_state: int, remove_day: int) -> int:
-    return 1 if days_in_state >= remove_day else 0
+def policy_fixed_period_remove(periods_in_state: int, remove_period: int) -> int:
+    return 1 if periods_in_state >= remove_period else 0
 
 
 def policy_risk_threshold(p_cauti_keep: float, tau: float) -> int:
@@ -99,9 +99,9 @@ def policy_hybrid(
 
 
 POLICIES = [
-    ("fixed_day3", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 3)),
-    ("fixed_day5", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 5)),
-    ("fixed_day7", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 7)),
+    ("fixed_period3", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 3)),
+    ("fixed_period5", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 5)),
+    ("fixed_period7", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 7)),
     *[
         (
             f"risk_tau_{tau:.2f}".replace(".", "_"),
@@ -130,7 +130,7 @@ def validate_split(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def feature_cols(df: pd.DataFrame) -> list[str]:
-    cols = [TIME_COL, DAYS_COL, INTERVAL_COL]
+    cols = [TIME_COL, PERIODS_COL, INTERVAL_COL]
     cols += [c for c in df.columns if c.startswith("itemid_")]
     cols += [c for c in df.columns if c.startswith("sex_")]
     cols += [c for c in df.columns if c.startswith("ethnicity_")]
@@ -140,7 +140,7 @@ def feature_cols(df: pd.DataFrame) -> list[str]:
 
 def numerator_cols() -> list[str]:
     # Stabilisation model: time-only terms
-    return [TIME_COL, DAYS_COL]
+    return [TIME_COL, PERIODS_COL]
 
 
 # -----------------------------
@@ -599,7 +599,7 @@ def main() -> None:
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
 
     df[TIME_COL] = pd.to_numeric(df[TIME_COL], errors="coerce")
-    df[DAYS_COL] = pd.to_numeric(df[DAYS_COL], errors="coerce")
+    df[PERIODS_COL] = pd.to_numeric(df[PERIODS_COL], errors="coerce")
     df[INTERVAL_COL] = pd.to_numeric(df[INTERVAL_COL], errors="coerce")
     df["hadm_id"] = pd.to_numeric(df["hadm_id"], errors="coerce")
     df["stay_id"] = pd.to_numeric(df["stay_id"], errors="coerce")
@@ -609,7 +609,7 @@ def main() -> None:
             START_COL,
             INSERTED_COL,
             TIME_COL,
-            DAYS_COL,
+            PERIODS_COL,
             INTERVAL_COL,
             "hadm_id",
             "stay_id",
@@ -617,7 +617,7 @@ def main() -> None:
     ).copy()
 
     df[TIME_COL] = df[TIME_COL].astype("int64")
-    df[DAYS_COL] = df[DAYS_COL].astype("int64")
+    df[PERIODS_COL] = df[PERIODS_COL].astype("int64")
     df["hadm_id"] = df["hadm_id"].astype("int64")
     df["stay_id"] = df["stay_id"].astype("int64")
 

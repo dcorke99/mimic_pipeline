@@ -25,16 +25,16 @@ CHUNK_ROWS = 1_000_000
 
 # Load d_items labels for readability.
 def load_item_labels(d_items_path: Path) -> dict[int, str]:
+    # Require the label table so item-level audit output is interpretable.
     if not d_items_path.exists():
-        return {}
+        raise FileNotFoundError(f"d_items file not found: {d_items_path}")
 
-    d_items = pd.read_csv(d_items_path, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
-    d_items["itemid"] = pd.to_numeric(d_items["itemid"], errors="coerce")
-    d_items = d_items.dropna(subset=["itemid"]).copy()
-    d_items["itemid"] = d_items["itemid"].astype(int)
-    d_items["label"] = d_items["label"].astype(str)
-    itemid_label_map = d_items.set_index("itemid")["label"].to_dict()
-    return {k: v for k, v in itemid_label_map.items()}
+    d_items_df = pd.read_csv(d_items_path, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
+    d_items_df["itemid"] = pd.to_numeric(d_items_df["itemid"], errors="coerce")
+    d_items_df = d_items_df.dropna(subset=["itemid"]).copy()
+    d_items_df["itemid"] = d_items_df["itemid"].astype(int)
+    d_items_df["label"] = d_items_df["label"].astype(str)
+    return d_items_df.set_index("itemid")["label"].to_dict()
 
 
 # Load optional bounds file, resolving bounds at the itemid level.
@@ -44,22 +44,23 @@ def load_bounds(bounds_file: Path) -> dict[int, tuple[float, float]]:
     if not bounds_file.exists():
         return by_itemid
 
-    b = pd.read_csv(bounds_file)
+    bounds_df = pd.read_csv(bounds_file)
 
-    if not {"itemid", "lower_bound", "upper_bound"}.issubset(b.columns):
-        return by_itemid
+    required_cols = {"itemid", "lower_bound", "upper_bound"}
+    if not required_cols.issubset(bounds_df.columns):
+        raise ValueError(f"Bounds file is missing required columns: {sorted(required_cols)}")
 
-    tmp = b[["itemid", "lower_bound", "upper_bound"]].copy()
-    tmp["itemid"] = pd.to_numeric(tmp["itemid"], errors="coerce")
-    tmp["lower_bound"] = pd.to_numeric(tmp["lower_bound"], errors="coerce")
-    tmp["upper_bound"] = pd.to_numeric(tmp["upper_bound"], errors="coerce")
-    tmp = tmp.dropna(subset=["itemid"]).copy()
-    tmp["itemid"] = tmp["itemid"].astype(int)
+    bounds_rows = bounds_df[["itemid", "lower_bound", "upper_bound"]].copy()
+    bounds_rows["itemid"] = pd.to_numeric(bounds_rows["itemid"], errors="coerce")
+    bounds_rows["lower_bound"] = pd.to_numeric(bounds_rows["lower_bound"], errors="coerce")
+    bounds_rows["upper_bound"] = pd.to_numeric(bounds_rows["upper_bound"], errors="coerce")
+    bounds_rows = bounds_rows.dropna(subset=["itemid"]).copy()
+    bounds_rows["itemid"] = bounds_rows["itemid"].astype(int)
 
     # Keep the first bounds row for each itemid.
-    tmp = tmp.drop_duplicates(subset=["itemid"], keep="first")
+    bounds_rows = bounds_rows.drop_duplicates(subset=["itemid"], keep="first")
 
-    for _, row in tmp.iterrows():
+    for _, row in bounds_rows.iterrows():
         by_itemid[int(row["itemid"])] = (row["lower_bound"], row["upper_bound"])
 
     return by_itemid
@@ -218,6 +219,7 @@ def main() -> None:
     value_parts: dict[int, list[pd.Series]] = defaultdict(list)
     unit_counts_by_itemid: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
+    # Stream the cleaned file so the audit can handle large chart tables.
     for chunk in pd.read_csv(DATA_FILE, usecols=usecols, chunksize=CHUNK_ROWS, low_memory=False):
         chunk.columns = chunk.columns.str.strip()
         chunk["itemid"] = pd.to_numeric(chunk["itemid"], errors="coerce")
@@ -250,7 +252,7 @@ def main() -> None:
     )
     audit.to_csv(OUTDIR / "cleaned_chart_integrity_audit.csv", index=False)
 
-    # Convenience file: likely problematic variables first.
+    # Save a second copy sorted to surface the most suspicious variables first.
     audit_problem = audit.copy()
     audit_problem["abs_max_minus_p99"] = (
         pd.to_numeric(audit_problem["max"], errors="coerce")

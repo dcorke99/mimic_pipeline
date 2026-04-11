@@ -24,13 +24,14 @@ MODEL_FILE = INDIR / "transition_models.pkl"
 TRAJ_KEYS = ["subject_id", "hadm_id", "stay_id", "inserted"]
 
 TIME_COL = "episode_index"
-START_COL = "day_start"
-END_COL = "day_end"
+START_COL = "period_start"
+END_COL = "period_end"
 INSERTED_COL = "inserted"
 STATE_COL = "catheter_state"
-DAYS_COL = "days_in_state"
+PERIODS_COL = "periods_in_state"
 INTERVAL_COL = "interval_hours"
 SPLIT_COL = "split"
+PERIOD_HOURS = 24
 
 # Utility weights
 W_CAUTI = 10.0
@@ -43,8 +44,8 @@ W_CATH_DAYS = 1.0
 RISK_TAUS = [0.01, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
 
 
-def policy_fixed_day_remove(days_in_state: int, remove_day: int) -> int:
-    return 1 if days_in_state >= remove_day else 0
+def policy_fixed_period_remove(periods_in_state: int, remove_period: int) -> int:
+    return 1 if periods_in_state >= remove_period else 0
 
 
 def policy_risk_threshold(p_cauti_keep: float, tau: float) -> int:
@@ -63,9 +64,9 @@ def policy_hybrid(
 
 
 POLICIES = [
-    ("fixed_day3", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 3)),
-    ("fixed_day5", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 5)),
-    ("fixed_day7", lambda r: policy_fixed_day_remove(int(r[DAYS_COL]), 7)),
+    ("fixed_period3", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 3)),
+    ("fixed_period5", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 5)),
+    ("fixed_period7", lambda r: policy_fixed_period_remove(int(r[PERIODS_COL]), 7)),
     *[
         (
             f"risk_tau_{tau:.2f}".replace(".", "_"),
@@ -155,7 +156,7 @@ def _build_feature_frame(
     anchor_row: pd.Series,
     x_cols: list[str],
     time_value: int,
-    days_value: int,
+    periods_value: int,
     state_is_out: int | None = None,
 ) -> pd.DataFrame:
     data: dict[str, float] = {}
@@ -163,8 +164,8 @@ def _build_feature_frame(
     for c in x_cols:
         if c == TIME_COL:
             data[c] = float(time_value)
-        elif c == DAYS_COL:
-            data[c] = float(days_value)
+        elif c == PERIODS_COL:
+            data[c] = float(periods_value)
         elif c == "state_is_out":
             if state_is_out is None:
                 raise ValueError("state_is_out was requested but not supplied.")
@@ -178,7 +179,7 @@ def _build_feature_frame(
 def score_in_state(
     anchor_row: pd.Series,
     time_value: int,
-    in_day: int,
+    in_period: int,
     cauti_model,
     reins_model,
     x_cols_cauti: list[str],
@@ -194,7 +195,7 @@ def score_in_state(
         anchor_row=anchor_row,
         x_cols=x_cols_cauti,
         time_value=time_value,
-        days_value=in_day,
+        periods_value=in_period,
         state_is_out=0,
     )
     p_cauti_if_keep = _clip01(_predict_proba(cauti_model, X_keep))
@@ -203,7 +204,7 @@ def score_in_state(
         anchor_row=anchor_row,
         x_cols=x_cols_cauti,
         time_value=time_value,
-        days_value=1,
+        periods_value=1,
         state_is_out=1,
     )
     p_cauti_if_remove = _clip01(_predict_proba(cauti_model, X_remove_cauti))
@@ -212,7 +213,7 @@ def score_in_state(
         anchor_row=anchor_row,
         x_cols=x_cols_reins,
         time_value=time_value,
-        days_value=1,
+        periods_value=1,
         state_is_out=None,
     )
     p_reins_if_remove = _clip01(_predict_proba(reins_model, X_remove_reins))
@@ -223,7 +224,7 @@ def score_in_state(
 def score_out_state(
     anchor_row: pd.Series,
     time_value: int,
-    out_day: int,
+    out_period: int,
     cauti_model,
     reins_model,
     x_cols_cauti: list[str],
@@ -238,7 +239,7 @@ def score_out_state(
         anchor_row=anchor_row,
         x_cols=x_cols_cauti,
         time_value=time_value,
-        days_value=out_day,
+        periods_value=out_period,
         state_is_out=1,
     )
     p_cauti_if_out = _clip01(_predict_proba(cauti_model, X_out_cauti))
@@ -247,7 +248,7 @@ def score_out_state(
         anchor_row=anchor_row,
         x_cols=x_cols_reins,
         time_value=time_value,
-        days_value=out_day,
+        periods_value=out_period,
         state_is_out=None,
     )
     p_reins_if_out = _clip01(_predict_proba(reins_model, X_out_reins))
@@ -307,7 +308,7 @@ def simulate_rollout_counterfactual(
     horizon = _get_horizon(g)
 
     state = str(g[STATE_COL].iloc[0]).strip().lower()
-    days_in_state = int(g[DAYS_COL].iloc[0])
+    periods_in_state = int(g[PERIODS_COL].iloc[0])
     cf_time_index = 0
 
     cauti = 0
@@ -317,7 +318,7 @@ def simulate_rollout_counterfactual(
     out_days = 0.0
 
     while t < horizon:
-        next_t = min(t + pd.Timedelta(hours=24), horizon)
+        next_t = min(t + pd.Timedelta(hours=PERIOD_HOURS), horizon)
         interval_hours = (next_t - t).total_seconds() / 3600.0
         interval_days = interval_hours / 24.0
 
@@ -330,7 +331,7 @@ def simulate_rollout_counterfactual(
             p_keep, p_cauti_remove, p_reins_remove = score_in_state(
                 anchor_row=anchor_row,
                 time_value=cf_time_index,
-                in_day=days_in_state,
+                in_period=periods_in_state,
                 cauti_model=cauti_model,
                 reins_model=reins_model,
                 x_cols_cauti=x_cols_cauti,
@@ -339,7 +340,7 @@ def simulate_rollout_counterfactual(
 
             policy_ctx = pd.Series(
                 {
-                    DAYS_COL: days_in_state,
+                    PERIODS_COL: periods_in_state,
                     "p_cauti_if_keep": p_keep,
                     "p_cauti_if_remove": p_cauti_remove,
                     "p_reins_if_remove": p_reins_remove,
@@ -355,7 +356,7 @@ def simulate_rollout_counterfactual(
                     break
 
                 state = "in"
-                days_in_state += 1
+                periods_in_state += 1
 
             else:
                 removals += 1
@@ -373,10 +374,10 @@ def simulate_rollout_counterfactual(
                 elif outcome == "other":
                     reins += 1
                     state = "in"
-                    days_in_state = 1
+                    periods_in_state = 1
                 else:
                     state = "out"
-                    days_in_state = 2
+                    periods_in_state = 2
 
         # -------------------------
         # OUT-state rollout
@@ -385,7 +386,7 @@ def simulate_rollout_counterfactual(
             p_cauti_out, p_reins_out = score_out_state(
                 anchor_row=anchor_row,
                 time_value=cf_time_index,
-                out_day=days_in_state,
+                out_period=periods_in_state,
                 cauti_model=cauti_model,
                 reins_model=reins_model,
                 x_cols_cauti=x_cols_cauti,
@@ -406,10 +407,10 @@ def simulate_rollout_counterfactual(
             elif outcome == "other":
                 reins += 1
                 state = "in"
-                days_in_state = 1
+                periods_in_state = 1
             else:
                 state = "out"
-                days_in_state += 1
+                periods_in_state += 1
 
         t = next_t
         cf_time_index += 1
@@ -443,7 +444,7 @@ def main() -> None:
     df[INSERTED_COL] = pd.to_datetime(df[INSERTED_COL], errors="coerce")
 
     df[TIME_COL] = pd.to_numeric(df[TIME_COL], errors="coerce")
-    df[DAYS_COL] = pd.to_numeric(df[DAYS_COL], errors="coerce")
+    df[PERIODS_COL] = pd.to_numeric(df[PERIODS_COL], errors="coerce")
     df[INTERVAL_COL] = pd.to_numeric(df[INTERVAL_COL], errors="coerce")
 
     df["subject_id"] = df["subject_id"].astype(str).str.strip()
@@ -451,7 +452,7 @@ def main() -> None:
     df["stay_id"] = pd.to_numeric(df["stay_id"], errors="coerce")
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
 
-    cols_to_numeric = list(dict.fromkeys(feature_cols + [TIME_COL, DAYS_COL, INTERVAL_COL]))
+    cols_to_numeric = list(dict.fromkeys(feature_cols + [TIME_COL, PERIODS_COL, INTERVAL_COL]))
     for c in cols_to_numeric:
         if c not in df.columns:
             continue
@@ -471,7 +472,7 @@ def main() -> None:
             END_COL,
             INSERTED_COL,
             TIME_COL,
-            DAYS_COL,
+            PERIODS_COL,
             INTERVAL_COL,
             "hadm_id",
             "stay_id",
@@ -479,7 +480,7 @@ def main() -> None:
     ).copy()
 
     df[TIME_COL] = df[TIME_COL].astype("int64")
-    df[DAYS_COL] = df[DAYS_COL].astype("int64")
+    df[PERIODS_COL] = df[PERIODS_COL].astype("int64")
     df["hadm_id"] = df["hadm_id"].astype("int64")
     df["stay_id"] = df["stay_id"].astype("int64")
 
