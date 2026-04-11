@@ -10,31 +10,34 @@ OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
 OUTFILE = OUTDIR / "required_catheter_episodes.csv"
 BASE_PANEL_OUTFILE = OUTDIR / "base_panel.csv"
 # Minimum retained episode duration in seconds.
-PATIENT_DAY_SECONDS = 86400
+MIN_EPISODE_SECONDS = 86400
+# Length of one panel period in hours.
+PERIOD_HOURS = 24
 # Foley catheter procedure itemid.
 FOLEY_ITEMID = 229351
-LOOKBACK_HOURS = 24
+LOOKBACK_HOURS = 12
 
 
-def collapse_ethnicity(x):
-    if pd.isna(x):
+def map_ethnicity_group(value):
+    # Collapse detailed race strings into a small set of analysis groups.
+    if pd.isna(value):
         return "Unknown"
-    s = str(x).upper()
-    if "WHITE" in s:
+    ethnicity_text = str(value).upper()
+    if "WHITE" in ethnicity_text:
         return "White"
-    if "BLACK" in s:
+    if "BLACK" in ethnicity_text:
         return "Black"
-    if "ASIAN" in s:
+    if "ASIAN" in ethnicity_text:
         return "Asian"
-    if "HISPANIC" in s or "LATIN" in s:
+    if "HISPANIC" in ethnicity_text or "LATIN" in ethnicity_text:
         return "Hispanic"
-    if "DECLINED" in s or "UNKNOWN" in s or "UNABLE" in s:
+    if "DECLINED" in ethnicity_text or "UNKNOWN" in ethnicity_text or "UNABLE" in ethnicity_text:
         return "Unknown"
     return "Other"
 
 
-def collapse_foley_events(df: pd.DataFrame) -> pd.DataFrame:
-    # Collapse overlapping Foley procedure rows within each ICU stay.
+def merge_overlapping_foley_events(df: pd.DataFrame) -> pd.DataFrame:
+    # Merge overlapping Foley rows within each stay into one continuous episode.
     episodes = []
 
     for stay_id, stay_events in df.groupby("stay_id"):
@@ -52,13 +55,15 @@ def collapse_foley_events(df: pd.DataFrame) -> pd.DataFrame:
                 continue
 
             if event.inserted <= current_end:
-                # Extend the current episode end when rows overlap.
+                # If the next row starts before the current episode ends, both rows are
+                # part of the same episode, so keep the earliest start and extend the end.
                 if pd.isna(current_end):
                     current_end = event.removed
                 elif pd.notna(event.removed) and event.removed > current_end:
                     current_end = event.removed
             else:
-                # Append the completed episode and start a new one.
+                # If the next row starts after the current episode ends, the overlap is
+                # broken, so save the finished episode and start a new one.
                 episodes.append((stay_id, current_start, current_end))
                 current_start = event.inserted
                 current_end = event.removed
@@ -112,7 +117,7 @@ def build_required_catheter_episodes(mimic_dir: Path) -> pd.DataFrame:
         on=["subject_id", "hadm_id"],
         how="left",
     )
-    icu["ethnicity_group"] = icu["ethnicity"].apply(collapse_ethnicity)
+    icu["ethnicity_group"] = icu["ethnicity"].apply(map_ethnicity_group)
 
     # Read procedure event rows.
     procedure_events = pd.read_csv(
@@ -144,7 +149,7 @@ def build_required_catheter_episodes(mimic_dir: Path) -> pd.DataFrame:
     procedure_events = procedure_events.sort_values(["stay_id", "inserted"])
 
     # Collapse overlapping procedure rows into episodes.
-    collapsed = collapse_foley_events(procedure_events)
+    collapsed = merge_overlapping_foley_events(procedure_events)
 
     # Join identifiers, demographics, and ICU times onto episode rows.
     catheterised = collapsed.merge(
@@ -153,22 +158,13 @@ def build_required_catheter_episodes(mimic_dir: Path) -> pd.DataFrame:
         how="inner",
     ).rename(columns={"intime": "ICU_in", "outtime": "ICU_out"})
 
-    # Initialise the reinsertion-time column.
-    catheterised["reinsertion_time"] = pd.NaT
+    # Mark the next catheter insertion within each stay.
+    catheterised = catheterised.sort_values(["stay_id", "inserted"]).reset_index(drop=True)
+    catheterised["reinsertion_time"] = catheterised.groupby("stay_id")["inserted"].shift(-1)
 
-    # Assign the next insertion time within each stay.
-    for stay_id, stay_episodes in catheterised.groupby("stay_id"):
-        # Collect row indices and insertion timestamps.
-        episode_indices = stay_episodes.index.tolist()
-        insertion_times = stay_episodes["inserted"].tolist()
-
-        # Write the next insertion time back to the current row.
-        for i in range(len(episode_indices) - 1):
-            catheterised.loc[episode_indices[i], "reinsertion_time"] = insertion_times[i + 1]
-
-    # Filter to episodes lasting at least 24 hours.
+    # Filter to episodes lasting at least the minimum retained duration.
     episode_duration_seconds = (catheterised["removed"] - catheterised["inserted"]).dt.total_seconds()
-    catheterised = catheterised[episode_duration_seconds >= PATIENT_DAY_SECONDS].copy()
+    catheterised = catheterised[episode_duration_seconds >= MIN_EPISODE_SECONDS].copy()
 
     # Read microbiology rows used for CAUTI episode matching.
     micro = pd.read_csv(
@@ -210,6 +206,7 @@ def build_required_catheter_episodes(mimic_dir: Path) -> pd.DataFrame:
 
 
 def make_state_windows(state_start, state_end):
+    # Split one state interval into consecutive windows up to PERIOD_HOURS long.
     if pd.isna(state_start) or pd.isna(state_end) or state_end <= state_start:
         return []
 
@@ -218,7 +215,7 @@ def make_state_windows(state_start, state_end):
     state_idx = 0
 
     while window_start < state_end:
-        window_end = min(window_start + pd.Timedelta(hours=24), state_end)
+        window_end = min(window_start + pd.Timedelta(hours=PERIOD_HOURS), state_end)
         interval_hours = round((window_end - window_start).total_seconds() / 3600.0, 2)
         rows.append((state_idx, window_start, window_end, interval_hours))
         window_start = window_end
@@ -228,12 +225,13 @@ def make_state_windows(state_start, state_end):
 
 
 def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
+    # Expand each catheter episode into in-state and out-state panel periods.
     rows = []
 
     for episode in catheterised.itertuples():
         in_windows = make_state_windows(episode.inserted, episode.removed)
 
-        for state_idx, day_start, day_end, interval_hours in in_windows:
+        for state_idx, period_start, period_end, interval_hours in in_windows:
             rows.append({
                 "subject_id": episode.subject_id,
                 "hadm_id": episode.hadm_id,
@@ -243,8 +241,8 @@ def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
                 "reinsertion_time": episode.reinsertion_time,
                 "catheter_state": "in",
                 "state_index": state_idx,
-                "day_start": day_start,
-                "day_end": day_end,
+                "period_start": period_start,
+                "period_end": period_end,
                 "interval_hours": interval_hours,
                 "cauti_time": episode.cauti_time,
                 "ICU_out": episode.ICU_out,
@@ -257,7 +255,7 @@ def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
         out_state_end = episode.reinsertion_time if pd.notna(episode.reinsertion_time) else episode.ICU_out
         out_windows = make_state_windows(episode.removed, out_state_end)
 
-        for state_idx, day_start, day_end, interval_hours in out_windows:
+        for state_idx, period_start, period_end, interval_hours in out_windows:
             rows.append({
                 "subject_id": episode.subject_id,
                 "hadm_id": episode.hadm_id,
@@ -267,8 +265,8 @@ def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
                 "reinsertion_time": episode.reinsertion_time,
                 "catheter_state": "out",
                 "state_index": state_idx,
-                "day_start": day_start,
-                "day_end": day_end,
+                "period_start": period_start,
+                "period_end": period_end,
                 "interval_hours": interval_hours,
                 "cauti_time": episode.cauti_time,
                 "ICU_out": episode.ICU_out,
@@ -280,68 +278,69 @@ def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
 
     panel = pd.DataFrame(rows)
     panel = panel.sort_values(
-        ["stay_id", "inserted", "day_start", "day_end", "catheter_state"]
+        ["stay_id", "inserted", "period_start", "period_end", "catheter_state"]
     ).reset_index(drop=True)
 
     panel["episode_index"] = panel.groupby(["stay_id", "inserted"]).cumcount()
-    panel["days_in_state"] = panel["state_index"] + 1
+    panel["periods_in_state"] = panel["state_index"] + 1
     panel = panel.drop(columns=["state_index"])
 
-    panel["removed_today"] = (
+    panel["removed_in_period"] = (
         (panel["catheter_state"] == "in") &
-        (panel["removed"] > panel["day_start"]) &
-        (panel["removed"] <= panel["day_end"])
+        (panel["removed"] > panel["period_start"]) &
+        (panel["removed"] <= panel["period_end"])
     ).astype(int)
 
-    panel["reinsertion_today"] = (
+    panel["reinsertion_in_period"] = (
         (panel["catheter_state"] == "out") &
         panel["reinsertion_time"].notna() &
-        (panel["reinsertion_time"] > panel["day_start"]) &
-        (panel["reinsertion_time"] <= panel["day_end"])
+        (panel["reinsertion_time"] > panel["period_start"]) &
+        (panel["reinsertion_time"] <= panel["period_end"])
     ).astype(int)
 
-    panel["icu_end_today"] = (
+    panel["icu_end_in_period"] = (
         panel["ICU_out"].notna() &
-        (panel["ICU_out"] > panel["day_start"]) &
-        (panel["ICU_out"] <= panel["day_end"])
+        (panel["ICU_out"] > panel["period_start"]) &
+        (panel["ICU_out"] <= panel["period_end"])
     ).astype(int)
 
-    panel["cauti_today"] = (
+    panel["cauti_in_period"] = (
         panel["cauti_time"].notna() &
-        (panel["cauti_time"] > panel["day_start"]) &
-        (panel["cauti_time"] <= panel["day_end"])
+        (panel["cauti_time"] > panel["period_start"]) &
+        (panel["cauti_time"] <= panel["period_end"])
     ).astype(int)
 
     panel["at_risk_in"] = (panel["catheter_state"] == "in").astype(int)
     panel["at_risk_out"] = (panel["catheter_state"] == "out").astype(int)
 
     episode_keys = ["stay_id", "inserted"]
-    panel["is_last_day_of_episode"] = 0
-    last_row_index = panel.groupby(episode_keys)["day_end"].idxmax()
-    panel.loc[last_row_index, "is_last_day_of_episode"] = 1
+    panel["is_last_period_of_episode"] = 0
+    last_row_index = panel.groupby(episode_keys)["period_end"].idxmax()
+    panel.loc[last_row_index, "is_last_period_of_episode"] = 1
 
     panel["episode_end_reason"] = pd.NA
     panel.loc[
-        (panel["is_last_day_of_episode"] == 1) & (panel["reinsertion_today"] == 1),
+        (panel["is_last_period_of_episode"] == 1) & (panel["reinsertion_in_period"] == 1),
         "episode_end_reason"
     ] = "reinsertion"
     panel.loc[
-        (panel["is_last_day_of_episode"] == 1) &
+        (panel["is_last_period_of_episode"] == 1) &
         (panel["episode_end_reason"].isna()) &
-        (panel["icu_end_today"] == 1),
+        (panel["icu_end_in_period"] == 1),
         "episode_end_reason"
     ] = "icu_end"
 
     panel["sex_M"] = (panel["gender"] == "M").astype(int)
     panel["sex_missing"] = panel["gender"].isna().astype(int)
-    eth_dummies = pd.get_dummies(panel["ethnicity_group"], prefix="ethnicity", dummy_na=True)
+    eth_dummies = pd.get_dummies(panel["ethnicity_group"], prefix="ethnicity")
     panel = pd.concat([panel, eth_dummies], axis=1)
 
-    panel["cov_start"] = panel["day_start"] - pd.Timedelta(hours=LOOKBACK_HOURS)
-    panel["cov_end"] = panel["day_start"]
+    panel["cov_start"] = panel["period_start"] - pd.Timedelta(hours=LOOKBACK_HOURS)
+    panel["cov_end"] = panel["period_start"]
     panel["cov_start"] = panel[["cov_start", "intime"]].max(axis=1)
     panel["row_id"] = np.arange(1, len(panel) + 1)
 
+    # Keep ethnicity dummy columns grouped together near the demographics.
     panel = panel.drop(columns=["cauti_time", "gender", "ethnicity_group", "intime", "ICU_out"])
     non_ethnicity_cols = [c for c in panel.columns if not c.startswith("ethnicity_")]
     ethnicity_cols = sorted([c for c in panel.columns if c.startswith("ethnicity_")])
@@ -354,15 +353,15 @@ def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
         "reinsertion_time",
         "catheter_state",
         "episode_index",
-        "day_start",
-        "day_end",
+        "period_start",
+        "period_end",
         "interval_hours",
-        "days_in_state",
-        "removed_today",
-        "reinsertion_today",
-        "cauti_today",
-        "icu_end_today",
-        "is_last_day_of_episode",
+        "periods_in_state",
+        "removed_in_period",
+        "reinsertion_in_period",
+        "cauti_in_period",
+        "icu_end_in_period",
+        "is_last_period_of_episode",
         "episode_end_reason",
         "at_risk_in",
         "at_risk_out",
