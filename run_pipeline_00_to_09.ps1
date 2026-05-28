@@ -4,13 +4,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = "C:\Users\DavidUni\Repos\mimic_pipeline"
+$RepoRoot = "C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline"
 
 # Run the core panel-building steps in order.
 $Steps = @(
     "00_build_base_panel.py",
     "01_extract_raw_chart_covariates.py",
     "02_preprocess_raw_chart_covariates.py",
+    "02b_filter_preprocessed_chart_covariates.py",
     "03_validate_raw_chart_covariates.py",
     "04_clean_raw_chart_covariates.py",
     "05_validate_cleaned_chart_covariates.py",

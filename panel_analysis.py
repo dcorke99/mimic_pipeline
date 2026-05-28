@@ -8,11 +8,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # Config
-DATA_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\feature_panel.csv")
-RESULTS_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\panel_analysis")
-COVARIATE_DICT_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\covariate_dictionary.csv")
+DATA_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\modeling_panel.csv")
+RESULTS_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\panel_analysis")
+COVARIATE_DICT_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\covariate_dictionary.csv")
 
-STEP1_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
+STEP1_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step1")
 STEP1_TOP_MODEL_FEATURES_FILE = STEP1_DIR / "top_model_features.csv"
 STEP1_TOP_SHAP_FEATURES_FILE = STEP1_DIR / "top_shap_features.csv"
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-DATADIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
+DATADIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
 INFILE = DATADIR / "raw_chart_covariates.csv"
 OUTFILE = DATADIR / "preprocessed_raw_chart_covariates.csv"
 SAMPLE_OUTFILE = DATADIR / "preprocessed_raw_chart_covariates__first_1000_rows.csv"

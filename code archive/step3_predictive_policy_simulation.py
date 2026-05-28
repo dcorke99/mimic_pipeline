@@ -13,8 +13,8 @@ N_ROLLOUTS = 200
 PROGRESS_EVERY = 100
 EPS = 1e-12
 
-INDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
-OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step3")
+INDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step1")
+OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step3")
 
 OUTDIR.mkdir(exist_ok=True, parents=True)
 
@@ -31,7 +31,6 @@ STATE_COL = "catheter_state"
 PERIODS_COL = "periods_in_state"
 INTERVAL_COL = "interval_hours"
 SPLIT_COL = "split"
-PERIOD_HOURS = 24
 
 # Utility weights
 W_CAUTI = 10.0
@@ -42,7 +41,6 @@ W_CATH_DAYS = 1.0
 # Same policies as Step-2
 # -----------------------------
 RISK_TAUS = [0.01, 0.02, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
-
 
 def policy_fixed_period_remove(periods_in_state: int, remove_period: int) -> int:
     return 1 if periods_in_state >= remove_period else 0
@@ -145,45 +143,43 @@ def _sample_competing_event(
     return "none"
 
 
-def _predict_proba(pipe, X: pd.DataFrame) -> float:
-    return float(pipe.predict_proba(X.to_numpy(dtype=float))[:, 1][0])
+def _predict_proba(pipe, feature_array: np.ndarray) -> float:
+    return float(pipe.predict_proba(feature_array)[:, 1][0])
 
 
 # -----------------------------
 # Step-1 rescoring helpers
 # -----------------------------
-def _build_feature_frame(
-    anchor_row: pd.Series,
-    x_cols: list[str],
+def _build_feature_array(
+    base_vec: np.ndarray,
+    col_idx: dict[str, int],
     time_value: int,
     periods_value: int,
     state_is_out: int | None = None,
-) -> pd.DataFrame:
-    data: dict[str, float] = {}
+) -> np.ndarray:
+    feature_vec = base_vec.copy()
 
-    for c in x_cols:
-        if c == TIME_COL:
-            data[c] = float(time_value)
-        elif c == PERIODS_COL:
-            data[c] = float(periods_value)
-        elif c == "state_is_out":
-            if state_is_out is None:
-                raise ValueError("state_is_out was requested but not supplied.")
-            data[c] = float(state_is_out)
-        else:
-            data[c] = float(anchor_row.get(c, 0.0))
+    if TIME_COL in col_idx:
+        feature_vec[col_idx[TIME_COL]] = float(time_value)
+    if PERIODS_COL in col_idx:
+        feature_vec[col_idx[PERIODS_COL]] = float(periods_value)
+    if "state_is_out" in col_idx:
+        if state_is_out is None:
+            raise ValueError("state_is_out was requested but not supplied.")
+        feature_vec[col_idx["state_is_out"]] = float(state_is_out)
 
-    return pd.DataFrame([data], columns=x_cols)
+    return feature_vec.reshape(1, -1)
 
 
 def score_in_state(
-    anchor_row: pd.Series,
+    base_cauti_vec: np.ndarray,
+    base_reins_vec: np.ndarray,
     time_value: int,
     in_period: int,
     cauti_model,
     reins_model,
-    x_cols_cauti: list[str],
-    x_cols_reins: list[str],
+    cauti_col_idx: dict[str, int],
+    reins_col_idx: dict[str, int],
 ) -> tuple[float, float, float]:
     """
     Returns:
@@ -191,30 +187,29 @@ def score_in_state(
     - p_cauti_if_remove
     - p_reins_if_remove
     """
-    X_keep = _build_feature_frame(
-        anchor_row=anchor_row,
-        x_cols=x_cols_cauti,
+    X_keep = _build_feature_array(
+        base_vec=base_cauti_vec,
+        col_idx=cauti_col_idx,
         time_value=time_value,
         periods_value=in_period,
         state_is_out=0,
     )
     p_cauti_if_keep = _clip01(_predict_proba(cauti_model, X_keep))
 
-    X_remove_cauti = _build_feature_frame(
-        anchor_row=anchor_row,
-        x_cols=x_cols_cauti,
+    X_remove_cauti = _build_feature_array(
+        base_vec=base_cauti_vec,
+        col_idx=cauti_col_idx,
         time_value=time_value,
         periods_value=1,
         state_is_out=1,
     )
     p_cauti_if_remove = _clip01(_predict_proba(cauti_model, X_remove_cauti))
 
-    X_remove_reins = _build_feature_frame(
-        anchor_row=anchor_row,
-        x_cols=x_cols_reins,
+    X_remove_reins = _build_feature_array(
+        base_vec=base_reins_vec,
+        col_idx=reins_col_idx,
         time_value=time_value,
         periods_value=1,
-        state_is_out=None,
     )
     p_reins_if_remove = _clip01(_predict_proba(reins_model, X_remove_reins))
 
@@ -222,34 +217,34 @@ def score_in_state(
 
 
 def score_out_state(
-    anchor_row: pd.Series,
+    base_cauti_vec: np.ndarray,
+    base_reins_vec: np.ndarray,
     time_value: int,
     out_period: int,
     cauti_model,
     reins_model,
-    x_cols_cauti: list[str],
-    x_cols_reins: list[str],
+    cauti_col_idx: dict[str, int],
+    reins_col_idx: dict[str, int],
 ) -> tuple[float, float]:
     """
     Returns:
     - p_cauti_if_out
     - p_reins_if_out
     """
-    X_out_cauti = _build_feature_frame(
-        anchor_row=anchor_row,
-        x_cols=x_cols_cauti,
+    X_out_cauti = _build_feature_array(
+        base_vec=base_cauti_vec,
+        col_idx=cauti_col_idx,
         time_value=time_value,
         periods_value=out_period,
         state_is_out=1,
     )
     p_cauti_if_out = _clip01(_predict_proba(cauti_model, X_out_cauti))
 
-    X_out_reins = _build_feature_frame(
-        anchor_row=anchor_row,
-        x_cols=x_cols_reins,
+    X_out_reins = _build_feature_array(
+        base_vec=base_reins_vec,
+        col_idx=reins_col_idx,
         time_value=time_value,
         periods_value=out_period,
-        state_is_out=None,
     )
     p_reins_if_out = _clip01(_predict_proba(reins_model, X_out_reins))
 
@@ -259,35 +254,56 @@ def score_out_state(
 # -----------------------------
 # Counterfactual interval helpers
 # -----------------------------
-def _get_horizon(g: pd.DataFrame) -> pd.Timestamp:
-    if END_COL in g.columns:
-        return pd.Timestamp(g[END_COL].iloc[-1])
-    last_start = pd.Timestamp(g[START_COL].iloc[-1])
-    last_hours = float(g[INTERVAL_COL].iloc[-1])
+def _get_horizon(g_sorted: pd.DataFrame) -> pd.Timestamp:
+    if END_COL in g_sorted.columns:
+        return pd.Timestamp(g_sorted[END_COL].iloc[-1])
+    last_start = pd.Timestamp(g_sorted[START_COL].iloc[-1])
+    last_hours = float(g_sorted[INTERVAL_COL].iloc[-1])
     return last_start + pd.Timedelta(hours=last_hours)
 
 
-def _get_anchor_row(g: pd.DataFrame, t: pd.Timestamp) -> pd.Series:
-    """
-    Last observed row whose start time is <= t.
-    This provides the latest observed covariate snapshot available at time t.
-    """
-    mask = g[START_COL] <= t
-    if mask.any():
-        return g.loc[mask].iloc[-1]
-    return g.iloc[0]
+def prepare_trajectory_sim_data(
+    g: pd.DataFrame,
+    x_cols_cauti: list[str],
+    x_cols_reins: list[str],
+) -> dict[str, object]:
+    # Sort once and precompute the numeric feature vectors reused across rollouts.
+    g_sorted = g.sort_values([START_COL, TIME_COL], kind="mergesort").reset_index(drop=True)
+
+    start_times = [pd.Timestamp(ts) for ts in g_sorted[START_COL]]
+    cauti_col_idx = {col: idx for idx, col in enumerate(x_cols_cauti)}
+    reins_col_idx = {col: idx for idx, col in enumerate(x_cols_reins)}
+
+    base_cauti: list[np.ndarray] = []
+    base_reins: list[np.ndarray] = []
+
+    for _, row in g_sorted.iterrows():
+        base_cauti.append(np.array([float(row.get(col, 0.0)) for col in x_cols_cauti], dtype=float))
+        base_reins.append(np.array([float(row.get(col, 0.0)) for col in x_cols_reins], dtype=float))
+
+    return {
+        "g_sorted": g_sorted,
+        "start_times": start_times,
+        "horizon": _get_horizon(g_sorted),
+        "initial_state": str(g_sorted[STATE_COL].iloc[0]).strip().lower(),
+        "initial_periods_in_state": int(g_sorted[PERIODS_COL].iloc[0]),
+        "base_cauti": base_cauti,
+        "base_reins": base_reins,
+        "cauti_col_idx": cauti_col_idx,
+        "reins_col_idx": reins_col_idx,
+    }
 
 
 # -----------------------------
 # Proper counterfactual rollout
 # -----------------------------
 def simulate_rollout_counterfactual(
-    g: pd.DataFrame,
+    traj_data: dict[str, object],
     policy_fn,
     cauti_model,
     reins_model,
-    x_cols_cauti: list[str],
-    x_cols_reins: list[str],
+    period_hours: int,
+    score_cache: dict[tuple[object, ...], tuple[float, ...]],
     rng: np.random.Generator,
 ) -> tuple[int, int, int, float, float, float]:
     """
@@ -302,14 +318,19 @@ def simulate_rollout_counterfactual(
     - time-varying covariates are carried forward from the latest observed row
       available at the start of each counterfactual interval
     """
-    g = g.sort_values([START_COL, TIME_COL], kind="mergesort").reset_index(drop=True)
+    g_sorted = traj_data["g_sorted"]
+    start_times = traj_data["start_times"]
+    horizon = pd.Timestamp(traj_data["horizon"])
+    state = str(traj_data["initial_state"])
+    periods_in_state = int(traj_data["initial_periods_in_state"])
+    base_cauti = traj_data["base_cauti"]
+    base_reins = traj_data["base_reins"]
+    cauti_col_idx = traj_data["cauti_col_idx"]
+    reins_col_idx = traj_data["reins_col_idx"]
 
-    t = pd.Timestamp(g[START_COL].iloc[0])
-    horizon = _get_horizon(g)
-
-    state = str(g[STATE_COL].iloc[0]).strip().lower()
-    periods_in_state = int(g[PERIODS_COL].iloc[0])
+    t = pd.Timestamp(start_times[0])
     cf_time_index = 0
+    anchor_idx = 0
 
     cauti = 0
     reins = 0
@@ -318,34 +339,39 @@ def simulate_rollout_counterfactual(
     out_days = 0.0
 
     while t < horizon:
-        next_t = min(t + pd.Timedelta(hours=PERIOD_HOURS), horizon)
+        next_t = min(t + pd.Timedelta(hours=period_hours), horizon)
         interval_hours = (next_t - t).total_seconds() / 3600.0
         interval_days = interval_hours / 24.0
 
-        anchor_row = _get_anchor_row(g, t)
+        while anchor_idx + 1 < len(start_times) and start_times[anchor_idx + 1] <= t:
+            anchor_idx += 1
 
         # -------------------------
         # IN-state rollout
         # -------------------------
         if state == "in":
-            p_keep, p_cauti_remove, p_reins_remove = score_in_state(
-                anchor_row=anchor_row,
-                time_value=cf_time_index,
-                in_period=periods_in_state,
-                cauti_model=cauti_model,
-                reins_model=reins_model,
-                x_cols_cauti=x_cols_cauti,
-                x_cols_reins=x_cols_reins,
-            )
+            cache_key = ("in", anchor_idx, cf_time_index, periods_in_state)
+            if cache_key in score_cache:
+                p_keep, p_cauti_remove, p_reins_remove = score_cache[cache_key]
+            else:
+                p_keep, p_cauti_remove, p_reins_remove = score_in_state(
+                    base_cauti_vec=base_cauti[anchor_idx],
+                    base_reins_vec=base_reins[anchor_idx],
+                    time_value=cf_time_index,
+                    in_period=periods_in_state,
+                    cauti_model=cauti_model,
+                    reins_model=reins_model,
+                    cauti_col_idx=cauti_col_idx,
+                    reins_col_idx=reins_col_idx,
+                )
+                score_cache[cache_key] = (p_keep, p_cauti_remove, p_reins_remove)
 
-            policy_ctx = pd.Series(
-                {
-                    PERIODS_COL: periods_in_state,
-                    "p_cauti_if_keep": p_keep,
-                    "p_cauti_if_remove": p_cauti_remove,
-                    "p_reins_if_remove": p_reins_remove,
-                }
-            )
+            policy_ctx = {
+                PERIODS_COL: periods_in_state,
+                "p_cauti_if_keep": p_keep,
+                "p_cauti_if_remove": p_cauti_remove,
+                "p_reins_if_remove": p_reins_remove,
+            }
             action = int(policy_fn(policy_ctx))
 
             if action == 0:
@@ -383,15 +409,21 @@ def simulate_rollout_counterfactual(
         # OUT-state rollout
         # -------------------------
         else:
-            p_cauti_out, p_reins_out = score_out_state(
-                anchor_row=anchor_row,
-                time_value=cf_time_index,
-                out_period=periods_in_state,
-                cauti_model=cauti_model,
-                reins_model=reins_model,
-                x_cols_cauti=x_cols_cauti,
-                x_cols_reins=x_cols_reins,
-            )
+            cache_key = ("out", anchor_idx, cf_time_index, periods_in_state)
+            if cache_key in score_cache:
+                p_cauti_out, p_reins_out = score_cache[cache_key]
+            else:
+                p_cauti_out, p_reins_out = score_out_state(
+                    base_cauti_vec=base_cauti[anchor_idx],
+                    base_reins_vec=base_reins[anchor_idx],
+                    time_value=cf_time_index,
+                    out_period=periods_in_state,
+                    cauti_model=cauti_model,
+                    reins_model=reins_model,
+                    cauti_col_idx=cauti_col_idx,
+                    reins_col_idx=reins_col_idx,
+                )
+                score_cache[cache_key] = (p_cauti_out, p_reins_out)
 
             out_days += interval_days
 
@@ -435,6 +467,7 @@ def main() -> None:
     x_cols_cauti = bundle["x_cols_cauti"]
     x_cols_reins = bundle["x_cols_reins"]
     feature_cols = bundle["features"]
+    period_hours = int(bundle["period_hours"])
 
     if cauti_model is None or reins_model is None:
         raise ValueError("transition_models.pkl does not contain the required fitted CAUTI/reinsertion models.")
@@ -524,17 +557,23 @@ def main() -> None:
             hadm = int(g["hadm_id"].iloc[0])  # pyright: ignore[reportArgumentType]
             stay = int(g["stay_id"].iloc[0])  # pyright: ignore[reportArgumentType]
             inserted = g[INSERTED_COL].iloc[0]
+            traj_data = prepare_trajectory_sim_data(
+                g=g,
+                x_cols_cauti=x_cols_cauti,
+                x_cols_reins=x_cols_reins,
+            )
+            score_cache: dict[tuple[object, ...], tuple[float, ...]] = {}
 
             acc = np.zeros(6, dtype=float)
 
             for _ in range(N_ROLLOUTS):
                 out = simulate_rollout_counterfactual(
-                    g=g,
+                    traj_data=traj_data,
                     policy_fn=policy_fn,
                     cauti_model=cauti_model,
                     reins_model=reins_model,
-                    x_cols_cauti=x_cols_cauti,
-                    x_cols_reins=x_cols_reins,
+                    period_hours=period_hours,
+                    score_cache=score_cache,
                     rng=rng,
                 )
                 acc += np.array(out, dtype=float)

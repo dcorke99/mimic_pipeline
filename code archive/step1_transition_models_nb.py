@@ -1,23 +1,22 @@
 from pathlib import Path
 import json
 import joblib
+import re
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import shap
 
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
-from xgboost import XGBClassifier
 
 
 SEED = 42
-MODEL_TYPE = "xgb"  # "rf" or "xgb"
+MODEL_TYPE = "nb"
 
-INDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
-OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
+INDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
+OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step1_nb")
 MODEL_DIR = OUTDIR
 
 INFILE = INDIR / "feature_panel.csv"
@@ -42,43 +41,18 @@ POST_REMOVE_RISK_PERIODS = 2
 
 TOP_FEATURES_TO_SAVE = 15
 
-SAVE_SHAP = True
-SHAP_SAMPLE_N = 2000
+PERMUTATION_IMPORTANCE_SAMPLE_N = 2000
+PERMUTATION_IMPORTANCE_REPEATS = 5
 
 CALIBRATION_BINS = 10
 
 
 def _fit_model(features, target):
-    # Fit the configured binary classifier behind a simple pipeline.
-    if MODEL_TYPE == "rf":
-        pipe = Pipeline([
-            ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
-            ("rf", RandomForestClassifier(
-                n_estimators=200,
-                max_depth=None,
-                min_samples_leaf=5,
-                n_jobs=1,
-                random_state=SEED,
-            ))
-        ])
-    elif MODEL_TYPE == "xgb":
-        pipe = Pipeline([
-            ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
-            ("xgb", XGBClassifier(
-                objective="binary:logistic",
-                eval_metric="auc",
-                n_estimators=300,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                tree_method="hist",
-                random_state=SEED,
-                n_jobs=1,
-            ))
-        ])
-    else:
-        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
+    # Fit a binary Gaussian Naive Bayes classifier behind an imputation pipeline.
+    pipe = Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
+        ("nb", GaussianNB())
+    ])
 
     pipe.fit(features.to_numpy(dtype=float), target.to_numpy(dtype=int))
     return pipe
@@ -88,42 +62,37 @@ def _predict_proba(pipe, features):
     return pipe.predict_proba(features.to_numpy(dtype=float))[:, 1]
 
 
-def _feature_importance_series(pipe, feature_cols):
-    estimator = pipe.named_steps["rf"] if MODEL_TYPE == "rf" else pipe.named_steps["xgb"]
-    return pd.Series(
-        estimator.feature_importances_,
-        index=list(feature_cols)
-    ).sort_values(ascending=False)
-
-
-def _shap_importance_series(
+def _permutation_importance_series(
     pipe,
     features,
+    target,
     sample_n=2000,
+    n_repeats=5,
 ):
-    # Rank features by mean absolute SHAP value on a sample.
-    sample_df = features.sample(n=min(sample_n, len(features)), random_state=SEED).copy()
-
-    imputer = pipe.named_steps["imputer"]
-    features_imp = imputer.transform(sample_df.to_numpy(dtype=float))
-
+    # Neural networks do not expose tree-style feature importances; use
+    # held-out permutation importance ranked by average precision instead.
     feature_names = list(features.columns)
-    features_imp_df = pd.DataFrame(features_imp, columns=feature_names)
+    target = target.astype(int)
 
-    estimator = pipe.named_steps["rf"] if MODEL_TYPE == "rf" else pipe.named_steps["xgb"]
-    explainer = shap.TreeExplainer(estimator)
-    explanation = explainer(features_imp_df)
+    if len(features) == 0 or target.nunique() < 2 or int(target.sum()) == 0:
+        return pd.Series(np.zeros(len(feature_names)), index=feature_names)
 
-    shap_values = np.asarray(explanation.values)
+    sample_df = features.copy()
+    sample_target = target.copy()
+    if len(sample_df) > sample_n:
+        sample_df = sample_df.sample(n=sample_n, random_state=SEED)
+        sample_target = sample_target.loc[sample_df.index]
 
-    if shap_values.ndim == 3:
-        if shap_values.shape[2] == 2:
-            shap_values = shap_values[:, :, 1]
-        else:
-            shap_values = shap_values.mean(axis=2)
-
-    shap_mean_abs = np.abs(shap_values).mean(axis=0)
-    return pd.Series(shap_mean_abs, index=feature_names).sort_values(ascending=False)
+    result = permutation_importance(
+        pipe,
+        sample_df.to_numpy(dtype=float),
+        sample_target.to_numpy(dtype=int),
+        n_repeats=n_repeats,
+        random_state=SEED,
+        scoring="average_precision",
+        n_jobs=1,
+    )
+    return pd.Series(result.importances_mean, index=feature_names).sort_values(ascending=False)
 
 
 def _top_series_df(
@@ -140,65 +109,30 @@ def _top_series_df(
 
 
 def _add_feature_descriptions(feature_df, covariate_dict):
-    covariate_desc = {}
+    itemid_to_label = {}
 
     for row in covariate_dict.itertuples(index=False):
-        label = str(row.label)
-        covariate_desc[str(row.col)] = label
-
         if hasattr(row, "itemid") and pd.notna(row.itemid):
-            itemid = int(row.itemid)
-            covariate_desc[f"itemid_{itemid}__mean"] = f"{label} [mean]"
-            covariate_desc[f"itemid_{itemid}__min"] = f"{label} [min]"
-            covariate_desc[f"itemid_{itemid}__max"] = f"{label} [max]"
-            covariate_desc[f"itemid_{itemid}__count"] = f"{label} [count]"
-            covariate_desc[f"itemid_{itemid}__std"] = f"{label} [std]"
-            covariate_desc[f"itemid_{itemid}__first"] = f"{label} [first]"
-            covariate_desc[f"itemid_{itemid}__last"] = f"{label} [last]"
-            covariate_desc[f"itemid_{itemid}__delta"] = f"{label} [delta]"
-            covariate_desc[f"itemid_{itemid}__range"] = f"{label} [range]"
-            covariate_desc[f"itemid_{itemid}__slope_per_hour"] = f"{label} [slope_per_hour]"
+            itemid_to_label[int(row.itemid)] = str(row.label)
 
-    covariate_desc.update({
-        f"{feature}__missing": f"{description} [missing]"
-        for feature, description in list(covariate_desc.items())
-    })
+    pattern = re.compile(r"^itemid_(\d+)__(.+?)(?:__missing)?$")
+
+    def describe_feature(feature):
+        match = pattern.match(str(feature))
+        if not match:
+            return pd.NA
+
+        itemid = int(match.group(1))
+        stat = match.group(2)
+        label = itemid_to_label.get(itemid, "UNKNOWN ITEMID")
+        description = f"{label} [{stat}]"
+        if str(feature).endswith("__missing"):
+            description = f"{description} [missing]"
+        return description
 
     feature_df = feature_df.copy()
-    feature_df.insert(3, "description", feature_df["feature"].map(covariate_desc))
+    feature_df.insert(3, "description", feature_df["feature"].apply(describe_feature))
     return feature_df
-
-
-def _save_shap_plots(
-    pipe,
-    features,
-    out_prefix,
-    sample_n=2000,
-):
-    # Save the standard SHAP beeswarm and bar plots.
-    sample_df = features.sample(n=min(sample_n, len(features)), random_state=SEED).copy()
-
-    imputer = pipe.named_steps["imputer"]
-    features_imp = imputer.transform(sample_df.to_numpy(dtype=float))
-
-    feature_names = list(features.columns)
-    features_imp_df = pd.DataFrame(features_imp, columns=feature_names)
-
-    estimator = pipe.named_steps["rf"] if MODEL_TYPE == "rf" else pipe.named_steps["xgb"]
-    explainer = shap.TreeExplainer(estimator)
-    explanation = explainer(features_imp_df)
-
-    shap.plots.beeswarm(explanation, max_display=15, show=False)
-    fig = plt.gcf()
-    fig.tight_layout()
-    fig.savefig(str(out_prefix) + "_beeswarm.png", dpi=200, bbox_inches="tight")
-    plt.close(fig)
-
-    shap.plots.bar(explanation, max_display=15, show=False)
-    fig = plt.gcf()
-    fig.tight_layout()
-    fig.savefig(str(out_prefix) + "_bar.png", dpi=200, bbox_inches="tight")
-    plt.close(fig)
 
 
 def _clean_eval_frame(df, outcome_col, pred_col):
@@ -541,64 +475,50 @@ def main():
         .drop(columns=["_orig_index", "prior_cauti_count", "cauti_risk_row"])
     )
 
-    # Save the top raw features for each fitted model.
+    # Save the top held-out permutation features for each fitted model.
     model_feature_df = pd.concat(
         [
-            _top_series_df("removal", "model_importance", _feature_importance_series(remove_model, remove_feature_cols), TOP_FEATURES_TO_SAVE),
-            _top_series_df("cauti", "model_importance", _feature_importance_series(cauti_model, cauti_feature_cols), TOP_FEATURES_TO_SAVE),
-            _top_series_df("reinsertion", "model_importance", _feature_importance_series(reins_model, reins_feature_cols), TOP_FEATURES_TO_SAVE),
+            _top_series_df(
+                "removal",
+                "permutation_importance_ap",
+                _permutation_importance_series(
+                    remove_model,
+                    remove_test_features,
+                    remove_test_target,
+                    PERMUTATION_IMPORTANCE_SAMPLE_N,
+                    PERMUTATION_IMPORTANCE_REPEATS,
+                ),
+                TOP_FEATURES_TO_SAVE,
+            ),
+            _top_series_df(
+                "cauti",
+                "permutation_importance_ap",
+                _permutation_importance_series(
+                    cauti_model,
+                    cauti_test_features,
+                    cauti_test_target,
+                    PERMUTATION_IMPORTANCE_SAMPLE_N,
+                    PERMUTATION_IMPORTANCE_REPEATS,
+                ),
+                TOP_FEATURES_TO_SAVE,
+            ),
+            _top_series_df(
+                "reinsertion",
+                "permutation_importance_ap",
+                _permutation_importance_series(
+                    reins_model,
+                    reins_test_features,
+                    reins_test_target,
+                    PERMUTATION_IMPORTANCE_SAMPLE_N,
+                    PERMUTATION_IMPORTANCE_REPEATS,
+                ),
+                TOP_FEATURES_TO_SAVE,
+            ),
         ],
         ignore_index=True,
     )
     model_feature_df = _add_feature_descriptions(model_feature_df, covariate_dict)
     _save_df(model_feature_df, OUTDIR / "top_model_features.csv")
-
-    shap_feature_df = pd.concat(
-        [
-            _top_series_df(
-                "removal",
-                "shap_mean_abs",
-                _shap_importance_series(remove_model, remove_test_features, SHAP_SAMPLE_N),
-                TOP_FEATURES_TO_SAVE,
-            ),
-            _top_series_df(
-                "cauti",
-                "shap_mean_abs",
-                _shap_importance_series(cauti_model, cauti_test_features, SHAP_SAMPLE_N),
-                TOP_FEATURES_TO_SAVE,
-            ),
-            _top_series_df(
-                "reinsertion",
-                "shap_mean_abs",
-                _shap_importance_series(reins_model, reins_test_features, SHAP_SAMPLE_N),
-                TOP_FEATURES_TO_SAVE,
-            ),
-        ],
-        ignore_index=True,
-    )
-    shap_feature_df = _add_feature_descriptions(shap_feature_df, covariate_dict)
-    _save_df(shap_feature_df, OUTDIR / "top_shap_features.csv")
-
-    # Save SHAP plots for each model if requested.
-    if SAVE_SHAP:
-        _save_shap_plots(
-            pipe=remove_model,
-            features=remove_test_features,
-            out_prefix=OUTDIR / f"remove_shap_{MODEL_TYPE}",
-            sample_n=SHAP_SAMPLE_N,
-        )
-        _save_shap_plots(
-            pipe=cauti_model,
-            features=cauti_test_features,
-            out_prefix=OUTDIR / f"cauti_shap_{MODEL_TYPE}",
-            sample_n=SHAP_SAMPLE_N,
-        )
-        _save_shap_plots(
-            pipe=reins_model,
-            features=reins_test_features,
-            out_prefix=OUTDIR / f"reinsertion_shap_{MODEL_TYPE}",
-            sample_n=SHAP_SAMPLE_N,
-        )
 
     # Move score columns just before age in the scored panel export.
     score_col_names = [
@@ -705,7 +625,6 @@ def main():
             "cauti_by_state_period_test_csv": str(OUTDIR / "cauti_by_state_period_test.csv"),
             "reinsertion_by_period_test_csv": str(OUTDIR / "reinsertion_by_period_test.csv"),
             "top_model_features_csv": str(OUTDIR / "top_model_features.csv"),
-            "top_shap_features_csv": str(OUTDIR / "top_shap_features.csv"),
         },
         "scored_panel_schema": {
             "required_columns_present": all(col in df.columns for col in required_scored_cols),

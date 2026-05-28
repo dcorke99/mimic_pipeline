@@ -7,11 +7,11 @@ This script:
 3. Derives explicit model columns such as state_is_out
 4. Coerces predictor columns to numeric
 5. Coerces binary targets/flags to numeric 0/1
-6. Saves a feature-panel CSV and a feature-spec JSON used by Step 1
+6. Saves a modeling-panel CSV and a feature-spec JSON used by Step 1
 
 Outputs
 -------
-- data/feature_panel.csv
+- data/modeling_panel.csv
 - data/feature_spec.json
 """
 
@@ -23,13 +23,13 @@ import pandas as pd
 
 
 # Global configuration
-INDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
-OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
+INDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
+OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
 INFILE = INDIR / "filtered_panel.csv"
-OUTFILE = INDIR / "feature_panel.csv"
+OUTFILE = INDIR / "modeling_panel.csv"
 FEATURE_SPEC_FILE = OUTDIR / "feature_spec.json"
 COVARIATE_DICT_FILE = OUTDIR / "covariate_dictionary.csv"
-D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
+D_ITEMS_PATH = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
 
 ID_COL = "subject_id"
 TIME_COL = "episode_index"
@@ -44,8 +44,6 @@ LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
 
 POST_REMOVE_RISK_PERIODS = 2
-KEEP_STATS = {"mean"}
-
 
 def _validate_split(df: pd.DataFrame) -> None:
     # Standardise split labels and fail if unexpected values are present.
@@ -97,19 +95,16 @@ def _json_ready(obj):
     return obj
 
 
-def _detect_covariate_cols(columns: list[str], keep_stats: set[str]) -> pd.DataFrame:
-    # Parse itemid summary columns so they can be labelled in the dictionary file.
+def _detect_covariate_itemids(columns: list[str]) -> pd.DataFrame:
+    # Parse itemid summary columns so the dictionary can label retained itemids.
     pattern = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
-    rows = []
+    itemids = set()
     for col in columns:
         match = pattern.match(str(col))
         if not match:
             continue
-        itemid = int(match.group(1))
-        stat = match.group(2).lower()
-        if stat in keep_stats:
-            rows.append({"col": col, "itemid": itemid, "stat": stat})
-    return pd.DataFrame(rows)
+        itemids.add(int(match.group(1)))
+    return pd.DataFrame({"itemid": sorted(itemids)})
 
 
 def main() -> None:
@@ -148,7 +143,7 @@ def main() -> None:
     if missing_required:
         raise ValueError(f"Missing required Step 1 feature columns after preprocessing: {missing_required}")
 
-    # Save the cleaned feature panel before writing the metadata side files.
+    # Save the cleaned modeling panel before writing the metadata side files.
     df.to_csv(OUTFILE, index=False)
 
     period_hours = int(
@@ -158,19 +153,16 @@ def main() -> None:
         .iloc[0]
     )
 
-    covariate_dict = _detect_covariate_cols(df.columns.tolist(), KEEP_STATS)
+    covariate_dict = _detect_covariate_itemids(df.columns.tolist())
     d_items_df = pd.read_csv(D_ITEMS_PATH, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
     d_items_df["itemid"] = pd.to_numeric(d_items_df["itemid"], errors="coerce")
     d_items_df = d_items_df.dropna(subset=["itemid"]).copy()
     d_items_df["itemid"] = d_items_df["itemid"].astype(int)
     itemid_to_label = d_items_df.set_index("itemid")["label"].to_dict()
 
-    # Build a readable mapping from itemid feature columns to MIMIC labels.
+    # Build a readable mapping from retained itemids to MIMIC labels.
     covariate_dict["label"] = covariate_dict["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
-    covariate_dict["description"] = covariate_dict["label"].astype(str) + " [" + covariate_dict["stat"].astype(str) + "]"
-    covariate_dict.sort_values(["label", "itemid", "stat"]).drop(columns=["stat", "description"]).to_csv(
-        COVARIATE_DICT_FILE, index=False
-    )
+    covariate_dict.sort_values(["label", "itemid"]).to_csv(COVARIATE_DICT_FILE, index=False)
 
     # Save the feature specification consumed by Step 1.
     spec = {
@@ -196,7 +188,7 @@ def main() -> None:
     }
     FEATURE_SPEC_FILE.write_text(json.dumps(_json_ready(spec), indent=2), encoding="utf-8")
 
-    print(f"[SAVE] feature panel: {OUTFILE}")
+    print(f"[SAVE] modeling panel: {OUTFILE}")
     print(f"[SAVE] feature spec: {FEATURE_SPEC_FILE}")
     print(f"[SAVE] covariate dictionary: {COVARIATE_DICT_FILE}")
     print(f"Rows: {len(df)}")

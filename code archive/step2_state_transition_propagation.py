@@ -7,8 +7,8 @@ import joblib
 # -----------------------------
 # Config
 # -----------------------------
-INDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
-OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step2")
+INDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step1")
+OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step2")
 MODEL_DIR = INDIR
 
 OUTDIR.mkdir(exist_ok=True, parents=True)

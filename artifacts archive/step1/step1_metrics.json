@@ -1,0 +1,74 @@
+{
+  "seed": 42,
+  "model_type": "xgb",
+  "period_hours": 24,
+  "post_remove_risk_periods": 2,
+  "split": {
+    "method": "precomputed patient-level split from step1_feature_panel.csv",
+    "train_rows": 84495,
+    "test_rows": 21196,
+    "train_patients": 9796,
+    "test_patients": 2450
+  },
+  "preprocessing": {
+    "feature_panel_file": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\data\\feature_panel.csv",
+    "feature_spec_file": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\data\\feature_spec.json",
+    "hidden_indicator_columns_created_inside_step1": 0,
+    "explicit_feature_count": 677
+  },
+  "auc": {
+    "remove_in": 0.8550781415690676,
+    "cauti_transition": 0.712271885153785,
+    "reins_out": 0.7619462386001388
+  },
+  "test_performance": {
+    "remove_in": {
+      "n": 13290,
+      "events": 2856,
+      "prevalence": 0.21489841986455982,
+      "auc": 0.8550781415690676,
+      "average_precision": 0.6228488007748387,
+      "brier": 0.1177069946507838
+    },
+    "cauti_transition": {
+      "n": 16619,
+      "events": 260,
+      "prevalence": 0.01564474396774776,
+      "auc": 0.712271885153785,
+      "average_precision": 0.03692637696536778,
+      "brier": 0.015284542066843142
+    },
+    "reins_out": {
+      "n": 3915,
+      "events": 313,
+      "prevalence": 0.07994891443167305,
+      "auc": 0.7619462386001388,
+      "average_precision": 0.22074063267992455,
+      "brier": 0.06803264322548114
+    }
+  },
+  "n_rows": {
+    "all": 105691,
+    "in": 73727,
+    "out": 31964,
+    "at_risk_cauti": 91839,
+    "at_risk_reinsertion": 31964,
+    "cauti_fit": 82972,
+    "out_fit": 19254
+  },
+  "artifacts": {
+    "scored_panel": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\step1_scored_panel.csv",
+    "remove_calibration_test_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\remove_calibration_test.csv",
+    "cauti_calibration_test_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\cauti_calibration_test.csv",
+    "reinsertion_calibration_test_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\reinsertion_calibration_test.csv",
+    "remove_by_period_test_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\remove_by_period_test.csv",
+    "cauti_by_state_period_test_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\cauti_by_state_period_test.csv",
+    "reinsertion_by_period_test_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\reinsertion_by_period_test.csv",
+    "top_model_features_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\top_model_features.csv",
+    "top_shap_features_csv": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\step1\\top_shap_features.csv"
+  },
+  "scored_panel_schema": {
+    "required_columns_present": 1,
+    "missing_columns": []
+  }
+}

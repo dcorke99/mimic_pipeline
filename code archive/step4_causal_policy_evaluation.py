@@ -45,8 +45,8 @@ SENSITIVITY_POLICIES = {
 }
 SENSITIVITY_CLIPS = [None, 100.0, 50.0, 25.0, 10.0]
 
-INDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step1")
-OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\artifacts\step4")
+INDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step1")
+OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step4")
 MODEL_DIR = OUTDIR
 
 OUTDIR.mkdir(exist_ok=True, parents=True)

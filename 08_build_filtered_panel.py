@@ -4,7 +4,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 # Configuration
-DATA_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
+DATA_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
 MASTER_DATASET = DATA_DIR / "master_panel.csv"
 SUMMARY_CSV = DATA_DIR / "covariate_retention_log.csv"
 OUT_DATASET = DATA_DIR / "filtered_panel.csv"

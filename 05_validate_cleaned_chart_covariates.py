@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 
 # Config
-DATA_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\cleaned_chart_covariates.csv")
-OUTDIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
-D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
+DATA_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\cleaned_chart_covariates.csv")
+OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
+D_ITEMS_PATH = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
 
 # Optional bounds file.
 # Expected columns can include:

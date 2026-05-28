@@ -2,7 +2,7 @@
 Clean raw chart-event covariates extracted for the CAUTI analysis cohort.
 
 Expected input:
-    data/raw_chart_covariates.csv
+    data/preprocessed_raw_chart_covariates_kept.csv
 
 Compatible with the output of the raw extraction script that writes:
     subject_id, hadm_id, stay_id, itemid, charttime, storetime,
@@ -22,6 +22,7 @@ The cleaned output preserves the same column structure as the input file.
 """
 
 from pathlib import Path
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 
@@ -29,9 +30,9 @@ import pandas as pd
 # CONFIG
 # ============================================================
 
-DATADIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
+DATADIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
 
-INFILE = DATADIR / "preprocessed_raw_chart_covariates.csv"
+INFILE = DATADIR / "preprocessed_raw_chart_covariates_kept.csv"
 OUTFILE = DATADIR / "cleaned_chart_covariates.csv"
 RULES_OUTFILE = DATADIR / "chart_covariate_cleaning_rules.csv"
 AUDIT_OUTFILE = DATADIR / "chart_covariate_cleaning_audit.csv"
@@ -52,44 +53,84 @@ NEVER_ZERO_TO_MISSING = set()
 # FIT RULES
 # ============================================================
 
-def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
-    # Read only the item/value columns needed to fit item-level cleaning rules.
-    slim = pd.read_csv(
+def _load_numeric_values_by_itemid(infile: Path) -> dict[int, pd.Series]:
+    # Stream item/value pairs and keep one numeric series per itemid.
+    value_parts: dict[int, list[pd.Series]] = defaultdict(list)
+
+    for chunk in pd.read_csv(
         infile,
         usecols=[ITEM_COL, VALUE_COL],
+        chunksize=CHUNK_ROWS,
         low_memory=False,
-    )
+    ):
+        chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL], errors="coerce")
+        chunk[VALUE_COL] = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
+        chunk = chunk.dropna(subset=[ITEM_COL, VALUE_COL]).copy()
+        if chunk.empty:
+            continue
 
-    slim[VALUE_COL] = pd.to_numeric(slim[VALUE_COL], errors="coerce")
-    slim = slim.dropna(subset=[ITEM_COL])
-    slim = slim.dropna(subset=[VALUE_COL]).copy()
+        chunk[ITEM_COL] = chunk[ITEM_COL].astype(int)
+        for itemid, item_rows in chunk.groupby(ITEM_COL, sort=False):
+            value_parts[int(itemid)].append(item_rows[VALUE_COL].reset_index(drop=True))
 
-    if slim.empty:
+    return {
+        itemid: pd.concat(parts, ignore_index=True)
+        for itemid, parts in value_parts.items()
+        if parts
+    }
+
+
+def _count_numeric_values_by_itemid(infile: Path) -> pd.DataFrame:
+    # Stream the item/value pairs and count total and non-missing numeric rows per itemid.
+    count_parts = []
+
+    for chunk in pd.read_csv(
+        infile,
+        usecols=[ITEM_COL, VALUE_COL],
+        chunksize=CHUNK_ROWS,
+        low_memory=False,
+    ):
+        chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL], errors="coerce")
+        chunk[VALUE_COL] = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
+        chunk = chunk.dropna(subset=[ITEM_COL]).copy()
+        if chunk.empty:
+            continue
+
+        count_parts.append(
+            chunk.groupby(ITEM_COL, sort=False).agg(
+                n_rows_total=(VALUE_COL, "size"),
+                n_non_missing=(VALUE_COL, lambda values: values.notna().sum()),
+            )
+        )
+
+    if not count_parts:
+        return pd.DataFrame(columns=[ITEM_COL, "n_rows_total", "n_non_missing"])
+
+    counts = pd.concat(count_parts).groupby(level=0, sort=False).sum().reset_index()
+    counts[ITEM_COL] = counts[ITEM_COL].astype(int)
+    return counts
+
+
+def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
+    # Stream only the item/value columns needed to fit item-level cleaning rules.
+    values_by_itemid = _load_numeric_values_by_itemid(infile)
+    if not values_by_itemid:
         raise ValueError("No numeric valuenum rows found in input file.")
 
-    slim["is_zero"] = slim[VALUE_COL].eq(0)
-
     # Measure zero frequency for each itemid.
-    base_stats = (
-        slim.groupby(ITEM_COL, sort=False)
-        .agg(
-            n_non_missing=(VALUE_COL, "size"),
-            zero_fraction=("is_zero", "mean"),
-        )
-    )
-
-    # Use the non-zero distribution to decide whether zeros look like placeholders.
-    nonzero = slim[slim[VALUE_COL] != 0].copy()
-    if nonzero.empty:
-        p5_nonzero = pd.Series(dtype=float, name="p5_nonzero")
-    else:
-        p5_nonzero = (
-            nonzero.groupby(ITEM_COL, sort=False)[VALUE_COL]
-            .quantile(0.05)
-            .rename("p5_nonzero")
+    rule_rows = []
+    for itemid, values in values_by_itemid.items():
+        nonzero_values = values[values != 0]
+        rule_rows.append(
+            {
+                ITEM_COL: itemid,
+                "n_non_missing": int(values.shape[0]),
+                "zero_fraction": float(values.eq(0).mean()),
+                "p5_nonzero": float(nonzero_values.quantile(0.05)) if not nonzero_values.empty else np.nan,
+            }
         )
 
-    rules = base_stats.join(p5_nonzero, how="left")
+    rules = pd.DataFrame(rule_rows).set_index(ITEM_COL)
     rules["zero_to_missing"] = False
 
     # Flag low-frequency zeros as missing when the observed scale is otherwise positive.
@@ -107,30 +148,38 @@ def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
         rules.loc[rules.index.isin(NEVER_ZERO_TO_MISSING), "zero_to_missing"] = False
 
     # Refit tail thresholds after removing itemids whose zeros should be ignored.
-    fit_df = slim[[ITEM_COL, VALUE_COL]].merge(
-        rules[["zero_to_missing"]],
-        left_on=ITEM_COL,
-        right_index=True,
-        how="left",
-    )
+    threshold_rows = []
+    for itemid, values in values_by_itemid.items():
+        filtered_values = values.copy()
+        if bool(rules.loc[itemid, "zero_to_missing"]):
+            filtered_values = filtered_values[filtered_values != 0]
 
-    remove_zero_mask = fit_df["zero_to_missing"].fillna(False) & fit_df[VALUE_COL].eq(0)
-    fit_df = fit_df.loc[~remove_zero_mask, [ITEM_COL, VALUE_COL]].copy()
+        if filtered_values.empty:
+            threshold_rows.append(
+                {
+                    ITEM_COL: itemid,
+                    "n_for_thresholds": 0,
+                    "p1": np.nan,
+                    "q1": np.nan,
+                    "q3": np.nan,
+                    "p99": np.nan,
+                }
+            )
+            continue
 
-    n_for_thresholds = (
-        fit_df.groupby(ITEM_COL, sort=False)
-        .size()
-        .rename("n_for_thresholds")
-    )
+        threshold_rows.append(
+            {
+                ITEM_COL: itemid,
+                "n_for_thresholds": int(filtered_values.shape[0]),
+                "p1": float(filtered_values.quantile(0.01)),
+                "q1": float(filtered_values.quantile(0.25)),
+                "q3": float(filtered_values.quantile(0.75)),
+                "p99": float(filtered_values.quantile(0.99)),
+            }
+        )
 
-    q = (
-        fit_df.groupby(ITEM_COL, sort=False)[VALUE_COL]
-        .quantile([0.01, 0.25, 0.75, 0.99])
-        .unstack()
-    )
-    q = q.rename(columns={0.01: "p1", 0.25: "q1", 0.75: "q3", 0.99: "p99"})
-
-    rules = rules.join(n_for_thresholds, how="left").join(q, how="left")
+    threshold_df = pd.DataFrame(threshold_rows).set_index(ITEM_COL)
+    rules = rules.join(threshold_df, how="left")
 
     rules["status"] = "ok"
     too_few_mask = rules["n_for_thresholds"].fillna(0) < MIN_N_FOR_RULES
@@ -290,36 +339,12 @@ def apply_cleaning_rules(
     audit_wide.columns.name = None
     audit_wide = audit_wide.reset_index()
 
-    cleaned_slim = pd.read_csv(
-        outfile,
-        usecols=[ITEM_COL, VALUE_COL],
-        low_memory=False,
+    before_counts = _count_numeric_values_by_itemid(infile).rename(
+        columns={"n_non_missing": "n_non_missing_before"}
     )
-    cleaned_slim[VALUE_COL] = pd.to_numeric(cleaned_slim[VALUE_COL], errors="coerce")
-
-    before_slim = pd.read_csv(
-        infile,
-        usecols=[ITEM_COL, VALUE_COL],
-        low_memory=False,
-    )
-    before_slim[VALUE_COL] = pd.to_numeric(before_slim[VALUE_COL], errors="coerce")
-
-    before_counts = (
-        before_slim.groupby(ITEM_COL, sort=False)
-        .agg(
-            n_rows_total=(VALUE_COL, "size"),
-            n_non_missing_before=(VALUE_COL, lambda s: s.notna().sum()),
-        )
-        .reset_index()
-    )
-
-    after_counts = (
-        cleaned_slim.groupby(ITEM_COL, sort=False)
-        .agg(
-            n_non_missing_after=(VALUE_COL, lambda s: s.notna().sum()),
-        )
-        .reset_index()
-    )
+    after_counts = _count_numeric_values_by_itemid(outfile).rename(
+        columns={"n_non_missing": "n_non_missing_after"}
+    )[[ITEM_COL, "n_non_missing_after"]]
 
     audit = (
         rules.merge(audit_wide, on=ITEM_COL, how="left")

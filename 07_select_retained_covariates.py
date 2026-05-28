@@ -4,26 +4,13 @@ import re
 import pandas as pd
 
 # Configuration
-DATA_DIR = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
+DATA_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
 DATASET_PATH = DATA_DIR / "master_panel.csv"
 OUT_PATH = DATA_DIR / "covariate_retention_log.csv"
-D_ITEMS_PATH = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
+D_ITEMS_PATH = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1\icu\d_items.csv")
 
-SELECTION_MODE = "threshold"
 MIN_ROW_COVERAGE = 0.05
 MIN_STAY_COVERAGE = 0.10
-REQUIRED_ITEMIDS = [
-    227444,
-    229355,
-    220045,
-    220277,
-    220210,
-    220546,
-    227457,
-    223762,
-    225668,
-    225643,
-]
 MEAN_ONLY = False
 
 
@@ -64,17 +51,10 @@ def load_item_labels() -> dict[int, str]:
     return label_df.set_index("itemid")["label"].to_dict()
 
 
-def decide_retention(row_cov: float, stay_cov: float, itemid: int, required_ids: set[int]) -> tuple[str, str]:
-    # Apply the configured retention rule to one covariate.
-    if SELECTION_MODE == "threshold":
-        keep_col = row_cov >= MIN_ROW_COVERAGE and stay_cov >= MIN_STAY_COVERAGE
-        return ("retain" if keep_col else "drop", "coverage")
-
-    if SELECTION_MODE == "required":
-        keep_col = itemid in required_ids
-        return ("retain" if keep_col else "drop", "required_itemid")
-
-    raise ValueError(f"Unsupported SELECTION_MODE: {SELECTION_MODE}")
+def decide_retention(row_cov: float, stay_cov: float) -> tuple[str, str]:
+    # Apply the row/stay coverage thresholds to one covariate.
+    keep_col = row_cov >= MIN_ROW_COVERAGE and stay_cov >= MIN_STAY_COVERAGE
+    return ("retain" if keep_col else "drop", "coverage")
 
 
 def build_retention_log(panel: pd.DataFrame, covariates: list[dict[str, object]]) -> pd.DataFrame:
@@ -82,7 +62,6 @@ def build_retention_log(panel: pd.DataFrame, covariates: list[dict[str, object]]
     total_rows = len(panel)
     total_stays = panel["stay_id"].nunique()
     stay_ids = panel["stay_id"]
-    required_ids = set(REQUIRED_ITEMIDS)
     itemid_to_label = load_item_labels()
 
     rows: list[dict[str, object]] = []
@@ -100,7 +79,7 @@ def build_retention_log(panel: pd.DataFrame, covariates: list[dict[str, object]]
         n_stays = int(has_value_by_stay.sum())
         stay_cov = n_stays / total_stays if total_stays else 0.0
 
-        decision, reason = decide_retention(row_cov, stay_cov, itemid, required_ids)
+        decision, reason = decide_retention(row_cov, stay_cov)
         rows.append(
             {
                 "itemid": itemid,
@@ -142,7 +121,7 @@ def main() -> None:
 
     print(f"[INFO] panel rows: {len(panel):,}")
     print(f"[INFO] catheterised stays: {panel['stay_id'].nunique():,}")
-    print(f"[INFO] selection mode: {SELECTION_MODE}")
+    print(f"[INFO] thresholds: row_coverage >= {MIN_ROW_COVERAGE}, stay_coverage >= {MIN_STAY_COVERAGE}")
     print(f"[WRITE] {OUT_PATH}")
     print(f"[INFO] retained columns: {retained_total:,}")
     print(f"[INFO] dropped columns: {dropped_total:,}")

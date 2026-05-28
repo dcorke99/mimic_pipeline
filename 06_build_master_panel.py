@@ -8,19 +8,19 @@ import time
 import numpy as np
 import pandas as pd
 
-BASE_PANEL_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\base_panel.csv")
-CLEANED_CHART_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\cleaned_chart_covariates.csv")
+BASE_PANEL_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\base_panel.csv")
+CLEANED_CHART_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\cleaned_chart_covariates.csv")
 CHUNK_ROWS_CHARTEVENTS = 1_000_000
 AGG_STATS = [
     "count",
     "mean",
-    "min",
-    "max",
+    # "min",
+    # "max",
     "std",
-    "first",
+    # "first",
     "last",
-    "delta",
-    "range",
+    # "delta",
+    # "range",
     "slope_per_hour",
 ]
 
@@ -215,7 +215,7 @@ def main():
     panel = panel[base_cols + covariate_cols]
 
     # Save the master panel.
-    outdir = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
+    outdir = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
     outdir.mkdir(exist_ok=True)
 
     outfile = outdir / "master_panel.csv"

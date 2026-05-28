@@ -10,8 +10,8 @@ import time
 
 import pandas as pd
 
-MIMIC_DIR = Path(r"C:\Users\DavidUni\Repos\Data\MIMIC-IV\mimic-iv-3.1")
-EPISODE_FILE = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data\required_catheter_episodes.csv")
+MIMIC_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1")
+EPISODE_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\required_catheter_episodes.csv")
 CHUNK_ROWS_CHARTEVENTS = 1_000_000
 LOOKBACK_HOURS = 24
 SAMPLE_ROWS = 1000
@@ -90,7 +90,7 @@ def main() -> None:
     ]
 
     # Create the output directory and reset any previous output file.
-    outdir = Path(r"C:\Users\DavidUni\Repos\mimic_pipeline\data")
+    outdir = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
     outdir.mkdir(exist_ok=True)
 
     outfile = outdir / "raw_chart_covariates.csv"
