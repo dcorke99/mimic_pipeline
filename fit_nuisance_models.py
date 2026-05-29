@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import shap
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     average_precision_score,
@@ -24,7 +23,7 @@ from xgboost import XGBClassifier
 # =============================================================================
 
 SEED = 42
-MODEL_TYPE = "xgb"  # "rf" or "xgb" for the binary propensity model.
+MODEL_TYPE = "xgb"
 
 INDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data")
 OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\nuisance_models")
@@ -49,7 +48,6 @@ Y_ICU_EXIT = "icu_end_in_period"
 TRANSITION_LABEL_COL = "next_state"
 OBSERVED_ACTION_COL = "observed_action"
 ACTION_REMOVE_COL = "action_remove"
-ACTION_OUT_COL = "action_out"
 
 LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
@@ -74,14 +72,34 @@ TRANSITION_CLASSES = [
     "no_event_continue",
 ]
 ACTION_VALUES = ["keep", "remove", "out"]
-OUTCOME_SCORE_COLS = [
-    f"p_next_{transition_class}_if_{action}"
+ALL_OUTCOME_SCORE_COLS = [
+    f"p_{transition_class}_if_{action}"
     for action in ACTION_VALUES
     for transition_class in TRANSITION_CLASSES
 ]
-OBSERVED_TRANSITION_SCORE_COLS = [
-    f"p_next_{transition_class}_obs"
+ALL_OBSERVED_TRANSITION_SCORE_COLS = [
+    f"p_{transition_class}_obs"
     for transition_class in TRANSITION_CLASSES
+]
+EXPORT_TRANSITION_CLASSES_BY_ACTION = {
+    "keep": ["cauti", "death", "icu_exit_alive", "no_event_continue"],
+    "remove": ["cauti", "death", "icu_exit_alive"],
+    "out": ["cauti", "reinsertion", "death", "icu_exit_alive", "no_event_continue"],
+}
+OUTCOME_SCORE_COLS = [
+    f"p_{transition_class}_if_{action}"
+    for action, transition_classes in EXPORT_TRANSITION_CLASSES_BY_ACTION.items()
+    for transition_class in transition_classes
+]
+OBSERVED_TRANSITION_SCORE_COLS = [
+    f"p_{transition_class}_obs"
+    for transition_class in TRANSITION_CLASSES
+    if transition_class != "removal"
+]
+INTERNAL_SCORE_COLS = [
+    PROPENSITY_SCORE_COL,
+    *ALL_OUTCOME_SCORE_COLS,
+    *ALL_OBSERVED_TRANSITION_SCORE_COLS,
 ]
 ALL_SCORE_COLS = [PROPENSITY_SCORE_COL, *OUTCOME_SCORE_COLS, *OBSERVED_TRANSITION_SCORE_COLS]
 LOW_COUNT_WARNING_THRESHOLD = 20
@@ -135,35 +153,21 @@ def insert_score_columns_before_age(df, score_col_names):
 
 
 def fit_binary_model(features, target):
-    if MODEL_TYPE == "rf":
-        pipe = Pipeline([
-            ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
-            ("rf", RandomForestClassifier(
-                n_estimators=200,
-                max_depth=None,
-                min_samples_leaf=5,
-                n_jobs=1,
-                random_state=SEED,
-            )),
-        ])
-    elif MODEL_TYPE == "xgb":
-        pipe = Pipeline([
-            ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
-            ("xgb", XGBClassifier(
-                objective="binary:logistic",
-                eval_metric="auc",
-                n_estimators=300,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                tree_method="hist",
-                random_state=SEED,
-                n_jobs=1,
-            )),
-        ])
-    else:
-        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
+    pipe = Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
+        ("xgb", XGBClassifier(
+            objective="binary:logistic",
+            eval_metric="auc",
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            tree_method="hist",
+            random_state=SEED,
+            n_jobs=1,
+        )),
+    ])
 
     pipe.fit(features.to_numpy(dtype=float), target.to_numpy(dtype=int))
     return pipe
@@ -174,7 +178,7 @@ def predict_binary_proba(pipe, features):
 
 
 def feature_importance_series(pipe, feature_cols):
-    estimator = pipe.named_steps["rf"] if "rf" in pipe.named_steps else pipe.named_steps["xgb"]
+    estimator = pipe.named_steps["xgb"]
     return pd.Series(estimator.feature_importances_, index=list(feature_cols)).sort_values(ascending=False)
 
 
@@ -185,7 +189,7 @@ def shap_importance_series(pipe, features, sample_n=2000):
     feature_names = list(features.columns)
     features_imp_df = pd.DataFrame(features_imp, columns=feature_names)
 
-    estimator = pipe.named_steps["rf"] if "rf" in pipe.named_steps else pipe.named_steps["xgb"]
+    estimator = pipe.named_steps["xgb"]
     explainer = shap.TreeExplainer(estimator)
     explanation = explainer(features_imp_df)
     shap_values = np.asarray(explanation.values)
@@ -235,7 +239,7 @@ def save_shap_plots(pipe, features, out_prefix, sample_n=2000):
     feature_names = list(features.columns)
     features_imp_df = pd.DataFrame(features_imp, columns=feature_names)
 
-    estimator = pipe.named_steps["rf"] if "rf" in pipe.named_steps else pipe.named_steps["xgb"]
+    estimator = pipe.named_steps["xgb"]
     explainer = shap.TreeExplainer(estimator)
     explanation = explainer(features_imp_df)
 
@@ -327,7 +331,6 @@ def prepare_transition_frame(df):
     df[TRANSITION_LABEL_COL] = derive_transition_label(df)
     df[OBSERVED_ACTION_COL] = derive_observed_action(df)
     df[ACTION_REMOVE_COL] = (df[OBSERVED_ACTION_COL] == "remove").astype(int)
-    df[ACTION_OUT_COL] = (df[OBSERVED_ACTION_COL] == "out").astype(int)
     if "state_is_out" not in df.columns:
         df["state_is_out"] = (df[STATE_COL] == "out").astype(int)
     return df
@@ -371,43 +374,42 @@ def score_action(df, row_mask, action, feature_cols, model):
         return np.empty((0, len(TRANSITION_CLASSES)))
 
     if action == "keep":
-        state_is_out, action_remove, action_out = 0, 0, 0
+        state_is_out, action_remove = 0, 0
     elif action == "remove":
-        state_is_out, action_remove, action_out = 0, 1, 0
+        state_is_out, action_remove = 0, 1
     elif action == "out":
-        state_is_out, action_remove, action_out = 1, 0, 1
+        state_is_out, action_remove = 1, 0
     else:
         raise ValueError(f"Unknown action for scoring: {action}")
 
     features = df.loc[row_mask, feature_cols].copy()
     features["state_is_out"] = state_is_out
     features[ACTION_REMOVE_COL] = action_remove
-    features[ACTION_OUT_COL] = action_out
     return predict_transition_proba(model, features[feature_cols])
 
 
 def assign_action_scores(df, row_mask, action, proba):
     target_index = df.index[row_mask]
     for class_idx, transition_class in enumerate(TRANSITION_CLASSES):
-        df.loc[target_index, f"p_next_{transition_class}_if_{action}"] = proba[:, class_idx]
+        df.loc[target_index, f"p_{transition_class}_if_{action}"] = proba[:, class_idx]
 
 
 def assign_observed_scores(df):
     for transition_class in TRANSITION_CLASSES:
-        df[f"p_next_{transition_class}_obs"] = np.nan
+        df[f"p_{transition_class}_obs"] = np.nan
 
     for action in ACTION_VALUES:
         action_rows = df[OBSERVED_ACTION_COL] == action
         for transition_class in TRANSITION_CLASSES:
-            source_col = f"p_next_{transition_class}_if_{action}"
-            target_col = f"p_next_{transition_class}_obs"
+            source_col = f"p_{transition_class}_if_{action}"
+            target_col = f"p_{transition_class}_obs"
             df.loc[action_rows, target_col] = df.loc[action_rows, source_col]
 
 
 def prob_sum_summary(df):
     rows = []
     for action in ACTION_VALUES:
-        cols = [f"p_next_{transition_class}_if_{action}" for transition_class in TRANSITION_CLASSES]
+        cols = [f"p_{transition_class}_if_{action}" for transition_class in TRANSITION_CLASSES]
         sums = df[cols].sum(axis=1, skipna=False).dropna()
         rows.append({
             "action": action,
@@ -421,6 +423,8 @@ def prob_sum_summary(df):
 
 
 def test_transition_metrics(eval_df, proba, y_codes):
+    row_sums = proba.sum(axis=1, keepdims=True)
+    proba = np.divide(proba, row_sums, out=proba.copy(), where=row_sums > 0)
     metrics = {
         "n": int(len(eval_df)),
         "multiclass_log_loss": None,
@@ -431,6 +435,12 @@ def test_transition_metrics(eval_df, proba, y_codes):
         labels = list(range(len(TRANSITION_CLASSES)))
         metrics["multiclass_log_loss"] = float(log_loss(y_codes, proba, labels=labels))
         for class_idx, transition_class in enumerate(TRANSITION_CLASSES):
+            if transition_class == "removal":
+                # Removal is the treatment/action itself, so observed-action AUC is tautological.
+                metrics["one_vs_rest_auc"][transition_class] = None
+                metrics["risk_set_auc"][transition_class] = None
+                continue
+
             binary_target = (y_codes == class_idx).astype(int)
             if binary_target.nunique() > 1:
                 metrics["one_vs_rest_auc"][transition_class] = float(
@@ -448,8 +458,6 @@ def test_transition_metrics(eval_df, proba, y_codes):
                 )
             elif transition_class == "reinsertion":
                 risk_mask = (eval_df[OBSERVED_ACTION_COL] == "out").to_numpy()
-            elif transition_class == "removal":
-                risk_mask = (eval_df[STATE_COL] == "in").to_numpy()
             else:
                 risk_mask = np.ones(len(eval_df), dtype=bool)
 
@@ -470,7 +478,7 @@ def predicted_vs_observed(eval_df):
             "n": int(n),
             "observed_count": int((eval_df[TRANSITION_LABEL_COL] == transition_class).sum()),
             "observed_rate": float((eval_df[TRANSITION_LABEL_COL] == transition_class).mean()) if n else np.nan,
-            "predicted_mean": float(eval_df[f"p_next_{transition_class}_obs"].mean()) if n else np.nan,
+            "predicted_mean": float(eval_df[f"p_{transition_class}_obs"].mean()) if n else np.nan,
         })
     return pd.DataFrame(rows)
 
@@ -602,6 +610,28 @@ def fit_propensity_scores(df, feature_spec):
     eval_test = df[(df[SPLIT_COL] == "test") & (df[STATE_COL] == "in")].copy()
     summary = scalar_binary_metrics(eval_test, ACTION_COL, PROPENSITY_SCORE_COL)
 
+    save_df(
+        propensity_summary_rows(df, eligible_df, feature_list, feature_spec, summary),
+        OUTDIR / "propensity_summary.csv",
+    )
+    dump_joblib(
+        {
+            "model_type": MODEL_TYPE,
+            "remove_model": remove_model,
+            "features": feature_list,
+            "x_cols_remove": remove_feature_cols,
+            "id_col": ID_COL,
+            "time_col": TIME_COL,
+            "split_col": SPLIT_COL,
+            "period_hours": feature_spec.get("period_hours"),
+            "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
+            "risk_set_columns": {"cauti": AT_RISK_CAUTI, "reinsertion": AT_RISK_REINS},
+            "modeling_panel_file": str(INFILE),
+            "feature_spec_file": str(FEATURE_SPEC_FILE),
+        },
+        MODEL_DIR / "propensity_model.pkl",
+    )
+
     print(f"AUC removal: {summary['auc']}", flush=True)
     return df, remove_model, summary
 
@@ -611,6 +641,7 @@ def fit_propensity_scores(df, feature_spec):
 # =============================================================================
 
 def fit_outcome_scores(df, feature_spec):
+    covariate_dict = pd.read_csv(COVARIATE_DICT_FILE)
     df = prepare_transition_frame(df)
 
     feature_list = feature_spec["features"]
@@ -621,7 +652,6 @@ def fit_outcome_scores(df, feature_spec):
             PERIODS_COL,
             "state_is_out",
             ACTION_REMOVE_COL,
-            ACTION_OUT_COL,
             *feature_list,
         ]
     require_columns(df, transition_feature_cols, "transition-feature")
@@ -631,7 +661,7 @@ def fit_outcome_scores(df, feature_spec):
     print(f"Loaded features: {len(feature_list)}")
     print(f"Transition features: {len(transition_feature_cols)}")
 
-    for col in OUTCOME_SCORE_COLS + OBSERVED_TRANSITION_SCORE_COLS:
+    for col in ALL_OUTCOME_SCORE_COLS + ALL_OBSERVED_TRANSITION_SCORE_COLS:
         df[col] = np.nan
 
     train_df = df[df[SPLIT_COL] == "train"].copy()
@@ -675,12 +705,67 @@ def fit_outcome_scores(df, feature_spec):
     assign_observed_scores(df)
 
     eval_test = df[df[SPLIT_COL] == "test"].copy()
-    test_proba = eval_test[OBSERVED_TRANSITION_SCORE_COLS].to_numpy(dtype=float)
+    test_proba = eval_test[ALL_OBSERVED_TRANSITION_SCORE_COLS].to_numpy(dtype=float)
     transition_summary = test_transition_metrics(eval_test, test_proba, test_y.reset_index(drop=True))
+
+    probability_summary = prob_sum_summary(df)
+    pred_vs_obs = predicted_vs_observed(eval_test)
+    save_df(
+        transition_diagnostic_rows(transition_summary, class_distribution, pred_vs_obs, probability_summary),
+        OUTDIR / "transition_diagnostics.csv",
+    )
+    save_df(
+        outcome_summary_rows(
+            df,
+            feature_list,
+            transition_feature_cols,
+            train_df,
+            test_df,
+            in_rows,
+            out_rows,
+            low_count_classes,
+            feature_spec.get("period_hours"),
+        ),
+        OUTDIR / "outcome_summary.csv",
+    )
+
+    model_feature_df = top_series_df(
+        "transition",
+        "model_importance",
+        feature_importance_series(transition_model, transition_feature_cols),
+        TOP_FEATURES_TO_SAVE,
+    )
+    model_feature_df = add_feature_descriptions(model_feature_df, covariate_dict)
+    save_df(model_feature_df, OUTDIR / "transition_top_model_features.csv")
+
+    dump_joblib(
+        {
+            "model_type": "xgb_multi_softprob",
+            "transition_model": transition_model,
+            "transition_classes": TRANSITION_CLASSES,
+            "action_values": ACTION_VALUES,
+            "features": feature_list,
+            "x_cols_transition": transition_feature_cols,
+            "id_col": ID_COL,
+            "time_col": TIME_COL,
+            "split_col": SPLIT_COL,
+            "transition_label_col": TRANSITION_LABEL_COL,
+            "observed_action_col": OBSERVED_ACTION_COL,
+            "period_hours": feature_spec.get("period_hours"),
+            "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
+            "risk_set_columns": {"cauti": AT_RISK_CAUTI, "reinsertion": AT_RISK_REINS},
+            "modeling_panel_file": str(INFILE),
+            "feature_spec_file": str(FEATURE_SPEC_FILE),
+        },
+        MODEL_DIR / "outcome_models.pkl",
+    )
 
     print(f"Transition log loss: {transition_summary['multiclass_log_loss']}", flush=True)
     for transition_class, auc in transition_summary["risk_set_auc"].items():
-        print(f"Risk-set AUC {transition_class}: {auc}", flush=True)
+        if auc is None:
+            print(f"Risk-set AUC {transition_class}: not applicable", flush=True)
+        else:
+            print(f"Risk-set AUC {transition_class}: {auc}", flush=True)
 
     return df, transition_model, transition_summary
 
@@ -690,8 +775,10 @@ def fit_outcome_scores(df, feature_spec):
 # =============================================================================
 
 def save_scored_panel(df):
-    # The combined run writes one scored panel and avoids intermediate artifacts.
-    final_df = insert_score_columns_before_age(df, ALL_SCORE_COLS)
+    # Keep the full probability vectors internal, but export only meaningful scores.
+    non_exported_scores = [col for col in INTERNAL_SCORE_COLS if col not in ALL_SCORE_COLS]
+    final_df = df.drop(columns=[col for col in non_exported_scores if col in df.columns])
+    final_df = insert_score_columns_before_age(final_df, ALL_SCORE_COLS)
     final_df.to_csv(FINAL_PANEL, index=False, float_format="%.6f")
     return final_df
 
@@ -709,6 +796,12 @@ def main():
 
     print("\n--- SUCCESS NUISANCE MODEL FIT ---", flush=True)
     print(f"Final scored panel saved: {FINAL_PANEL}", flush=True)
+    print(f"Propensity model saved: {MODEL_DIR / 'propensity_model.pkl'}", flush=True)
+    print(f"Outcome model saved: {MODEL_DIR / 'outcome_models.pkl'}", flush=True)
+    print(f"Propensity summary saved: {OUTDIR / 'propensity_summary.csv'}", flush=True)
+    print(f"Outcome summary saved: {OUTDIR / 'outcome_summary.csv'}", flush=True)
+    print(f"Transition diagnostics saved: {OUTDIR / 'transition_diagnostics.csv'}", flush=True)
+    print(f"Transition top features saved: {OUTDIR / 'transition_top_model_features.csv'}", flush=True)
 
 
 if __name__ == "__main__":

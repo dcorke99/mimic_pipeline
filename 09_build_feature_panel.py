@@ -45,7 +45,6 @@ Y_ICU_EXIT = "icu_end_in_period"
 TRANSITION_LABEL_COL = "next_state"
 OBSERVED_ACTION_COL = "observed_action"
 ACTION_REMOVE_COL = "action_remove"
-ACTION_OUT_COL = "action_out"
 LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
 
@@ -133,7 +132,6 @@ def _add_transition_columns(df: pd.DataFrame) -> None:
     df.loc[(df[STATE_COL] == "in") & (df[ACTION_COL] == 1), OBSERVED_ACTION_COL] = "remove"
     df.loc[df[STATE_COL] == "out", OBSERVED_ACTION_COL] = "out"
     df[ACTION_REMOVE_COL] = (df[OBSERVED_ACTION_COL] == "remove").astype(int)
-    df[ACTION_OUT_COL] = (df[OBSERVED_ACTION_COL] == "out").astype(int)
 
 
 def main() -> None:
@@ -159,7 +157,7 @@ def main() -> None:
     # Coerce the model feature columns and time counters.
     _coerce_numeric(
         df,
-        base_feature_cols + [TIME_COL, PERIODS_COL, "state_is_out", ACTION_REMOVE_COL, ACTION_OUT_COL],
+        base_feature_cols + [TIME_COL, PERIODS_COL, "state_is_out", ACTION_REMOVE_COL],
         fill_missing_with_zero=False,
     )
 
@@ -176,7 +174,6 @@ def main() -> None:
         PERIODS_COL,
         "state_is_out",
         ACTION_REMOVE_COL,
-        ACTION_OUT_COL,
         *feature_cols,
     ]
 
@@ -221,7 +218,6 @@ def main() -> None:
         "transition_label_col": TRANSITION_LABEL_COL,
         "observed_action_col": OBSERVED_ACTION_COL,
         "action_remove_col": ACTION_REMOVE_COL,
-        "action_out_col": ACTION_OUT_COL,
         "last_period_col": LAST_PERIOD_COL,
         "end_reason_col": END_REASON_COL,
         "period_hours": period_hours,
