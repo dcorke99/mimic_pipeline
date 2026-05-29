@@ -21,7 +21,7 @@ INDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pi
 OUTDIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step1")
 MODEL_DIR = OUTDIR
 
-INFILE = INDIR / "feature_panel.csv"
+INFILE = INDIR / "modeling_panel.csv"
 FEATURE_SPEC_FILE = INDIR / "feature_spec.json"
 COVARIATE_DICT_FILE = INDIR / "covariate_dictionary.csv"
 
@@ -322,7 +322,7 @@ def main():
     feature_spec = json.loads(FEATURE_SPEC_FILE.read_text(encoding="utf-8"))
     covariate_dict = pd.read_csv(COVARIATE_DICT_FILE)
 
-    # Load and standardise the feature panel.
+    # Load and standardise the modeling panel.
     df = pd.read_csv(INFILE, low_memory=False)
     df.columns = df.columns.str.strip()
     df = df.copy()
@@ -643,7 +643,7 @@ def main():
             "period_hours": feature_spec.get("period_hours"),
             "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
             "risk_set_columns": {"cauti": AT_RISK_CAUTI, "reinsertion": AT_RISK_REINS},
-            "feature_panel_file": str(INFILE),
+            "modeling_panel_file": str(INFILE),
             "feature_spec_file": str(FEATURE_SPEC_FILE),
         },
         MODEL_DIR / "transition_models.pkl"
@@ -676,14 +676,14 @@ def main():
         "period_hours": feature_spec.get("period_hours"),
         "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
         "split": {
-            "method": "precomputed patient-level split from step1_feature_panel.csv",
+            "method": "precomputed patient-level split from modeling_panel.csv",
             "train_rows": int((df[SPLIT_COL] == "train").sum()),
             "test_rows": int((df[SPLIT_COL] == "test").sum()),
             "train_patients": int(df.loc[df[SPLIT_COL] == "train", ID_COL].nunique()),
             "test_patients": int(df.loc[df[SPLIT_COL] == "test", ID_COL].nunique()),
         },
         "preprocessing": {
-            "feature_panel_file": str(INFILE),
+            "modeling_panel_file": str(INFILE),
             "feature_spec_file": str(FEATURE_SPEC_FILE),
             "hidden_indicator_columns_created_inside_step1": 0,
             "explicit_feature_count": int(len(feature_list)),

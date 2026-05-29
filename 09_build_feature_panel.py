@@ -40,6 +40,12 @@ SPLIT_COL = "split"
 ACTION_COL = "removed_in_period"
 Y_CAUTI = "cauti_in_period"
 Y_REINS = "reinsertion_in_period"
+Y_DEATH = "death_in_period"
+Y_ICU_EXIT = "icu_end_in_period"
+TRANSITION_LABEL_COL = "next_state"
+OBSERVED_ACTION_COL = "observed_action"
+ACTION_REMOVE_COL = "action_remove"
+ACTION_OUT_COL = "action_out"
 LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
 
@@ -107,6 +113,29 @@ def _detect_covariate_itemids(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame({"itemid": sorted(itemids)})
 
 
+def _add_transition_columns(df: pd.DataFrame) -> None:
+    required_cols = [STATE_COL, ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT]
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required transition-label columns: {missing_cols}")
+
+    for col in [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+    df[TRANSITION_LABEL_COL] = "no_event_continue"
+    df.loc[df[ACTION_COL] == 1, TRANSITION_LABEL_COL] = "removal"
+    df.loc[df[Y_REINS] == 1, TRANSITION_LABEL_COL] = "reinsertion"
+    df.loc[df[Y_CAUTI] == 1, TRANSITION_LABEL_COL] = "cauti"
+    df.loc[(df[Y_ICU_EXIT] == 1) & (df[Y_DEATH] == 0), TRANSITION_LABEL_COL] = "icu_exit_alive"
+    df.loc[df[Y_DEATH] == 1, TRANSITION_LABEL_COL] = "death"
+
+    df[OBSERVED_ACTION_COL] = "keep"
+    df.loc[(df[STATE_COL] == "in") & (df[ACTION_COL] == 1), OBSERVED_ACTION_COL] = "remove"
+    df.loc[df[STATE_COL] == "out", OBSERVED_ACTION_COL] = "out"
+    df[ACTION_REMOVE_COL] = (df[OBSERVED_ACTION_COL] == "remove").astype(int)
+    df[ACTION_OUT_COL] = (df[OBSERVED_ACTION_COL] == "out").astype(int)
+
+
 def main() -> None:
     OUTDIR.mkdir(exist_ok=True, parents=True)
 
@@ -123,22 +152,35 @@ def main() -> None:
 
     # Add the explicit out-state feature used by the downstream models.
     df["state_is_out"] = (df[STATE_COL] == "out").astype(int)
+    _add_transition_columns(df)
 
     base_feature_cols = _base_feature_cols(df)
 
     # Coerce the model feature columns and time counters.
-    _coerce_numeric(df, base_feature_cols + [TIME_COL, PERIODS_COL, "state_is_out"], fill_missing_with_zero=False)
+    _coerce_numeric(
+        df,
+        base_feature_cols + [TIME_COL, PERIODS_COL, "state_is_out", ACTION_REMOVE_COL, ACTION_OUT_COL],
+        fill_missing_with_zero=False,
+    )
 
     # Coerce binary targets and flags to 0/1 integers.
-    target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, LAST_PERIOD_COL]
+    target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT, LAST_PERIOD_COL]
     _coerce_numeric(df, target_flag_cols, fill_missing_with_zero=True)
 
     feature_cols = list(base_feature_cols)
     x_cols_remove = [TIME_COL, PERIODS_COL, *feature_cols]
     x_cols_cauti = [TIME_COL, PERIODS_COL, "state_is_out", *feature_cols]
     x_cols_reins = [PERIODS_COL, *feature_cols]
+    x_cols_transition = [
+        TIME_COL,
+        PERIODS_COL,
+        "state_is_out",
+        ACTION_REMOVE_COL,
+        ACTION_OUT_COL,
+        *feature_cols,
+    ]
 
-    required_feature_cols = sorted(set(x_cols_remove + x_cols_cauti + x_cols_reins))
+    required_feature_cols = sorted(set(x_cols_remove + x_cols_cauti + x_cols_reins + x_cols_transition))
     missing_required = [c for c in required_feature_cols if c not in df.columns]
     if missing_required:
         raise ValueError(f"Missing required Step 1 feature columns after preprocessing: {missing_required}")
@@ -174,6 +216,12 @@ def main() -> None:
         "action_col": ACTION_COL,
         "y_cauti": Y_CAUTI,
         "y_reins": Y_REINS,
+        "y_death": Y_DEATH,
+        "y_icu_exit": Y_ICU_EXIT,
+        "transition_label_col": TRANSITION_LABEL_COL,
+        "observed_action_col": OBSERVED_ACTION_COL,
+        "action_remove_col": ACTION_REMOVE_COL,
+        "action_out_col": ACTION_OUT_COL,
         "last_period_col": LAST_PERIOD_COL,
         "end_reason_col": END_REASON_COL,
         "period_hours": period_hours,
@@ -183,6 +231,7 @@ def main() -> None:
         "x_cols_remove": x_cols_remove,
         "x_cols_cauti": x_cols_cauti,
         "x_cols_reins": x_cols_reins,
+        "x_cols_transition": x_cols_transition,
         "n_rows": int(len(df)),
         "n_features": int(len(feature_cols)),
     }
