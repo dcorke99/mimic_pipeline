@@ -22,6 +22,7 @@ Output:
     artifacts/policy_eval/ipw_policy_remove_day4_panel.csv
     artifacts/policy_eval/ipw_policy_remove_day5_panel.csv
     artifacts/policy_eval/ipw_policy_remove_days_1_to_5_panel.csv
+    artifacts/policy_eval/ipw_policy_remove_days_1_to_5_overlap_diagnostics.csv
 
 Each policy-specific output contains only episodes that actually followed that
 trial policy. For example, remove-on-day-3 means:
@@ -49,6 +50,7 @@ OUTDIR = REPO_ROOT / "artifacts" / "policy_eval"
 
 INPUT_PATH = NUISANCE_MODEL_DIR / "scored_panel.csv"
 COMBINED_OUTPUT_PATH = OUTDIR / "ipw_policy_remove_days_1_to_5_panel.csv"
+OVERLAP_DIAGNOSTICS_PATH = OUTDIR / "ipw_policy_remove_days_1_to_5_overlap_diagnostics.csv"
 
 POLICY_REMOVE_DAYS = [1, 2, 3, 4, 5]
 
@@ -125,6 +127,9 @@ OUTPUT_COLS = [
     "p_observed_action_clipped",
     "policy_action",
     "policy_action_remove",
+    "policy_support",
+    "policy_support_clipped",
+    "policy_weight_component",
     "matched_policy_today",
     "followed_policy_so_far",
     "episode_matches_policy",
@@ -159,7 +164,120 @@ def output_path_for_policy(policy_remove_day: int) -> Path:
     return OUTDIR / f"ipw_policy_remove_day{policy_remove_day}_panel.csv"
 
 
-def build_policy_panel(base_df: pd.DataFrame, policy_remove_day: int) -> pd.DataFrame:
+def valid_weight_series(weights: pd.Series) -> pd.Series:
+    weights = pd.to_numeric(weights, errors="coerce")
+    return weights[weights.notna() & np.isfinite(weights) & (weights > 0)]
+
+
+def effective_sample_size(weights: pd.Series) -> float:
+    weights = valid_weight_series(weights)
+    if weights.empty:
+        return np.nan
+    sum_weights = float(weights.sum())
+    sum_squared_weights = float(np.square(weights).sum())
+    return float((sum_weights ** 2) / sum_squared_weights) if sum_squared_weights > 0 else np.nan
+
+
+def support_weights(support: pd.Series) -> pd.Series:
+    support = pd.to_numeric(support, errors="coerce")
+    support = support[support.notna() & np.isfinite(support) & (support > 0)]
+    if support.empty:
+        return pd.Series(dtype=float)
+    return 1.0 / support
+
+
+def support_summary_fields(support: pd.Series, prefix: str = "") -> dict:
+    support = pd.to_numeric(support, errors="coerce")
+    valid_support = support[support.notna() & np.isfinite(support)]
+    prefix = f"{prefix}_" if prefix else ""
+
+    if valid_support.empty:
+        return {
+            f"{prefix}n": 0,
+            f"{prefix}mean_support": np.nan,
+            f"{prefix}median_support": np.nan,
+            f"{prefix}min_support": np.nan,
+            f"{prefix}pct_below_0_10": np.nan,
+            f"{prefix}pct_below_0_05": np.nan,
+            f"{prefix}pct_below_0_01": np.nan,
+            f"{prefix}effective_sample_size": np.nan,
+        }
+
+    return {
+        f"{prefix}n": int(len(valid_support)),
+        f"{prefix}mean_support": float(valid_support.mean()),
+        f"{prefix}median_support": float(valid_support.median()),
+        f"{prefix}min_support": float(valid_support.min()),
+        f"{prefix}pct_below_0_10": float((valid_support < 0.10).mean()),
+        f"{prefix}pct_below_0_05": float((valid_support < 0.05).mean()),
+        f"{prefix}pct_below_0_01": float((valid_support < 0.01).mean()),
+        f"{prefix}effective_sample_size": effective_sample_size(support_weights(valid_support)),
+    }
+
+
+def add_policy_support(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["policy_support"] = np.nan
+
+    support_rows = df["is_decision_row"] & df["policy_action_remove"].isin([0, 1])
+    p_remove = pd.to_numeric(df.loc[support_rows, "p_remove_obs"], errors="coerce").clip(0.0, 1.0)
+    policy_remove = df.loc[support_rows, "policy_action_remove"].eq(1)
+
+    df.loc[support_rows, "policy_support"] = np.where(
+        policy_remove,
+        p_remove,
+        1.0 - p_remove,
+    )
+    df["policy_support_clipped"] = df["policy_support"].clip(
+        lower=PROPENSITY_CLIP_LOWER,
+        upper=PROPENSITY_CLIP_UPPER,
+    )
+    df["policy_weight_component"] = np.nan
+    df.loc[support_rows, "policy_weight_component"] = 1.0 / df.loc[
+        support_rows,
+        "policy_support",
+    ]
+    return df
+
+
+def episode_policy_support(policy_df: pd.DataFrame) -> pd.Series:
+    support_rows = policy_df["policy_support"].notna()
+    support_df = policy_df.loc[support_rows, ["catheter_episode_id", "policy_support"]].copy()
+    support_df["policy_support"] = pd.to_numeric(support_df["policy_support"], errors="coerce")
+    support_df = support_df.dropna(subset=["policy_support"])
+    if support_df.empty:
+        return pd.Series(dtype=float)
+    return support_df.groupby("catheter_episode_id")["policy_support"].prod(min_count=1)
+
+
+def overlap_summary_row(policy_df: pd.DataFrame, label: str) -> dict:
+    support_rows = policy_df["policy_support"].notna()
+    row_support = policy_df.loc[support_rows, "policy_support"]
+    episode_support = episode_policy_support(policy_df)
+
+    row = {
+        "group": label,
+        "n_policy_decision_rows": int(support_rows.sum()),
+        "n_policy_decision_episodes": int(policy_df.loc[support_rows, "catheter_episode_id"].nunique()),
+    }
+    row.update(support_summary_fields(row_support))
+    row.update(support_summary_fields(episode_support, prefix="episode"))
+    return row
+
+
+def overlap_summary_rows(policy_df: pd.DataFrame, policy_name: str, policy_remove_day: int) -> list[dict]:
+    rows = []
+    base = {"policy_name": policy_name, "policy_remove_day": policy_remove_day}
+    rows.append({**base, **overlap_summary_row(policy_df, "all")})
+
+    if "split" in policy_df.columns:
+        for split_value, split_df in policy_df.groupby("split", dropna=False, sort=False):
+            rows.append({**base, **overlap_summary_row(split_df, f"split={split_value}")})
+
+    return rows
+
+
+def build_policy_panel(base_df: pd.DataFrame, policy_remove_day: int):
     df = base_df.copy()
     policy_name = policy_name_for_day(policy_remove_day)
 
@@ -221,6 +339,9 @@ def build_policy_panel(base_df: pd.DataFrame, policy_remove_day: int) -> pd.Data
         episode_removed_on_policy_day.eq(1) & episode_ever_deviated.eq(0)
     ).astype(int)
 
+    df = add_policy_support(df)
+    overlap_rows = overlap_summary_rows(df, policy_name, policy_remove_day)
+
     # -----------------------------------------------------------------
     # IPW components
     # -----------------------------------------------------------------
@@ -248,7 +369,7 @@ def build_policy_panel(base_df: pd.DataFrame, policy_remove_day: int) -> pd.Data
     # Keep only matching episodes for this policy-evaluation panel.
     ipw_panel = df[df["episode_matches_policy"].eq(1)].copy()
     output_cols = [c for c in OUTPUT_COLS if c in ipw_panel.columns]
-    return ipw_panel[output_cols]
+    return ipw_panel[output_cols], overlap_rows
 
 
 def main() -> None:
@@ -303,30 +424,37 @@ def main() -> None:
 
     n_total_episodes = df["catheter_episode_id"].nunique()
     policy_panels = []
+    overlap_rows = []
 
     print(f"Input rows: {len(df):,}")
     print(f"Total catheter episodes: {n_total_episodes:,}")
     print(f"Policies: remove on days {POLICY_REMOVE_DAYS}")
 
     for policy_remove_day in POLICY_REMOVE_DAYS:
-        ipw_panel = build_policy_panel(df, policy_remove_day)
+        ipw_panel, policy_overlap_rows = build_policy_panel(df, policy_remove_day)
         output_path = output_path_for_policy(policy_remove_day)
         ipw_panel.to_csv(output_path, index=False)
         policy_panels.append(ipw_panel)
+        overlap_rows.extend(policy_overlap_rows)
 
         n_matching_episodes = ipw_panel["catheter_episode_id"].nunique()
         print()
         print(f"Policy: {policy_name_for_day(policy_remove_day)}")
         print(f"Matching episodes retained: {n_matching_episodes:,}")
+        print(f"Mean row-level policy support: {policy_overlap_rows[0]['mean_support']:.4f}")
+        print(f"Episode-level overlap ESS: {policy_overlap_rows[0]['episode_effective_sample_size']:.1f}")
         print(f"Output rows: {len(ipw_panel):,}")
         print(f"Saved: {output_path}")
 
     combined_panel = pd.concat(policy_panels, ignore_index=True) if policy_panels else pd.DataFrame()
     combined_panel.to_csv(COMBINED_OUTPUT_PATH, index=False)
+    overlap_df = pd.DataFrame(overlap_rows)
+    overlap_df.to_csv(OVERLAP_DIAGNOSTICS_PATH, index=False)
 
     print()
     print(f"Combined output rows: {len(combined_panel):,}")
     print(f"Saved combined panel: {COMBINED_OUTPUT_PATH}")
+    print(f"Saved overlap diagnostics: {OVERLAP_DIAGNOSTICS_PATH}")
 
 
 if __name__ == "__main__":
