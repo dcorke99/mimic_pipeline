@@ -23,6 +23,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import policy_eval_common as pec
+
 
 # ---------------------------------------------------------------------
 # Defaults
@@ -32,9 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 DEFAULT_INPUT_PATH = (
     REPO_ROOT
-    / "artifacts"
-    / "decision_panel"
-    / "patient_day_decision_panel.csv"
+    / "data"
+    / "modeling_panel.csv"
 )
 DEFAULT_OUTDIR = REPO_ROOT / "artifacts" / "policy_interventions"
 DEFAULT_POLICY_DAYS = [1, 2, 3, 4, 5]
@@ -87,6 +88,7 @@ DERIVED_BASE_COLS = [
     "catheter_episode_id",
     "decision_row_id",
     "is_decision_row",
+    "episode_day_since_insertion",
 ]
 
 POLICY_COLS = [
@@ -97,6 +99,13 @@ POLICY_COLS = [
     "policy_action_remove",
     "policy_applicable",
     "policy_reason",
+    "row_order_within_episode_day",
+    "policy_catheter_state",
+    "policy_action_resolved",
+    "policy_action_remove_resolved",
+    "policy_periods_in",
+    "policy_periods_out",
+    "policy_removal_day_extra_row_treated_as_out",
     "policy_matches_observed_action_today",
     "policy_match_status",
 ]
@@ -321,10 +330,10 @@ def policy_library_row(policy_remove_day: int) -> dict:
             f"on day {policy_remove_day}."
         ),
         "rule_summary": (
-            f"Decision rows with periods_in_state < {policy_remove_day}: keep; "
-            f"periods_in_state == {policy_remove_day}: remove; "
-            f"periods_in_state > {policy_remove_day}: already removed under "
-            "target policy."
+            f"Resolved target-policy timeline uses episode day {policy_remove_day}: "
+            "before removal day is in/keep; first row on removal day is "
+            "in/remove; later rows on the same removal day and later days are "
+            "out/out."
         ),
         "is_proof_of_concept": True,
         "clinical_rationale": (
@@ -340,13 +349,40 @@ def build_policy_library(policy_days: list[int]) -> pd.DataFrame:
     return pd.DataFrame([policy_library_row(day) for day in policy_days])
 
 
+def add_policy_episode_day(df: pd.DataFrame) -> pd.DataFrame:
+    """Add the episode-day index used by the shared fixed-day policy helper."""
+    df = df.copy()
+    inserted = pd.to_datetime(df["inserted"], errors="coerce")
+    period_start = pd.to_datetime(df["period_start"], errors="coerce")
+    invalid = inserted.isna() | period_start.isna()
+    if invalid.any():
+        examples = df.loc[
+            invalid,
+            ["catheter_episode_id", "decision_row_id", "inserted", "period_start"],
+        ].head(10)
+        raise ValueError(
+            "Could not parse inserted or period_start for fixed-day policy "
+            f"timeline construction. Examples:\n{examples}"
+        )
+
+    elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
+    df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
+    df.loc[df["episode_day_since_insertion"].lt(1), "episode_day_since_insertion"] = 1
+    return df
+
+
 def apply_fixed_day_policy(base_df: pd.DataFrame, policy_remove_day: int) -> pd.DataFrame:
-    df = base_df.copy()
+    df = add_policy_episode_day(base_df)
     policy_name = policy_name_for_day(policy_remove_day)
 
     df["policy_name"] = policy_name
     df["policy_type"] = POLICY_TYPE
     df["policy_remove_day"] = policy_remove_day
+    df = pec.add_fixed_day_target_policy_timeline(
+        df,
+        episode_id_col="catheter_episode_id",
+        episode_day_col="episode_day_since_insertion",
+    )
 
     df["policy_action"] = "not_applicable"
     df["policy_action_remove"] = np.nan
@@ -354,25 +390,25 @@ def apply_fixed_day_policy(base_df: pd.DataFrame, policy_remove_day: int) -> pd.
     df["policy_reason"] = "non_decision_row"
 
     decision_rows = df["is_decision_row"]
-    before_policy_day = decision_rows & df["periods_in_state"].lt(policy_remove_day)
-    on_policy_day = decision_rows & df["periods_in_state"].eq(policy_remove_day)
-    after_policy_day = decision_rows & df["periods_in_state"].gt(policy_remove_day)
-    missing_period_day = decision_rows & df["periods_in_state"].isna()
+    keep_rows = decision_rows & df["policy_action_resolved"].eq("keep")
+    remove_rows = decision_rows & df["policy_action_resolved"].eq("remove")
+    already_removed_rows = df["policy_action_resolved"].eq("out")
+    missing_policy_day = decision_rows & df["episode_day_since_insertion"].isna()
 
-    df.loc[before_policy_day, "policy_action"] = "keep"
-    df.loc[before_policy_day, "policy_action_remove"] = 0.0
-    df.loc[before_policy_day, "policy_applicable"] = True
-    df.loc[before_policy_day, "policy_reason"] = "before_policy_removal_day"
+    df.loc[keep_rows, "policy_action"] = "keep"
+    df.loc[keep_rows, "policy_action_remove"] = 0.0
+    df.loc[keep_rows, "policy_applicable"] = True
+    df.loc[keep_rows, "policy_reason"] = "before_policy_removal_day"
 
-    df.loc[on_policy_day, "policy_action"] = "remove"
-    df.loc[on_policy_day, "policy_action_remove"] = 1.0
-    df.loc[on_policy_day, "policy_applicable"] = True
-    df.loc[on_policy_day, "policy_reason"] = "policy_removal_day"
+    df.loc[remove_rows, "policy_action"] = "remove"
+    df.loc[remove_rows, "policy_action_remove"] = 1.0
+    df.loc[remove_rows, "policy_applicable"] = True
+    df.loc[remove_rows, "policy_reason"] = "policy_removal_day"
 
-    df.loc[after_policy_day, "policy_action"] = "already_removed_under_policy"
-    df.loc[after_policy_day, "policy_reason"] = "already_removed_under_policy"
+    df.loc[already_removed_rows, "policy_action"] = "already_removed_under_policy"
+    df.loc[already_removed_rows, "policy_reason"] = "already_removed_under_policy"
 
-    df.loc[missing_period_day, "policy_reason"] = "missing_periods_in_state"
+    df.loc[missing_policy_day, "policy_reason"] = "missing_policy_episode_day"
 
     df["policy_matches_observed_action_today"] = np.nan
     applicable_rows = df["policy_applicable"]
@@ -392,6 +428,11 @@ def apply_fixed_day_policy(base_df: pd.DataFrame, policy_remove_day: int) -> pd.
         "policy_match_status",
     ] = "disagrees_with_observed_action"
 
+    pec.validate_resolved_target_policy_timeline(
+        df,
+        episode_id_col="catheter_episode_id",
+        context=f"policy {policy_name}",
+    )
     return df
 
 
@@ -399,6 +440,7 @@ def order_long_columns(df: pd.DataFrame, original_columns: list[str]) -> pd.Data
     base_order = [
         "catheter_episode_id",
         "decision_row_id",
+        "episode_day_since_insertion",
         *[col for col in original_columns if col in df.columns],
         "is_decision_row",
         *POLICY_COLS,
@@ -434,6 +476,7 @@ def build_wide_policy_action_matrix(
     id_columns = [
         "decision_row_id",
         "catheter_episode_id",
+        "episode_day_since_insertion",
         *[col for col in original_columns if col in base_df.columns],
         "is_decision_row",
     ]
@@ -445,6 +488,13 @@ def build_wide_policy_action_matrix(
         "policy_applicable",
         "policy_action",
         "policy_reason",
+        "row_order_within_episode_day",
+        "policy_catheter_state",
+        "policy_action_resolved",
+        "policy_action_remove_resolved",
+        "policy_periods_in",
+        "policy_periods_out",
+        "policy_removal_day_extra_row_treated_as_out",
         "policy_matches_observed_action_today",
         "policy_match_status",
     ]
@@ -470,6 +520,10 @@ def qa_row(policy_df: pd.DataFrame) -> dict:
     n_applicable = int(applicable.sum())
     n_matches = int(matches.eq(1).sum())
     n_disagrees = int(matches.eq(0).sum())
+    timeline_diagnostics = pec.resolved_timeline_diagnostics(
+        policy_df,
+        episode_id_col="catheter_episode_id",
+    ).iloc[0].to_dict()
 
     return {
         "policy_name": policy_df["policy_name"].iloc[0],
@@ -481,6 +535,18 @@ def qa_row(policy_df: pd.DataFrame) -> dict:
         "n_policy_keep_assignments": int(policy_df["policy_action"].eq("keep").sum()),
         "n_policy_remove_assignments": int(
             policy_df["policy_action"].eq("remove").sum()
+        ),
+        "n_resolved_policy_remove_rows": int(
+            policy_df["policy_action_resolved"].eq("remove").sum()
+        ),
+        "n_episodes_with_more_than_one_remove_row": int(
+            timeline_diagnostics["n_episodes_with_more_than_one_remove_row"]
+        ),
+        "n_policy_removal_day_extra_rows_treated_as_out": int(
+            timeline_diagnostics["n_policy_removal_day_extra_rows_treated_as_out"]
+        ),
+        "n_policy_remove_row_shortfall_vs_reached_episodes": int(
+            timeline_diagnostics["n_policy_remove_row_shortfall_vs_reached_episodes"]
         ),
         "n_not_applicable_rows": int(
             policy_df["policy_reason"].eq("non_decision_row").sum()
@@ -562,6 +628,7 @@ def main() -> None:
     input_df = load_patient_day_panel(args.input)
     original_columns = list(input_df.columns)
     base_df = add_stable_ids_and_decision_flag(input_df)
+    base_df = add_policy_episode_day(base_df)
 
     policy_library = build_policy_library(policy_days)
     long_df = build_long_policy_panel(base_df, policy_days, original_columns)

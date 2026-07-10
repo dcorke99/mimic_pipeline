@@ -1,68 +1,308 @@
 #!/usr/bin/env python3
 """
-Calculate IPW-weighted policy outcomes from IPW-ready catheter policy panels.
+Evaluate deterministic catheter-removal policies using sequential inverse
+probability weighting from an estimator-agnostic policy-intervention panel.
 
-Expected input: a patient-day panel already restricted/flagged for one or more policies, with:
-- catheter_episode_id
-- policy_name / policy_remove_day, for multi-policy panels
-- episode_ipw_weight
-- episode_matches_policy or followed_policy_so_far, if present
-- outcome columns such as episode_cauti / episode_reinsertion or cauti_in_period / reinsertion_in_period
+Policy definitions are created upstream by `build_policy_intervention_panels.py`.
+This script does not mutate or redefine candidate policies. It performs the
+IPW-specific calculations only: behaviour-policy support, support clipping,
+adherence, sequential weights, effective sample size, clipping sensitivity, and
+weighted observed-outcome summaries.
 
-Default example:
-    python calculate_ipw_policy_outcomes.py
-
-Default paths:
-    Input:
-        artifacts/policy_eval/ipw_policy_remove_days_1_to_5_panel.csv
-        artifacts/nuisance_models/scored_panel.csv
-    Outputs:
-        artifacts/policy_eval/ipw_policy_remove_days_1_to_5_outcomes_summary.csv
-        artifacts/policy_eval/ipw_policy_remove_days_1_to_5_episode_outcomes.csv
-        artifacts/policy_eval/ipw_policy_remove_days_1_to_5_weight_diagnostics.csv
-        artifacts/policy_eval/ipw_policy_remove_days_1_to_5_clipping_sensitivity.csv
+It does not perform g-formula, AIPW, DML, DR-Learner, TMLE, or LTMLE
+calculations. Those estimator-specific scripts should consume the same
+policy-intervention panel without inheriting IPW-specific filtering.
 """
 
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 
+import policy_eval_common as pec
 
-EPISODE_ID_COL = "catheter_episode_id"
-WEIGHT_COL = "episode_ipw_weight"
-POLICY_COLS = ["policy_name", "policy_remove_day"]
-EPISODE_KEY_COLS = ["subject_id", "hadm_id", "stay_id", "inserted", "removed"]
-CURRENT_PRACTICE_LABEL = "current_practice"
+
+# =============================================================================
+# Paths and constants
+# =============================================================================
 
 REPO_ROOT = Path(__file__).resolve().parent
-OUTDIR = REPO_ROOT / "artifacts" / "policy_eval"
-NUISANCE_MODEL_DIR = REPO_ROOT / "artifacts" / "nuisance_models"
 
-DEFAULT_INPUT_PATH = OUTDIR / "ipw_policy_remove_days_1_to_5_panel.csv"
-DEFAULT_SCORED_PANEL_PATH = NUISANCE_MODEL_DIR / "scored_panel.csv"
-DEFAULT_OUTPUT_SUMMARY_PATH = OUTDIR / "ipw_policy_remove_days_1_to_5_outcomes_summary.csv"
-DEFAULT_OUTPUT_EPISODES_PATH = OUTDIR / "ipw_policy_remove_days_1_to_5_episode_outcomes.csv"
-DEFAULT_OUTPUT_WEIGHT_DIAGNOSTICS_PATH = OUTDIR / "ipw_policy_remove_days_1_to_5_weight_diagnostics.csv"
-DEFAULT_OUTPUT_CLIPPING_SENSITIVITY_PATH = OUTDIR / "ipw_policy_remove_days_1_to_5_clipping_sensitivity.csv"
+DEFAULT_POLICY_PANEL_PATH = (
+    REPO_ROOT
+    / "artifacts"
+    / "policy_interventions"
+    / "policy_intervention_panel_long.csv"
+)
+DEFAULT_SCORED_PANEL_PATH = (
+    REPO_ROOT / "artifacts" / "nuisance_models" / "scored_panel.csv"
+)
+DEFAULT_OUTDIR = REPO_ROOT / "artifacts" / "policy_eval" / "ipw"
+
+DEFAULT_OUTPUT_SUMMARY = "ipw_policy_outcomes_summary.csv"
+DEFAULT_OUTPUT_EPISODES = "ipw_policy_episode_outcomes.csv"
+DEFAULT_OUTPUT_WEIGHT_DIAGNOSTICS = "ipw_weight_diagnostics.csv"
+DEFAULT_OUTPUT_SUPPORT_DIAGNOSTICS = "ipw_policy_support_diagnostics.csv"
+DEFAULT_OUTPUT_CLIPPING_SENSITIVITY = "ipw_clipping_sensitivity.csv"
+DEFAULT_OUTPUT_CURRENT_PRACTICE = "current_practice_episode_outcomes.csv"
+DEFAULT_OUTPUT_METADATA = "ipw_run_metadata.json"
+
+CURRENT_PRACTICE_LABEL = "current_practice"
+EPISODE_ID_COL = "catheter_episode_id"
+POLICY_TYPE_COL = "policy_type"
+WEIGHT_COL = "episode_ipw_weight"
+UNCLIPPED_WEIGHT_COL = "episode_ipw_weight_unclipped"
+
+EPISODE_KEY_COLS = [
+    "subject_id",
+    "hadm_id",
+    "stay_id",
+    "inserted",
+    "removed",
+]
+
+ROW_JOIN_KEY_COLS = [
+    *EPISODE_KEY_COLS,
+    "period_start",
+    "period_end",
+    "catheter_state",
+    "periods_in_state",
+    "observed_action",
+    "action_remove",
+]
+
+REQUIRED_POLICY_PANEL_COLS = [
+    *EPISODE_KEY_COLS,
+    EPISODE_ID_COL,
+    "decision_row_id",
+    "period_start",
+    "period_end",
+    "catheter_state",
+    "periods_in_state",
+    "observed_action",
+    "action_remove",
+    "is_decision_row",
+    "policy_name",
+    "policy_remove_day",
+    "policy_action",
+    "policy_action_remove",
+    "policy_applicable",
+    "policy_reason",
+    "policy_matches_observed_action_today",
+    "episode_day_since_insertion",
+    *pec.RESOLVED_TIMELINE_COLUMNS,
+    "policy_removal_day_extra_row_treated_as_out",
+]
+
+REQUIRED_SCORED_PANEL_COLS = [
+    *EPISODE_KEY_COLS,
+    "period_start",
+    "period_end",
+    "catheter_state",
+    "periods_in_state",
+    "observed_action",
+    "action_remove",
+    "p_remove_obs",
+]
+
+OPTIONAL_SCORED_COLS = [
+    "p_keep_obs",
+    "cauti_in_period",
+    "reinsertion_in_period",
+    "death_in_period",
+    "icu_end_in_period",
+    "at_risk_cauti",
+    "at_risk_reinsertion",
+    "is_last_period_of_episode",
+    "episode_end_reason",
+    "reinsertion_time",
+    "split",
+    "crossfit_fold",
+    "_crossfit_fold",
+    "fold_id",
+]
+
+OPTIONAL_FIRST_COLS = [
+    "subject_id",
+    "hadm_id",
+    "stay_id",
+    "inserted",
+    "removed",
+    "reinsertion_time",
+    "split",
+    "crossfit_fold",
+    "_crossfit_fold",
+    "fold_id",
+    "episode_end_reason",
+]
+
+STALE_POLICY_PANEL_ESTIMATOR_COLS = [
+    "p_remove_obs",
+    "p_keep_obs",
+    "p_observed_action",
+    "p_observed_action_clipped",
+    "policy_support",
+    "policy_support_clipped",
+    "policy_weight_component",
+    "ipw_component",
+    "ipw_component_unclipped",
+    "episode_ipw_weight",
+    "episode_ipw_weight_unclipped",
+    "followed_policy_so_far",
+    "episode_matches_policy",
+    "episode_adherent_to_policy",
+]
+
+DATETIME_KEY_COLS = {"inserted", "removed", "period_start", "period_end"}
+LOWER_TEXT_KEY_COLS = {"catheter_state", "observed_action"}
+NUMERIC_KEY_COLS = {"subject_id", "hadm_id", "stay_id", "periods_in_state", "action_remove"}
+
+OUTCOME_SPECS = {
+    "cauti": ("any_cauti", "cauti_in_period"),
+    "recatheterisation": ("any_recatheterisation", "reinsertion_in_period"),
+    "death": ("any_death", "death_in_period"),
+    "icu_exit_alive": ("observed_icu_exit_alive", "observed_icu_exit_alive_in_period"),
+}
+
+
+# =============================================================================
+# Generic helpers
+# =============================================================================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Evaluate deterministic catheter-removal policies using sequential "
+            "IPW from an estimator-agnostic policy-intervention panel."
+        )
+    )
+    parser.add_argument(
+        "--policy-panel",
+        type=Path,
+        default=DEFAULT_POLICY_PANEL_PATH,
+        help=f"Long-format policy-intervention panel. Default: {DEFAULT_POLICY_PANEL_PATH}",
+    )
+    parser.add_argument(
+        "--scored-panel",
+        type=Path,
+        default=DEFAULT_SCORED_PANEL_PATH,
+        help=f"Scored nuisance panel containing p_remove_obs. Default: {DEFAULT_SCORED_PANEL_PATH}",
+    )
+    parser.add_argument(
+        "--outdir",
+        type=Path,
+        default=DEFAULT_OUTDIR,
+        help=f"Output directory. Default: {DEFAULT_OUTDIR}",
+    )
+    parser.add_argument(
+        "--output-summary",
+        default=DEFAULT_OUTPUT_SUMMARY,
+        help=f"Policy summary output filename. Default: {DEFAULT_OUTPUT_SUMMARY}",
+    )
+    parser.add_argument(
+        "--output-episodes",
+        default=DEFAULT_OUTPUT_EPISODES,
+        help=f"Episode-level output filename. Default: {DEFAULT_OUTPUT_EPISODES}",
+    )
+    parser.add_argument(
+        "--output-weight-diagnostics",
+        default=DEFAULT_OUTPUT_WEIGHT_DIAGNOSTICS,
+        help=f"Weight diagnostics output filename. Default: {DEFAULT_OUTPUT_WEIGHT_DIAGNOSTICS}",
+    )
+    parser.add_argument(
+        "--output-support-diagnostics",
+        default=DEFAULT_OUTPUT_SUPPORT_DIAGNOSTICS,
+        help=f"Support diagnostics output filename. Default: {DEFAULT_OUTPUT_SUPPORT_DIAGNOSTICS}",
+    )
+    parser.add_argument(
+        "--output-clipping-sensitivity",
+        default=DEFAULT_OUTPUT_CLIPPING_SENSITIVITY,
+        help=f"Clipping sensitivity output filename. Default: {DEFAULT_OUTPUT_CLIPPING_SENSITIVITY}",
+    )
+    parser.add_argument(
+        "--output-current-practice",
+        default=DEFAULT_OUTPUT_CURRENT_PRACTICE,
+        help=f"Current-practice episode output filename. Default: {DEFAULT_OUTPUT_CURRENT_PRACTICE}",
+    )
+    parser.add_argument(
+        "--output-metadata",
+        default=DEFAULT_OUTPUT_METADATA,
+        help=f"Run metadata output filename. Default: {DEFAULT_OUTPUT_METADATA}",
+    )
+    parser.add_argument(
+        "--clip-lower",
+        type=float,
+        default=0.01,
+        help="Lower bound for row-level behaviour-policy support. Default: 0.01",
+    )
+    parser.add_argument(
+        "--clip-upper",
+        type=float,
+        default=0.99,
+        help="Upper bound for row-level behaviour-policy support. Default: 0.99",
+    )
+    parser.add_argument(
+        "--zero-applicable-policy-episodes",
+        choices=["weight-one", "exclude", "error"],
+        default="weight-one",
+        help=(
+            "How to handle adherent policy episodes with no applicable decision "
+            "rows. Default assigns weight 1 and flags the episode."
+        ),
+    )
+    pec.add_bootstrap_args(parser)
+    return parser.parse_args()
+
+
+def resolve_output_path(outdir: Path, name_or_path: str) -> Path:
+    path = Path(name_or_path)
+    return path if path.is_absolute() else outdir / path
+
+
+def require_columns(df: pd.DataFrame, cols: Iterable[str], context: str) -> None:
+    missing = [col for col in cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required {context} columns: {missing}")
+
+
+def save_df(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(exist_ok=True, parents=True)
+    df.to_csv(path, index=False)
+
+
+def first_non_null(series: pd.Series):
+    non_null = series.dropna()
+    return non_null.iloc[0] if len(non_null) else np.nan
+
+
+def max_binary(series: pd.Series):
+    numeric = pd.to_numeric(series, errors="coerce").fillna(0)
+    if numeric.empty:
+        return np.nan
+    return int(numeric.max() > 0)
 
 
 def weighted_mean(values: pd.Series, weights: pd.Series) -> float:
-    """Return sum(w*y) / sum(w), ignoring rows with missing values or weights."""
     values = pd.to_numeric(values, errors="coerce")
     weights = pd.to_numeric(weights, errors="coerce")
-    valid = values.notna() & weights.notna() & np.isfinite(values) & np.isfinite(weights) & (weights > 0)
-    if valid.sum() == 0:
+    valid = (
+        values.notna()
+        & weights.notna()
+        & np.isfinite(values)
+        & np.isfinite(weights)
+        & (weights > 0)
+    )
+    if int(valid.sum()) == 0:
         return np.nan
-    return float(np.sum(values[valid] * weights[valid]) / np.sum(weights[valid]))
+    return float(np.sum(values.loc[valid] * weights.loc[valid]) / np.sum(weights.loc[valid]))
 
 
 def valid_weight_series(weights: pd.Series) -> pd.Series:
-    """Return positive finite weights as numeric values."""
     weights = pd.to_numeric(weights, errors="coerce")
     return weights[weights.notna() & np.isfinite(weights) & (weights > 0)]
 
@@ -76,528 +316,1186 @@ def effective_sample_size(weights: pd.Series) -> float:
     return float((sum_weights ** 2) / sum_squared_weights) if sum_squared_weights > 0 else np.nan
 
 
-def first_non_null(series: pd.Series):
-    """Take the first non-null value in a group."""
-    non_null = series.dropna()
-    return non_null.iloc[0] if len(non_null) else np.nan
+def safe_ratio(numerator, denominator):
+    if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
+        return np.nan
+    return float(numerator / denominator)
 
 
-def max_binary(series: pd.Series) -> int:
-    """Collapse repeated patient-day outcome flags to one episode-level any-event flag."""
-    numeric = pd.to_numeric(series, errors="coerce").fillna(0)
-    return int(numeric.max() > 0)
+def coerce_bool(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).astype(bool)
+
+    text = series.astype("string").str.strip().str.lower()
+    mapped = text.map(
+        {
+            "true": True,
+            "false": False,
+            "1": True,
+            "0": False,
+            "yes": True,
+            "no": False,
+            "y": True,
+            "n": False,
+        }
+    )
+    return mapped.fillna(False).astype(bool)
 
 
-def available_policy_cols(df: pd.DataFrame) -> list[str]:
-    return [col for col in POLICY_COLS if col in df.columns]
+def canonical_numeric_value(value) -> str:
+    if pd.isna(value):
+        return "<NA>"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+    if not np.isfinite(numeric):
+        return "<NA>"
+    if np.isclose(numeric, round(numeric), atol=1e-9):
+        return str(int(round(numeric)))
+    return f"{numeric:.12g}"
 
 
-def policy_episode_group_cols(df: pd.DataFrame) -> list[str]:
-    return [*available_policy_cols(df), EPISODE_ID_COL]
+def canonical_key_series(series: pd.Series, column: str) -> pd.Series:
+    if column in DATETIME_KEY_COLS:
+        raw = series.astype("string").str.strip()
+        parsed = pd.to_datetime(series, errors="coerce")
+        out = raw.fillna("<NA>").astype("object")
+        parsed_mask = parsed.notna()
+        out.loc[parsed_mask] = parsed.loc[parsed_mask].dt.strftime("%Y-%m-%d %H:%M:%S")
+        out.loc[out.astype("string").str.lower().isin(["", "nan", "nat", "none", "<na>"])] = "<NA>"
+        return out.astype("string")
+
+    if column in LOWER_TEXT_KEY_COLS:
+        out = series.astype("string").str.strip().str.lower()
+        return out.fillna("<NA>")
+
+    if column in NUMERIC_KEY_COLS:
+        return series.map(canonical_numeric_value).astype("string")
+
+    out = series.astype("string").str.strip()
+    return out.fillna("<NA>")
 
 
-def policy_metadata(group_values, group_cols: list[str]) -> dict:
-    if not isinstance(group_values, tuple):
-        group_values = (group_values,)
-    return dict(zip(group_cols, group_values))
+def add_join_key_columns(df: pd.DataFrame, key_cols: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    require_columns(df, key_cols, "join-key")
+    out = df.copy()
+    join_cols = []
+    for idx, col in enumerate(key_cols):
+        join_col = f"__join_key_{idx}"
+        out[join_col] = canonical_key_series(out[col], col)
+        join_cols.append(join_col)
+    return out, join_cols
 
 
-def require_columns(df: pd.DataFrame, cols: list[str], context: str) -> None:
-    missing = [col for col in cols if col not in df.columns]
-    if missing:
-        raise ValueError(f"Input is missing required {context} column(s): {missing}")
+def duplicate_key_examples(df: pd.DataFrame, join_cols: list[str], display_cols: list[str]) -> pd.DataFrame:
+    duplicated = df.duplicated(join_cols, keep=False)
+    if not duplicated.any():
+        return pd.DataFrame()
+    return df.loc[duplicated, display_cols].head(10)
 
 
-def choose_outcome_column(df: pd.DataFrame, episode_col: str, period_col: str) -> Optional[str]:
-    """
-    Prefer precomputed episode-level outcome columns if present.
-    Fall back to patient-day period outcome flags if not.
-    """
-    if episode_col in df.columns:
-        return episode_col
-    if period_col in df.columns:
-        return period_col
-    return None
+# =============================================================================
+# Loading and joining
+# =============================================================================
 
+def load_policy_panel(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Policy-intervention panel not found: {path}")
 
-def add_catheter_episode_id(df: pd.DataFrame) -> pd.DataFrame:
-    if EPISODE_ID_COL in df.columns:
-        return df
+    df = pd.read_csv(path, low_memory=False)
+    df.columns = df.columns.str.strip()
+    require_columns(df, REQUIRED_POLICY_PANEL_COLS, "policy-panel")
 
-    require_columns(df, EPISODE_KEY_COLS, "episode-key")
-    df = df.copy()
-    df[EPISODE_ID_COL] = df.groupby(EPISODE_KEY_COLS, sort=False).ngroup() + 1
+    stale_cols = [col for col in STALE_POLICY_PANEL_ESTIMATOR_COLS if col in df.columns]
+    if stale_cols:
+        print(
+            "Ignoring pre-existing IPW/nuisance columns in policy panel; "
+            f"this script recalculates them: {stale_cols}"
+        )
+        df = df.drop(columns=stale_cols)
+
+    df = normalise_policy_panel_types(df)
+    validate_policy_panel(df)
     return df
 
 
-def normalise_policy_remove_day(df: pd.DataFrame) -> pd.DataFrame:
-    if "policy_remove_day" not in df.columns:
-        return df
+def load_scored_panel(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Scored nuisance panel not found: {path}")
+
+    df = pd.read_csv(path, low_memory=False)
+    df.columns = df.columns.str.strip()
+    require_columns(df, REQUIRED_SCORED_PANEL_COLS, "scored-panel")
+
+    df = normalise_row_key_types(df)
+    df["p_remove_obs"] = pd.to_numeric(df["p_remove_obs"], errors="coerce")
+    if "p_keep_obs" not in df.columns:
+        df["p_keep_obs"] = 1.0 - df["p_remove_obs"]
+    else:
+        df["p_keep_obs"] = pd.to_numeric(df["p_keep_obs"], errors="coerce")
+    return df
+
+
+def normalise_row_key_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    if "catheter_state" in df.columns:
+        df["catheter_state"] = df["catheter_state"].astype("string").str.strip().str.lower()
+    if "observed_action" in df.columns:
+        df["observed_action"] = df["observed_action"].astype("string").str.strip().str.lower()
+    if "periods_in_state" in df.columns:
+        df["periods_in_state"] = pd.to_numeric(df["periods_in_state"], errors="coerce")
+    if "action_remove" in df.columns:
+        df["action_remove"] = pd.to_numeric(df["action_remove"], errors="coerce")
+    return df
+
+
+def normalise_policy_panel_types(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalise_row_key_types(df)
+    df["is_decision_row"] = coerce_bool(df["is_decision_row"])
+    df["policy_applicable"] = coerce_bool(df["policy_applicable"])
+    df["policy_action"] = df["policy_action"].astype("string").str.strip().str.lower()
+    df["policy_reason"] = df["policy_reason"].astype("string").str.strip().str.lower()
+    if POLICY_TYPE_COL in df.columns:
+        df[POLICY_TYPE_COL] = df[POLICY_TYPE_COL].astype("string").str.strip().str.lower()
+    else:
+        df[POLICY_TYPE_COL] = pd.NA
     df["policy_remove_day"] = pd.to_numeric(df["policy_remove_day"], errors="coerce").astype("Int64")
+    df["policy_action_remove"] = pd.to_numeric(df["policy_action_remove"], errors="coerce")
+    df["policy_matches_observed_action_today"] = pd.to_numeric(
+        df["policy_matches_observed_action_today"],
+        errors="coerce",
+    )
+    df["policy_action_resolved"] = df["policy_action_resolved"].astype("string").str.strip().str.lower()
+    df["policy_action_remove_resolved"] = pd.to_numeric(
+        df["policy_action_remove_resolved"],
+        errors="coerce",
+    )
+    df["policy_catheter_state"] = df["policy_catheter_state"].astype("string").str.strip().str.lower()
+    df["episode_day_since_insertion"] = pd.to_numeric(
+        df["episode_day_since_insertion"],
+        errors="coerce",
+    )
     return df
 
 
-def build_episode_level_panel(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse the IPW patient-day panel to one row per policy and catheter episode."""
-    required = {EPISODE_ID_COL, WEIGHT_COL}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Input is missing required column(s): {sorted(missing)}")
+def validate_policy_panel(df: pd.DataFrame) -> None:
+    policies = sorted(df["policy_name"].dropna().unique().tolist())
+    if not policies:
+        raise ValueError("Policy panel contains no policy_name values.")
 
-    # Keep only episodes that matched the policy, if the column is present.
-    # The panel produced by the previous script should already be restricted,
-    # but this makes the outcome script safer to reuse.
-    if "episode_matches_policy" in df.columns:
-        df = df[pd.to_numeric(df["episode_matches_policy"], errors="coerce").fillna(0).astype(int) == 1].copy()
+    applicable_counts = df.groupby("policy_name")["policy_applicable"].sum()
+    empty_policies = applicable_counts[applicable_counts == 0].index.tolist()
+    if empty_policies:
+        raise ValueError(f"Policy panel has no applicable decision rows for: {empty_policies}")
 
-    if df.empty:
-        raise ValueError("No policy-matching episodes remain after filtering.")
+    applicable = df["policy_applicable"]
+    invalid_action = applicable & ~df["policy_action_remove"].isin([0, 1])
+    if invalid_action.any():
+        examples = df.loc[
+            invalid_action,
+            ["policy_name", "decision_row_id", "policy_action", "policy_action_remove"],
+        ].head(10)
+        raise ValueError(
+            "Applicable policy rows must have policy_action_remove equal to 0 or 1. "
+            f"Examples:\n{examples}"
+        )
 
-    cauti_source = choose_outcome_column(df, "episode_cauti", "cauti_in_period")
-    reins_source = choose_outcome_column(df, "episode_reinsertion", "reinsertion_in_period")
+    missing_match = applicable & df["policy_matches_observed_action_today"].isna()
+    if missing_match.any():
+        examples = df.loc[
+            missing_match,
+            ["policy_name", "decision_row_id", "policy_action", "action_remove"],
+        ].head(10)
+        raise ValueError(
+            "Applicable policy rows are missing policy_matches_observed_action_today. "
+            f"Examples:\n{examples}"
+        )
 
-    if cauti_source is None:
-        raise ValueError("Could not find either 'episode_cauti' or 'cauti_in_period'.")
-    if reins_source is None:
-        raise ValueError("Could not find either 'episode_reinsertion' or 'reinsertion_in_period'.")
+    pec.validate_resolved_target_policy_timeline(
+        df,
+        episode_id_col=EPISODE_ID_COL,
+        context="IPW policy panel",
+    )
 
-    group_cols = policy_episode_group_cols(df)
-    aggregations = {
-        WEIGHT_COL: first_non_null,
-        cauti_source: max_binary,
-        reins_source: max_binary,
-    }
 
-    optional_first_cols = [
-        "policy_name",
-        "policy_remove_day",
-        "subject_id",
-        "hadm_id",
-        "stay_id",
-        "split",
-        "inserted",
-        "removed",
-        "reinsertion_time",
-        "episode_end_reason",
+def join_scored_panel(policy_df: pd.DataFrame, scored_df: pd.DataFrame) -> pd.DataFrame:
+    """Join nuisance probabilities and outcomes onto the policy panel."""
+    policy_keyed, join_cols = add_join_key_columns(policy_df, ROW_JOIN_KEY_COLS)
+    scored_keyed, _ = add_join_key_columns(scored_df, ROW_JOIN_KEY_COLS)
+
+    scored_add_cols = [
+        "p_remove_obs",
+        "p_keep_obs",
+        *[
+            col
+            for col in OPTIONAL_SCORED_COLS
+            if col in scored_keyed.columns and col not in {"p_keep_obs"}
+        ],
     ]
-    group_col_set = set(group_cols)
-    for col in optional_first_cols:
-        if col in df.columns and col not in group_col_set:
-            aggregations[col] = first_non_null
-
-    # Useful descriptive episode-level quantities.
-    if "catheter_state" in df.columns:
-        in_rows = df[df["catheter_state"].astype(str).str.lower().eq("in")]
-        catheter_days = in_rows.groupby(group_cols).size().reset_index(name="observed_catheter_day_rows")
-    else:
-        catheter_days = None
-
-    if "at_risk_cauti" in df.columns:
-        cauti_risk_rows = df.groupby(group_cols)["at_risk_cauti"].sum().reset_index(name="cauti_at_risk_rows")
-    else:
-        cauti_risk_rows = None
-
-    if "at_risk_reinsertion" in df.columns:
-        reins_risk_rows = df.groupby(group_cols)["at_risk_reinsertion"].sum().reset_index(name="reinsertion_at_risk_rows")
-    else:
-        reins_risk_rows = None
-
-    episode_df = df.groupby(group_cols, as_index=False).agg(aggregations)
-    episode_df = episode_df.rename(
-        columns={
-            cauti_source: "any_cauti",
-            reins_source: "any_recatheterisation",
-        }
-    )
-
-    if catheter_days is not None:
-        episode_df = episode_df.merge(catheter_days, on=group_cols, how="left")
-    if cauti_risk_rows is not None:
-        episode_df = episode_df.merge(cauti_risk_rows, on=group_cols, how="left")
-    if reins_risk_rows is not None:
-        episode_df = episode_df.merge(reins_risk_rows, on=group_cols, how="left")
-
-    for col in ["observed_catheter_day_rows", "cauti_at_risk_rows", "reinsertion_at_risk_rows"]:
-        if col not in episode_df.columns:
-            episode_df[col] = 0
-        episode_df[col] = episode_df[col].fillna(0).astype(int)
-
-    return episode_df
-
-
-def build_current_practice_episode_panel(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse the original observed scored panel to one row per catheter episode."""
-    df = add_catheter_episode_id(df.copy())
-
-    cauti_source = choose_outcome_column(df, "episode_cauti", "cauti_in_period")
-    reins_source = choose_outcome_column(df, "episode_reinsertion", "reinsertion_in_period")
-
-    if cauti_source is None:
-        raise ValueError("Could not find either 'episode_cauti' or 'cauti_in_period' in scored panel.")
-    if reins_source is None:
-        raise ValueError("Could not find either 'episode_reinsertion' or 'reinsertion_in_period' in scored panel.")
-
-    group_cols = [EPISODE_ID_COL]
-    aggregations = {
-        cauti_source: max_binary,
-        reins_source: max_binary,
-    }
-
-    optional_first_cols = [
-        "subject_id",
-        "hadm_id",
-        "stay_id",
-        "split",
-        "inserted",
-        "removed",
-        "reinsertion_time",
-        "episode_end_reason",
+    scored_add_cols = list(dict.fromkeys(scored_add_cols))
+    scored_add_cols = [
+        col
+        for col in scored_add_cols
+        if col not in ROW_JOIN_KEY_COLS and (col not in policy_df.columns or col.startswith("p_"))
     ]
-    for col in optional_first_cols:
-        if col in df.columns:
-            aggregations[col] = first_non_null
 
-    if "catheter_state" in df.columns:
-        in_rows = df[df["catheter_state"].astype(str).str.lower().eq("in")]
-        catheter_days = in_rows.groupby(group_cols).size().reset_index(name="observed_catheter_day_rows")
-    else:
-        catheter_days = None
+    duplicates = scored_keyed.duplicated(join_cols, keep=False)
+    if duplicates.any():
+        examples = duplicate_key_examples(scored_keyed, join_cols, ROW_JOIN_KEY_COLS)
+        raise ValueError(
+            "Scored panel is not unique on the natural patient-day join keys. "
+            "The policy-to-scored join must be many-to-one. Examples:\n"
+            f"{examples}"
+        )
 
-    if "at_risk_cauti" in df.columns:
-        cauti_risk_rows = df.groupby(group_cols)["at_risk_cauti"].sum().reset_index(name="cauti_at_risk_rows")
-    else:
-        cauti_risk_rows = None
-
-    if "at_risk_reinsertion" in df.columns:
-        reins_risk_rows = df.groupby(group_cols)["at_risk_reinsertion"].sum().reset_index(name="reinsertion_at_risk_rows")
-    else:
-        reins_risk_rows = None
-
-    episode_df = df.groupby(group_cols, as_index=False).agg(aggregations)
-    episode_df = episode_df.rename(
-        columns={
-            cauti_source: "any_cauti",
-            reins_source: "any_recatheterisation",
-        }
+    before_rows = len(policy_keyed)
+    right = scored_keyed[[*join_cols, *scored_add_cols]].copy()
+    merged = policy_keyed.merge(
+        right,
+        on=join_cols,
+        how="left",
+        validate="many_to_one",
+        indicator=True,
     )
+    if len(merged) != before_rows:
+        raise ValueError(
+            "Joining scored panel changed the number of policy-panel rows: "
+            f"{before_rows} -> {len(merged)}"
+        )
 
-    if catheter_days is not None:
-        episode_df = episode_df.merge(catheter_days, on=group_cols, how="left")
-    if cauti_risk_rows is not None:
-        episode_df = episode_df.merge(cauti_risk_rows, on=group_cols, how="left")
-    if reins_risk_rows is not None:
-        episode_df = episode_df.merge(reins_risk_rows, on=group_cols, how="left")
+    unmatched = merged["_merge"].ne("both")
+    if unmatched.any():
+        examples = merged.loc[unmatched, ROW_JOIN_KEY_COLS + ["policy_name"]].head(10)
+        raise ValueError(
+            "Some policy-panel rows did not match the scored nuisance panel on "
+            f"the natural keys. Examples:\n{examples}"
+        )
 
-    for col in ["observed_catheter_day_rows", "cauti_at_risk_rows", "reinsertion_at_risk_rows"]:
-        if col not in episode_df.columns:
-            episode_df[col] = 0
-        episode_df[col] = episode_df[col].fillna(0).astype(int)
-
-    episode_df["policy_name"] = CURRENT_PRACTICE_LABEL
-    episode_df["policy_remove_day"] = pd.NA
-    episode_df[WEIGHT_COL] = 1.0
-
-    ordered_cols = [
-        "policy_name",
-        "policy_remove_day",
-        EPISODE_ID_COL,
-        WEIGHT_COL,
-        *[col for col in episode_df.columns if col not in {"policy_name", "policy_remove_day", EPISODE_ID_COL, WEIGHT_COL}],
-    ]
-    return episode_df[ordered_cols]
+    merged = merged.drop(columns=[*join_cols, "_merge"])
+    return merged
 
 
-def summarise_group(episode_df: pd.DataFrame, label: str, metadata: Optional[dict] = None) -> dict:
-    weights = episode_df[WEIGHT_COL]
-    row = {
-        "group": label,
-        "n_episodes": int(len(episode_df)),
-        "sum_weights": float(pd.to_numeric(weights, errors="coerce").sum()),
-        "mean_weight": float(pd.to_numeric(weights, errors="coerce").mean()),
-        "max_weight": float(pd.to_numeric(weights, errors="coerce").max()),
-        "unweighted_cauti_risk": float(pd.to_numeric(episode_df["any_cauti"], errors="coerce").mean()),
-        "ipw_weighted_cauti_risk": weighted_mean(episode_df["any_cauti"], weights),
-        "unweighted_recatheterisation_risk": float(pd.to_numeric(episode_df["any_recatheterisation"], errors="coerce").mean()),
-        "ipw_weighted_recatheterisation_risk": weighted_mean(episode_df["any_recatheterisation"], weights),
-        "unweighted_mean_catheter_day_rows": float(pd.to_numeric(episode_df["observed_catheter_day_rows"], errors="coerce").mean()),
-        "ipw_weighted_mean_catheter_day_rows": weighted_mean(episode_df["observed_catheter_day_rows"], weights),
-    }
-    if metadata:
-        row = {**metadata, **row}
-    return row
+# =============================================================================
+# IPW row-level calculations and adherence
+# =============================================================================
+
+def validate_clip_bounds(clip_lower: float, clip_upper: float) -> None:
+    if not (0 < clip_lower < clip_upper <= 1):
+        raise ValueError(
+            "Support clipping bounds must satisfy 0 < clip_lower < clip_upper <= 1. "
+            f"Received clip_lower={clip_lower}, clip_upper={clip_upper}."
+        )
 
 
-def build_summary(episode_df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    policy_cols = available_policy_cols(episode_df)
+def add_ipw_row_quantities(
+    df: pd.DataFrame,
+    clip_lower: float,
+    clip_upper: float,
+) -> pd.DataFrame:
+    validate_clip_bounds(clip_lower, clip_upper)
+    df = df.copy()
 
-    if policy_cols:
-        for policy_values, policy_df in episode_df.groupby(policy_cols, dropna=False, sort=False):
-            metadata = policy_metadata(policy_values, policy_cols)
-            rows.append(summarise_group(policy_df, "all", metadata))
+    for col in ["p_remove_obs", "p_keep_obs"]:
+        if col not in df.columns:
+            raise ValueError(f"Joined policy panel is missing required propensity column: {col}")
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-            if "split" in episode_df.columns:
-                for split_value, split_df in policy_df.groupby("split", dropna=False):
-                    rows.append(summarise_group(split_df, f"split={split_value}", metadata))
-    else:
-        rows.append(summarise_group(episode_df, "all"))
+    applicable = df["policy_applicable"]
+    missing_propensity = applicable & (df["p_remove_obs"].isna() | df["p_keep_obs"].isna())
+    if missing_propensity.any():
+        examples = df.loc[
+            missing_propensity,
+            ["policy_name", "decision_row_id", "p_remove_obs", "p_keep_obs"],
+        ].head(10)
+        raise ValueError(
+            "Applicable IN decision rows are missing p_remove_obs or p_keep_obs "
+            f"after joining scored panel. Examples:\n{examples}"
+        )
 
-        if "split" in episode_df.columns:
-            for split_value, split_df in episode_df.groupby("split", dropna=False):
-                rows.append(summarise_group(split_df, f"split={split_value}"))
+    for col in ["p_remove_obs", "p_keep_obs"]:
+        invalid = applicable & (
+            ~np.isfinite(df[col])
+            | df[col].lt(0)
+            | df[col].gt(1)
+        )
+        if invalid.any():
+            examples = df.loc[
+                invalid,
+                ["policy_name", "decision_row_id", col],
+            ].head(10)
+            raise ValueError(
+                f"Behaviour-policy probabilities in {col} must be finite and "
+                f"between 0 and 1 for applicable rows. Examples:\n{examples}"
+            )
 
-    summary = pd.DataFrame(rows)
+    df["policy_support"] = np.nan
+    remove_rows = applicable & df["policy_action_remove"].eq(1)
+    keep_rows = applicable & df["policy_action_remove"].eq(0)
+    df.loc[remove_rows, "policy_support"] = df.loc[remove_rows, "p_remove_obs"]
+    df.loc[keep_rows, "policy_support"] = df.loc[keep_rows, "p_keep_obs"]
 
-    # Add percentage versions for the two main risks.
-    for col in ["ipw_weighted_cauti_risk", "ipw_weighted_recatheterisation_risk"]:
-        summary[col + "_pct"] = summary[col] * 100
-
-    return summary
-
-
-def safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-    numerator = pd.to_numeric(numerator, errors="coerce")
-    denominator = pd.to_numeric(denominator, errors="coerce")
-    return numerator.where(denominator != 0) / denominator.where(denominator != 0)
-
-
-def add_current_practice_comparisons(summary: pd.DataFrame) -> pd.DataFrame:
-    if "policy_name" not in summary.columns:
-        return summary
-
-    baseline = summary[summary["policy_name"].eq(CURRENT_PRACTICE_LABEL)].copy()
-    if baseline.empty:
-        return summary
-
-    baseline_cols = [
-        "group",
-        "ipw_weighted_cauti_risk",
-        "ipw_weighted_recatheterisation_risk",
-        "ipw_weighted_mean_catheter_day_rows",
-    ]
-    baseline = baseline[baseline_cols].rename(
-        columns={
-            "ipw_weighted_cauti_risk": "current_practice_cauti_risk",
-            "ipw_weighted_recatheterisation_risk": "current_practice_recatheterisation_risk",
-            "ipw_weighted_mean_catheter_day_rows": "current_practice_mean_catheter_day_rows",
-        }
+    support = pd.to_numeric(df["policy_support"], errors="coerce")
+    invalid_support = applicable & (
+        support.isna()
+        | ~np.isfinite(support)
+        | support.lt(0)
+        | support.gt(1)
     )
+    if invalid_support.any():
+        examples = df.loc[
+            invalid_support,
+            ["policy_name", "decision_row_id", "policy_action_remove", "policy_support"],
+        ].head(10)
+        raise ValueError(
+            "Policy support must be finite and between 0 and 1 before clipping. "
+            f"Examples:\n{examples}"
+        )
 
-    out = summary.merge(baseline, on="group", how="left")
+    df["policy_support_clipped"] = support.clip(lower=clip_lower, upper=clip_upper)
+    df["ipw_component"] = np.nan
+    df["ipw_component_unclipped"] = np.nan
+    df["zero_support_matched_row"] = 0
 
-    out["cauti_risk_difference_vs_current_practice"] = (
-        out["ipw_weighted_cauti_risk"] - out["current_practice_cauti_risk"]
-    )
-    out["cauti_risk_difference_pct_points_vs_current_practice"] = (
-        out["cauti_risk_difference_vs_current_practice"] * 100
-    )
-    out["cauti_risk_ratio_vs_current_practice"] = safe_ratio(
-        out["ipw_weighted_cauti_risk"],
-        out["current_practice_cauti_risk"],
-    )
+    match_rows = applicable & df["policy_matches_observed_action_today"].eq(1)
+    df.loc[match_rows, "ipw_component"] = 1.0 / df.loc[match_rows, "policy_support_clipped"]
 
-    out["recatheterisation_risk_difference_vs_current_practice"] = (
-        out["ipw_weighted_recatheterisation_risk"] - out["current_practice_recatheterisation_risk"]
-    )
-    out["recatheterisation_risk_difference_pct_points_vs_current_practice"] = (
-        out["recatheterisation_risk_difference_vs_current_practice"] * 100
-    )
-    out["recatheterisation_risk_ratio_vs_current_practice"] = safe_ratio(
-        out["ipw_weighted_recatheterisation_risk"],
-        out["current_practice_recatheterisation_risk"],
-    )
+    safe_unclipped = match_rows & support.gt(0)
+    df.loc[safe_unclipped, "ipw_component_unclipped"] = 1.0 / support.loc[safe_unclipped]
+    df.loc[match_rows & support.eq(0), "zero_support_matched_row"] = 1
 
-    out["mean_catheter_day_rows_difference_vs_current_practice"] = (
-        out["ipw_weighted_mean_catheter_day_rows"] - out["current_practice_mean_catheter_day_rows"]
-    )
+    df["deviated_from_policy_today"] = 0
+    df.loc[applicable & df["policy_matches_observed_action_today"].eq(0), "deviated_from_policy_today"] = 1
 
+    return df
+
+
+def add_adherence(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    sort_cols = ["policy_name", EPISODE_ID_COL, "period_start", "period_end", "decision_row_id"]
+    df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
+
+    group_cols = ["policy_name", EPISODE_ID_COL]
+    deviation_cummax = df.groupby(group_cols, sort=False)["deviated_from_policy_today"].cummax()
+    df["followed_policy_so_far"] = (1 - deviation_cummax).astype(int)
+    episode_deviation = df.groupby(group_cols, sort=False)["deviated_from_policy_today"].transform("max")
+    df["episode_adherent_to_policy"] = episode_deviation.eq(0).astype(int)
+    return df
+
+
+# =============================================================================
+# Episode-level collapse
+# =============================================================================
+
+def product_components_by_episode(df: pd.DataFrame, component_col: str) -> pd.DataFrame:
+    group_cols = ["policy_name", "policy_remove_day", EPISODE_ID_COL]
+    out = (
+        df.groupby(group_cols, dropna=False, sort=False)[component_col]
+        .prod(min_count=1)
+        .reset_index()
+    )
     return out
 
 
-def summarise_weight_group(episode_df: pd.DataFrame, label: str, metadata: Optional[dict] = None) -> dict:
-    weights = valid_weight_series(episode_df[WEIGHT_COL])
+def add_episode_level_flags(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["_applicable_int"] = df["policy_applicable"].astype(int)
+    df["_matched_applicable_int"] = (
+        df["policy_applicable"] & df["policy_matches_observed_action_today"].eq(1)
+    ).astype(int)
+    df["_remove_assigned_int"] = (
+        df["policy_applicable"] & df["policy_action_remove"].eq(1)
+    ).astype(int)
+    df["_observed_remove_under_policy_int"] = (
+        df["policy_applicable"]
+        & df["policy_action_remove"].eq(1)
+        & df["policy_matches_observed_action_today"].eq(1)
+    ).astype(int)
+    df["_catheter_in_row_int"] = df["catheter_state"].astype("string").str.lower().eq("in").astype(int)
+    df["_catheter_exposure_days"] = df["_catheter_in_row_int"] * pd.to_numeric(
+        df["period_duration_days"],
+        errors="coerce",
+    )
+    return df
 
-    if weights.empty:
-        row = {
-            "group": label,
-            "min_weight": np.nan,
-            "median_weight": np.nan,
-            "p90_weight": np.nan,
-            "p95_weight": np.nan,
-            "p99_weight": np.nan,
-            "max_weight": np.nan,
-            "effective_sample_size": np.nan,
+
+def build_policy_episode_panel(
+    df: pd.DataFrame,
+    zero_applicable_policy_episodes: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Collapse the unfiltered policy panel to one row per policy × episode."""
+    df = add_episode_level_flags(df)
+    group_cols = ["policy_name", "policy_remove_day", EPISODE_ID_COL]
+    aggregations = {
+        POLICY_TYPE_COL: first_non_null,
+        "episode_adherent_to_policy": "max",
+        "_applicable_int": "sum",
+        "_matched_applicable_int": "sum",
+        "deviated_from_policy_today": "sum",
+        "_remove_assigned_int": "max",
+        "_observed_remove_under_policy_int": "max",
+        "_catheter_in_row_int": "sum",
+        "_catheter_exposure_days": "sum",
+        "zero_support_matched_row": "max",
+    }
+
+    for col in OPTIONAL_FIRST_COLS:
+        if col in df.columns and col not in group_cols:
+            aggregations[col] = first_non_null
+
+    for episode_col, period_col in OUTCOME_SPECS.values():
+        if period_col in df.columns:
+            aggregations[period_col] = max_binary
+
+    for risk_col in ["at_risk_cauti", "at_risk_reinsertion"]:
+        if risk_col in df.columns:
+            aggregations[risk_col] = "sum"
+
+    episode_all = df.groupby(group_cols, dropna=False, as_index=False, sort=False).agg(aggregations)
+    episode_all = episode_all.rename(
+        columns={
+            "_applicable_int": "n_applicable_policy_rows",
+            "_matched_applicable_int": "n_matched_policy_rows",
+            "deviated_from_policy_today": "n_deviation_rows",
+            "_remove_assigned_int": "policy_remove_assigned",
+            "_observed_remove_under_policy_int": "observed_remove_under_policy",
+            "_catheter_in_row_int": "observed_catheter_in_intervals",
+            "_catheter_exposure_days": "observed_catheter_exposure_days",
+            "at_risk_cauti": "cauti_at_risk_rows",
+            "at_risk_reinsertion": "reinsertion_at_risk_rows",
         }
-        if metadata:
-            row = {**metadata, **row}
-        return row
+    )
+    episode_all["observed_catheter_in_interval_rows"] = episode_all["observed_catheter_in_intervals"]
 
-    row = {
-        "group": label,
-        "min_weight": float(weights.min()),
-        "median_weight": float(weights.quantile(0.50)),
-        "p90_weight": float(weights.quantile(0.90)),
-        "p95_weight": float(weights.quantile(0.95)),
-        "p99_weight": float(weights.quantile(0.99)),
-        "max_weight": float(weights.max()),
-        "effective_sample_size": effective_sample_size(weights),
+    for episode_col, period_col in OUTCOME_SPECS.values():
+        if period_col in episode_all.columns:
+            episode_all = episode_all.rename(columns={period_col: episode_col})
+        elif episode_col not in episode_all.columns:
+            episode_all[episode_col] = np.nan
+
+    for col in ["cauti_at_risk_rows", "reinsertion_at_risk_rows"]:
+        if col not in episode_all.columns:
+            episode_all[col] = np.nan
+
+    weight_products = product_components_by_episode(df, "ipw_component")
+    unclipped_weight_products = product_components_by_episode(df, "ipw_component_unclipped")
+    episode_all = episode_all.merge(weight_products, on=group_cols, how="left")
+    episode_all = episode_all.merge(
+        unclipped_weight_products,
+        on=group_cols,
+        how="left",
+        suffixes=("", "_unclipped"),
+    )
+    episode_all = episode_all.rename(
+        columns={
+            "ipw_component": WEIGHT_COL,
+            "ipw_component_unclipped": UNCLIPPED_WEIGHT_COL,
+        }
+    )
+
+    episode_all["zero_applicable_rows_weight_assigned"] = 0
+    zero_applicable_adherent = (
+        episode_all["episode_adherent_to_policy"].eq(1)
+        & episode_all["n_applicable_policy_rows"].eq(0)
+    )
+    if zero_applicable_adherent.any():
+        n_zero = int(zero_applicable_adherent.sum())
+        if zero_applicable_policy_episodes == "error":
+            raise ValueError(
+                f"{n_zero} adherent policy episodes have no applicable decision rows."
+            )
+        if zero_applicable_policy_episodes == "exclude":
+            print(
+                "WARNING: excluding adherent policy episodes with no applicable "
+                f"decision rows: {n_zero}"
+            )
+            episode_all.loc[zero_applicable_adherent, "episode_adherent_to_policy"] = 0
+        else:
+            print(
+                "WARNING: assigning weight 1 to adherent policy episodes with "
+                f"no applicable decision rows: {n_zero}"
+            )
+            episode_all.loc[zero_applicable_adherent, WEIGHT_COL] = 1.0
+            episode_all.loc[zero_applicable_adherent, UNCLIPPED_WEIGHT_COL] = 1.0
+            episode_all.loc[zero_applicable_adherent, "zero_applicable_rows_weight_assigned"] = 1
+
+    missing_adherent_weight = (
+        episode_all["episode_adherent_to_policy"].eq(1)
+        & episode_all["n_applicable_policy_rows"].gt(0)
+        & episode_all[WEIGHT_COL].isna()
+    )
+    if missing_adherent_weight.any():
+        examples = episode_all.loc[
+            missing_adherent_weight,
+            ["policy_name", EPISODE_ID_COL, "n_applicable_policy_rows", "n_matched_policy_rows"],
+        ].head(10)
+        raise ValueError(
+            "Some adherent policy episodes have applicable rows but no IPW weight. "
+            f"Examples:\n{examples}"
+        )
+
+    policy_episode_df = episode_all.loc[
+        episode_all["episode_adherent_to_policy"].eq(1)
+    ].copy()
+    return episode_all, policy_episode_df
+
+
+def build_current_practice_episode_panel(scored_df: pd.DataFrame, policy_df: pd.DataFrame) -> pd.DataFrame:
+    scored_df = scored_df.copy()
+    scored_df = pec.add_period_duration_days(scored_df, context="current-practice IPW scored rows")
+    scored_df = pec.add_observed_icu_exit_alive_period(scored_df)
+    if EPISODE_ID_COL not in scored_df.columns:
+        episode_map = policy_df[[*EPISODE_KEY_COLS, EPISODE_ID_COL]].drop_duplicates()
+        scored_keyed, join_cols = add_join_key_columns(scored_df, EPISODE_KEY_COLS)
+        map_keyed, _ = add_join_key_columns(episode_map, EPISODE_KEY_COLS)
+
+        duplicated_episode_keys = map_keyed.duplicated(join_cols, keep=False)
+        if duplicated_episode_keys.any():
+            examples = map_keyed.loc[duplicated_episode_keys, EPISODE_KEY_COLS + [EPISODE_ID_COL]].head(10)
+            raise ValueError(
+                "Policy panel maps at least one natural episode key to multiple "
+                f"catheter_episode_id values. Examples:\n{examples}"
+            )
+        scored_df = scored_keyed.merge(
+            map_keyed[[*join_cols, EPISODE_ID_COL]],
+            on=join_cols,
+            how="left",
+            validate="many_to_one",
+        ).drop(columns=join_cols)
+        if scored_df[EPISODE_ID_COL].isna().any():
+            examples = scored_df.loc[scored_df[EPISODE_ID_COL].isna(), EPISODE_KEY_COLS].head(10)
+            raise ValueError(
+                "Some scored-panel rows could not be mapped to catheter_episode_id "
+                f"from the policy panel. Examples:\n{examples}"
+            )
+
+    scored_df["catheter_state"] = scored_df["catheter_state"].astype("string").str.strip().str.lower()
+    scored_df["_catheter_in_row_int"] = scored_df["catheter_state"].eq("in").astype(int)
+    scored_df["_catheter_exposure_days"] = scored_df["_catheter_in_row_int"] * pd.to_numeric(
+        scored_df["period_duration_days"],
+        errors="coerce",
+    )
+
+    group_cols = [EPISODE_ID_COL]
+    aggregations = {
+        "_catheter_in_row_int": "sum",
+        "_catheter_exposure_days": "sum",
     }
-    if metadata:
-        row = {**metadata, **row}
-    return row
+    for col in OPTIONAL_FIRST_COLS:
+        if col in scored_df.columns:
+            aggregations[col] = first_non_null
+    for episode_col, period_col in OUTCOME_SPECS.values():
+        if period_col in scored_df.columns:
+            aggregations[period_col] = max_binary
+    for risk_col in ["at_risk_cauti", "at_risk_reinsertion"]:
+        if risk_col in scored_df.columns:
+            aggregations[risk_col] = "sum"
+
+    episode_df = scored_df.groupby(group_cols, dropna=False, as_index=False, sort=False).agg(aggregations)
+    episode_df = episode_df.rename(
+        columns={
+            "_catheter_in_row_int": "observed_catheter_in_intervals",
+            "_catheter_exposure_days": "observed_catheter_exposure_days",
+            "at_risk_cauti": "cauti_at_risk_rows",
+            "at_risk_reinsertion": "reinsertion_at_risk_rows",
+        }
+    )
+    episode_df["observed_catheter_in_interval_rows"] = episode_df["observed_catheter_in_intervals"]
+    for episode_col, period_col in OUTCOME_SPECS.values():
+        if period_col in episode_df.columns:
+            episode_df = episode_df.rename(columns={period_col: episode_col})
+        elif episode_col not in episode_df.columns:
+            episode_df[episode_col] = np.nan
+
+    episode_df["policy_name"] = CURRENT_PRACTICE_LABEL
+    episode_df[POLICY_TYPE_COL] = "observed"
+    episode_df["policy_remove_day"] = pd.NA
+    episode_df["n_applicable_policy_rows"] = pd.NA
+    episode_df["n_matched_policy_rows"] = pd.NA
+    episode_df["n_deviation_rows"] = pd.NA
+    episode_df["episode_adherent_to_policy"] = 1
+    episode_df["policy_remove_assigned"] = pd.NA
+    episode_df["observed_remove_under_policy"] = pd.NA
+    episode_df["zero_applicable_rows_weight_assigned"] = 0
+    episode_df[WEIGHT_COL] = 1.0
+    episode_df[UNCLIPPED_WEIGHT_COL] = 1.0
+    return order_episode_columns(episode_df)
 
 
-def build_weight_diagnostics(episode_df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    policy_cols = available_policy_cols(episode_df)
-
-    if policy_cols:
-        for policy_values, policy_df in episode_df.groupby(policy_cols, dropna=False, sort=False):
-            metadata = policy_metadata(policy_values, policy_cols)
-            rows.append(summarise_weight_group(policy_df, "all", metadata))
-
-            if "split" in episode_df.columns:
-                for split_value, split_df in policy_df.groupby("split", dropna=False):
-                    rows.append(summarise_weight_group(split_df, f"split={split_value}", metadata))
-    else:
-        rows.append(summarise_weight_group(episode_df, "all"))
-
-        if "split" in episode_df.columns:
-            for split_value, split_df in episode_df.groupby("split", dropna=False):
-                rows.append(summarise_weight_group(split_df, f"split={split_value}"))
-
-    return pd.DataFrame(rows)
-
-
-def clipped_weights(weights: pd.Series, upper: Optional[float]) -> pd.Series:
-    weights = pd.to_numeric(weights, errors="coerce")
-    if upper is None or not np.isfinite(upper):
-        return weights
-    return weights.clip(upper=upper)
-
-
-def summarise_clipping_rule(
-    episode_df: pd.DataFrame,
-    label: str,
-    upper: Optional[float],
-    metadata: Optional[dict] = None,
-) -> dict:
-    weights = clipped_weights(episode_df[WEIGHT_COL], upper)
-    cauti_risk = weighted_mean(episode_df["any_cauti"], weights)
-    recatheterisation_risk = weighted_mean(episode_df["any_recatheterisation"], weights)
-
-    row = {
-        "clipping_rule": label,
-        "clip_upper": upper if upper is not None else np.nan,
-        "n_episodes": int(len(episode_df)),
-        "sum_weights": float(valid_weight_series(weights).sum()),
-        "effective_sample_size": effective_sample_size(weights),
-        "ipw_weighted_cauti_risk": cauti_risk,
-        "ipw_weighted_cauti_risk_pct": cauti_risk * 100,
-        "ipw_weighted_recatheterisation_risk": recatheterisation_risk,
-        "ipw_weighted_recatheterisation_risk_pct": recatheterisation_risk * 100,
-    }
-    if metadata:
-        row = {**metadata, **row}
-    return row
-
-
-def clipping_sensitivity_rows(episode_df: pd.DataFrame, metadata: Optional[dict] = None) -> list[dict]:
-    weights = valid_weight_series(episode_df[WEIGHT_COL])
-    p99_upper = float(weights.quantile(0.99)) if not weights.empty else np.nan
-
-    return [
-        summarise_clipping_rule(episode_df, "unclipped", None, metadata),
-        summarise_clipping_rule(episode_df, "clip_at_p99", p99_upper, metadata),
-        summarise_clipping_rule(episode_df, "clip_at_30", 30.0, metadata),
-        summarise_clipping_rule(episode_df, "clip_at_20", 20.0, metadata),
+def order_episode_columns(df: pd.DataFrame) -> pd.DataFrame:
+    preferred = [
+        "policy_name",
+        POLICY_TYPE_COL,
+        "policy_remove_day",
+        EPISODE_ID_COL,
+        *[col for col in OPTIONAL_FIRST_COLS if col in df.columns],
+        "episode_adherent_to_policy",
+        "n_applicable_policy_rows",
+        "n_matched_policy_rows",
+        "n_deviation_rows",
+        "policy_remove_assigned",
+        "observed_remove_under_policy",
+        "zero_applicable_rows_weight_assigned",
+        "zero_support_matched_row",
+        WEIGHT_COL,
+        UNCLIPPED_WEIGHT_COL,
+        "any_cauti",
+        "any_recatheterisation",
+        "any_death",
+        "observed_icu_exit_alive",
+        "observed_catheter_in_intervals",
+        "observed_catheter_exposure_days",
+        "observed_catheter_in_interval_rows",
+        "cauti_at_risk_rows",
+        "reinsertion_at_risk_rows",
     ]
+    ordered = [col for col in preferred if col in df.columns]
+    remaining = [col for col in df.columns if col not in ordered]
+    return df[[*ordered, *remaining]].copy()
 
 
-def build_clipping_sensitivity(episode_df: pd.DataFrame) -> pd.DataFrame:
+# =============================================================================
+# Diagnostics and summaries
+# =============================================================================
+
+def inverse_support_ess(support: pd.Series) -> float:
+    support = pd.to_numeric(support, errors="coerce")
+    valid = support[support.notna() & np.isfinite(support) & support.gt(0)]
+    if valid.empty:
+        return np.nan
+    return effective_sample_size(1.0 / valid)
+
+
+def support_diagnostic_row(df: pd.DataFrame, label: str, metadata: dict) -> dict:
+    applicable = df["policy_applicable"]
+    support = pd.to_numeric(df.loc[applicable, "policy_support"], errors="coerce")
+    finite = support.notna() & np.isfinite(support)
+    valid = support.loc[finite]
+    row = {
+        **metadata,
+        "group": label,
+        "n_applicable_rows": int(applicable.sum()),
+        "mean_policy_support": float(valid.mean()) if len(valid) else np.nan,
+        "median_policy_support": float(valid.median()) if len(valid) else np.nan,
+        "min_policy_support": float(valid.min()) if len(valid) else np.nan,
+        "pct_below_0_10": float(valid.lt(0.10).mean()) if len(valid) else np.nan,
+        "pct_below_0_05": float(valid.lt(0.05).mean()) if len(valid) else np.nan,
+        "pct_below_0_01": float(valid.lt(0.01).mean()) if len(valid) else np.nan,
+        "row_inverse_support_effective_sample_size": inverse_support_ess(support),
+        "n_missing_support_rows": int(support.isna().sum()),
+        "n_non_finite_support_rows": int((support.notna() & ~np.isfinite(support)).sum()),
+    }
+    row["low_support_flag"] = bool(
+        pd.notna(row["pct_below_0_05"])
+        and row["pct_below_0_05"] > pec.LOW_SUPPORT_PCT_BELOW_005_THRESHOLD
+    )
+    return row
+
+
+def build_support_diagnostics(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    policy_cols = available_policy_cols(episode_df)
+    policy_cols = ["policy_name", "policy_remove_day"]
+    for policy_values, policy_df in df.groupby(policy_cols, dropna=False, sort=False):
+        metadata = {
+            "policy_name": policy_values[0],
+            "policy_remove_day": policy_values[1],
+        }
+        rows.append(support_diagnostic_row(policy_df, "all", metadata))
 
-    if policy_cols:
-        for policy_values, policy_df in episode_df.groupby(policy_cols, dropna=False, sort=False):
-            metadata = policy_metadata(policy_values, policy_cols)
-            rows.extend(clipping_sensitivity_rows(policy_df, metadata))
-    else:
-        rows.extend(clipping_sensitivity_rows(episode_df))
-
+        for split_col in ["split", "crossfit_fold", "_crossfit_fold", "fold_id"]:
+            if split_col in policy_df.columns:
+                for split_value, split_df in policy_df.groupby(split_col, dropna=False, sort=False):
+                    rows.append(
+                        support_diagnostic_row(
+                            split_df,
+                            f"{split_col}={split_value}",
+                            metadata,
+                        )
+                    )
     return pd.DataFrame(rows)
+
+
+def weight_diagnostic_row(
+    policy_name,
+    policy_remove_day,
+    episode_all: pd.DataFrame,
+    adherent_df: pd.DataFrame,
+) -> dict:
+    weights = valid_weight_series(adherent_df[WEIGHT_COL]) if WEIGHT_COL in adherent_df.columns else pd.Series(dtype=float)
+    n_total = int(len(episode_all))
+    n_adherent = int(episode_all["episode_adherent_to_policy"].eq(1).sum())
+    n_non_adherent = int(n_total - n_adherent)
+
+    ess = effective_sample_size(weights)
+    pct_adherent = n_adherent / n_total if n_total else np.nan
+    p99 = float(weights.quantile(0.99)) if len(weights) else np.nan
+    max_weight = float(weights.max()) if len(weights) else np.nan
+    return {
+        "policy_name": policy_name,
+        "policy_remove_day": policy_remove_day,
+        "min_weight": float(weights.min()) if len(weights) else np.nan,
+        "median_weight": float(weights.median()) if len(weights) else np.nan,
+        "p90_weight": float(weights.quantile(0.90)) if len(weights) else np.nan,
+        "p95_weight": float(weights.quantile(0.95)) if len(weights) else np.nan,
+        "p99_weight": p99,
+        "max_weight": max_weight,
+        "effective_sample_size": ess,
+        "n_adherent_episodes": n_adherent,
+        "n_non_adherent_episodes": n_non_adherent,
+        "pct_adherent_episodes": pct_adherent,
+        "n_total_policy_episodes": n_total,
+        "low_adherence_flag": bool(pd.notna(pct_adherent) and pct_adherent < pec.LOW_ADHERENCE_THRESHOLD),
+        "low_ess_flag": bool(
+            pd.notna(ess)
+            and (ess < pec.LOW_ESS_MIN or (n_total > 0 and ess < pec.LOW_ESS_FRACTION * n_total))
+        ),
+        "extreme_weight_flag": bool(
+            (pd.notna(p99) and p99 > pec.EXTREME_WEIGHT_P99_THRESHOLD)
+            or (pd.notna(max_weight) and max_weight > pec.EXTREME_WEIGHT_MAX_THRESHOLD)
+        ),
+        "n_zero_applicable_rows_weight_assigned": int(
+            episode_all.get("zero_applicable_rows_weight_assigned", pd.Series(dtype=int)).sum()
+        ),
+        "n_zero_support_matched_episodes": int(
+            episode_all.get("zero_support_matched_row", pd.Series(dtype=int)).sum()
+        ),
+    }
+
+
+def build_weight_diagnostics(episode_all: pd.DataFrame, policy_episode_df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    group_cols = ["policy_name", "policy_remove_day"]
+    for policy_values, all_df in episode_all.groupby(group_cols, dropna=False, sort=False):
+        policy_name, policy_remove_day = policy_values
+        adherent_df = policy_episode_df.loc[
+            policy_episode_df["policy_name"].eq(policy_name)
+            & policy_episode_df["policy_remove_day"].eq(policy_remove_day)
+        ]
+        rows.append(weight_diagnostic_row(policy_name, policy_remove_day, all_df, adherent_df))
+    return pd.DataFrame(rows)
+
+
+def available_outcome_columns(df: pd.DataFrame) -> dict[str, str]:
+    return {
+        outcome_name: episode_col
+        for outcome_name, (episode_col, _) in OUTCOME_SPECS.items()
+        if episode_col in df.columns
+    }
+
+
+def summarise_episode_estimates(
+    episode_df: pd.DataFrame,
+    policy_name,
+    policy_remove_day,
+    n_total_policy_episodes: int,
+    n_adherent_episodes: int,
+    weight_col: str = WEIGHT_COL,
+) -> dict:
+    weights = pd.to_numeric(episode_df[weight_col], errors="coerce") if weight_col in episode_df.columns else pd.Series(dtype=float)
+    row = {
+        "policy_name": policy_name,
+        "policy_remove_day": policy_remove_day,
+        "n_episodes": int(len(episode_df)),
+        "n_total_policy_episodes": int(n_total_policy_episodes),
+        "n_adherent_episodes": int(n_adherent_episodes),
+        "pct_adherent_episodes": (
+            float(n_adherent_episodes / n_total_policy_episodes)
+            if n_total_policy_episodes
+            else np.nan
+        ),
+        "sum_weights": float(valid_weight_series(weights).sum()) if len(weights) else np.nan,
+        "mean_weight": float(valid_weight_series(weights).mean()) if len(valid_weight_series(weights)) else np.nan,
+        "max_weight": float(valid_weight_series(weights).max()) if len(valid_weight_series(weights)) else np.nan,
+        "effective_sample_size": effective_sample_size(weights),
+    }
+
+    for outcome_name, episode_col in available_outcome_columns(episode_df).items():
+        unweighted = pd.to_numeric(episode_df[episode_col], errors="coerce").mean()
+        weighted = weighted_mean(episode_df[episode_col], weights)
+        row[f"unweighted_{outcome_name}_risk"] = float(unweighted) if pd.notna(unweighted) else np.nan
+        row[f"ipw_weighted_{outcome_name}_risk"] = weighted
+        row[f"unweighted_{outcome_name}_risk_pct"] = row[f"unweighted_{outcome_name}_risk"] * 100
+        row[f"ipw_weighted_{outcome_name}_risk_pct"] = weighted * 100 if pd.notna(weighted) else np.nan
+
+    if "observed_catheter_in_intervals" in episode_df.columns:
+        unweighted_rows = pd.to_numeric(
+            episode_df["observed_catheter_in_intervals"],
+            errors="coerce",
+        ).mean()
+        weighted_rows = weighted_mean(episode_df["observed_catheter_in_intervals"], weights)
+        row["unweighted_mean_catheter_in_intervals"] = (
+            float(unweighted_rows) if pd.notna(unweighted_rows) else np.nan
+        )
+        row["ipw_weighted_mean_catheter_in_intervals"] = weighted_rows
+        row["unweighted_mean_catheter_in_interval_rows"] = row[
+            "unweighted_mean_catheter_in_intervals"
+        ]
+        row["ipw_weighted_mean_catheter_in_interval_rows"] = row[
+            "ipw_weighted_mean_catheter_in_intervals"
+        ]
+
+    if "observed_catheter_exposure_days" in episode_df.columns:
+        unweighted_exposure = pd.to_numeric(
+            episode_df["observed_catheter_exposure_days"],
+            errors="coerce",
+        ).mean()
+        weighted_exposure = weighted_mean(episode_df["observed_catheter_exposure_days"], weights)
+        row["unweighted_mean_catheter_exposure_days"] = (
+            float(unweighted_exposure) if pd.notna(unweighted_exposure) else np.nan
+        )
+        row["ipw_weighted_mean_catheter_exposure_days"] = weighted_exposure
+
+    return row
+
+
+def build_policy_summary(
+    episode_all: pd.DataFrame,
+    policy_episode_df: pd.DataFrame,
+    current_practice_episode_df: pd.DataFrame,
+) -> pd.DataFrame:
+    rows = []
+    rows.append(
+        summarise_episode_estimates(
+            current_practice_episode_df,
+            CURRENT_PRACTICE_LABEL,
+            pd.NA,
+            len(current_practice_episode_df),
+            len(current_practice_episode_df),
+        )
+    )
+
+    group_cols = ["policy_name", "policy_remove_day"]
+    for policy_values, all_df in episode_all.groupby(group_cols, dropna=False, sort=False):
+        policy_name, policy_remove_day = policy_values
+        adherent_df = policy_episode_df.loc[
+            policy_episode_df["policy_name"].eq(policy_name)
+            & policy_episode_df["policy_remove_day"].eq(policy_remove_day)
+        ]
+        rows.append(
+            summarise_episode_estimates(
+                adherent_df,
+                policy_name,
+                policy_remove_day,
+                len(all_df),
+                int(all_df["episode_adherent_to_policy"].eq(1).sum()),
+            )
+        )
+
+    return add_current_practice_comparisons(pd.DataFrame(rows))
+
+
+def add_current_practice_comparisons(summary: pd.DataFrame) -> pd.DataFrame:
+    return pec.add_standard_comparisons(
+        summary,
+        baseline_label=CURRENT_PRACTICE_LABEL,
+        comparison_map={
+            "cauti_risk": "ipw_weighted_cauti_risk",
+            "recatheterisation_risk": "ipw_weighted_recatheterisation_risk",
+            "death_risk": "ipw_weighted_death_risk",
+            "icu_exit_alive_risk": "ipw_weighted_icu_exit_alive_risk",
+            "catheter_exposure_days": "ipw_weighted_mean_catheter_exposure_days",
+        },
+    )
+
+
+def clipping_estimate_row(
+    episode_df: pd.DataFrame,
+    policy_name,
+    policy_remove_day,
+    clipping_rule: str,
+    weights: pd.Series,
+    clip_upper_weight,
+    support_clip_lower=np.nan,
+    support_clip_upper=np.nan,
+) -> dict:
+    valid_weights = valid_weight_series(weights)
+    row = {
+        "policy_name": policy_name,
+        "policy_remove_day": policy_remove_day,
+        "clipping_rule": clipping_rule,
+        "support_clip_lower": support_clip_lower,
+        "support_clip_upper": support_clip_upper,
+        "clip_upper_weight": clip_upper_weight,
+        "n_episodes": int(len(episode_df)),
+        "n_weighted_episodes": int(len(valid_weights)),
+        "sum_weights": float(valid_weights.sum()) if len(valid_weights) else np.nan,
+        "effective_sample_size": effective_sample_size(weights),
+    }
+    for outcome_name, episode_col in available_outcome_columns(episode_df).items():
+        weighted = weighted_mean(episode_df[episode_col], weights)
+        row[f"ipw_weighted_{outcome_name}_risk"] = weighted
+        row[f"ipw_weighted_{outcome_name}_risk_pct"] = weighted * 100 if pd.notna(weighted) else np.nan
+    if "observed_catheter_in_intervals" in episode_df.columns:
+        row["ipw_weighted_mean_catheter_in_intervals"] = weighted_mean(
+            episode_df["observed_catheter_in_intervals"],
+            weights,
+        )
+        row["ipw_weighted_mean_catheter_in_interval_rows"] = row[
+            "ipw_weighted_mean_catheter_in_intervals"
+        ]
+    if "observed_catheter_exposure_days" in episode_df.columns:
+        row["ipw_weighted_mean_catheter_exposure_days"] = weighted_mean(
+            episode_df["observed_catheter_exposure_days"],
+            weights,
+        )
+    return row
+
+
+def build_clipping_sensitivity(
+    policy_episode_df: pd.DataFrame,
+    clip_lower: float,
+    clip_upper: float,
+) -> pd.DataFrame:
+    rows = []
+    group_cols = ["policy_name", "policy_remove_day"]
+    for policy_values, episode_df in policy_episode_df.groupby(group_cols, dropna=False, sort=False):
+        policy_name, policy_remove_day = policy_values
+        default_weights = pd.to_numeric(episode_df[WEIGHT_COL], errors="coerce")
+        unclipped_weights = pd.to_numeric(episode_df[UNCLIPPED_WEIGHT_COL], errors="coerce")
+        valid_default = valid_weight_series(default_weights)
+        p99 = float(valid_default.quantile(0.99)) if len(valid_default) else np.nan
+
+        rows.append(
+            clipping_estimate_row(
+                episode_df,
+                policy_name,
+                policy_remove_day,
+                "unclipped_support_where_safe",
+                unclipped_weights,
+                np.nan,
+            )
+        )
+        rows.append(
+            clipping_estimate_row(
+                episode_df,
+                policy_name,
+                policy_remove_day,
+                "row_support_clipped",
+                default_weights,
+                np.nan,
+                clip_lower,
+                clip_upper,
+            )
+        )
+        for label, upper in [
+            ("upper_weight_clipped_at_p99", p99),
+            ("upper_weight_clipped_at_30", 30.0),
+            ("upper_weight_clipped_at_20", 20.0),
+        ]:
+            clipped = default_weights.clip(upper=upper) if pd.notna(upper) else default_weights
+            rows.append(
+                clipping_estimate_row(
+                    episode_df,
+                    policy_name,
+                    policy_remove_day,
+                    label,
+                    clipped,
+                    upper,
+                    clip_lower,
+                    clip_upper,
+                )
+            )
+    return pd.DataFrame(rows)
+
+
+def metadata_payload(
+    args: argparse.Namespace,
+    output_paths: dict,
+    joined_df: pd.DataFrame,
+    episode_all: pd.DataFrame,
+    policy_episode_df: pd.DataFrame,
+) -> dict:
+    return {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "estimator": "sequential_ipw",
+        "current_practice_comparator_type": "observed_weight_one",
+        "clipping_bounds": {"clip_lower": args.clip_lower, "clip_upper": args.clip_upper},
+        "input_paths": {
+            "policy_panel": str(args.policy_panel),
+            "scored_panel": str(args.scored_panel),
+        },
+        "output_paths": {key: str(value) for key, value in output_paths.items()},
+        "number_of_policies": int(joined_df["policy_name"].nunique()),
+        "number_of_patients": int(joined_df["subject_id"].nunique()),
+        "number_of_policy_episode_rows": int(len(episode_all)),
+        "number_of_adherent_policy_episode_rows": int(len(policy_episode_df)),
+        "target_policy_timeline_reconstructed_in_script": False,
+        "target_policy_timing_source": pec.TARGET_POLICY_TIMING_SOURCE,
+        "target_policy_timeline_helper": pec.TARGET_POLICY_TIMELINE_HELPER,
+        "target_policy_timeline_semantics": pec.TARGET_POLICY_TIMELINE_SEMANTICS,
+        "duration_semantics": {
+            "period_duration_days": "period_end - period_start in days",
+            "catheter_exposure_days": "sum of period_duration_days where catheter_state == in",
+            "max_reasonable_period_duration_days": pec.MAX_REASONABLE_PERIOD_DURATION_DAYS,
+            "n_long_period_duration_rows": int(joined_df.get("period_duration_long_flag", pd.Series(0)).sum()),
+        },
+        "catheter_count_semantics": {
+            "observed_catheter_in_intervals": (
+                "count of observed catheter-in interval rows on the observed grid; "
+                "not necessarily one row per patient-day because transition days may be "
+                "split into in and out intervals"
+            ),
+            "observed_catheter_exposure_days": (
+                "sum of period_duration_days where catheter_state == in; "
+                "preferred exposure measure for interpretation"
+            ),
+        },
+        "icu_exit_alive_definition": (
+            "max(icu_end_in_period == 1 and death_in_period != 1); death takes "
+            "precedence when death and ICU exit occur in the same interval"
+        ),
+        "overlap_flag_thresholds": {
+            "low_adherence_threshold": pec.LOW_ADHERENCE_THRESHOLD,
+            "low_ess_min": pec.LOW_ESS_MIN,
+            "low_ess_fraction": pec.LOW_ESS_FRACTION,
+            "low_support_pct_below_0_05_threshold": pec.LOW_SUPPORT_PCT_BELOW_005_THRESHOLD,
+            "extreme_weight_p99_threshold": pec.EXTREME_WEIGHT_P99_THRESHOLD,
+            "extreme_weight_max_threshold": pec.EXTREME_WEIGHT_MAX_THRESHOLD,
+        },
+        "bootstrap": pec.bootstrap_metadata(args, joined_df.columns),
+        "methodological_limitations": [
+            "This script estimates IPW values only.",
+            "It does not run g-formula, AIPW, DML, DR-Learner, TMLE, or LTMLE.",
+            "Uncertainty intervals are not calculated; bootstrap arguments are recorded only.",
+        ],
+    }
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def print_summary(
+    policy_panel_path: Path,
+    scored_panel_path: Path,
+    episode_all: pd.DataFrame,
+    policy_episode_df: pd.DataFrame,
+    current_practice_episode_df: pd.DataFrame,
+    summary_path: Path,
+    episodes_path: Path,
+    weight_diagnostics_path: Path,
+    support_diagnostics_path: Path,
+    clipping_sensitivity_path: Path,
+    current_practice_path: Path,
+    metadata_path: Path,
+) -> None:
+    n_policies = int(episode_all["policy_name"].nunique()) if "policy_name" in episode_all.columns else 0
+    zero_adherent = (
+        episode_all.groupby("policy_name")["episode_adherent_to_policy"].sum().loc[lambda s: s == 0].index.tolist()
+    )
+
+    print()
+    print("--- IPW POLICY EVALUATION COMPLETE ---")
+    print(f"Policy-intervention panel: {policy_panel_path}")
+    print(f"Scored nuisance panel: {scored_panel_path}")
+    print(f"Candidate policies: {n_policies:,}")
+    print(f"Current-practice episodes: {len(current_practice_episode_df):,}")
+    print(f"Adherent target-policy episode rows: {len(policy_episode_df):,}")
+    if zero_adherent:
+        print(f"WARNING: policies with no adherent episodes: {zero_adherent}")
+    print(f"Saved policy summary: {summary_path}")
+    print(f"Saved episode outcomes: {episodes_path}")
+    print(f"Saved weight diagnostics: {weight_diagnostics_path}")
+    print(f"Saved support diagnostics: {support_diagnostics_path}")
+    print(f"Saved clipping sensitivity: {clipping_sensitivity_path}")
+    print(f"Saved current-practice episodes: {current_practice_path}")
+    print(f"Saved metadata: {metadata_path}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Calculate IPW-weighted outcomes for one or more policy panels.")
-    parser.add_argument("--input", default=DEFAULT_INPUT_PATH, help="Path to IPW-ready policy panel CSV.")
-    parser.add_argument("--scored-panel", default=DEFAULT_SCORED_PANEL_PATH, help="Path to original scored panel CSV for current-practice baseline.")
-    parser.add_argument("--output-summary", default=DEFAULT_OUTPUT_SUMMARY_PATH, help="Output CSV for policy outcome summary.")
-    parser.add_argument("--output-episodes", default=DEFAULT_OUTPUT_EPISODES_PATH, help="Output CSV for current-practice episodes and one-row-per-policy-episode data.")
-    parser.add_argument(
-        "--output-weight-diagnostics",
-        default=DEFAULT_OUTPUT_WEIGHT_DIAGNOSTICS_PATH,
-        help="Output CSV for IPW weight diagnostics.",
+    args = parse_args()
+    args.outdir.mkdir(exist_ok=True, parents=True)
+
+    summary_path = resolve_output_path(args.outdir, args.output_summary)
+    episodes_path = resolve_output_path(args.outdir, args.output_episodes)
+    weight_diagnostics_path = resolve_output_path(args.outdir, args.output_weight_diagnostics)
+    support_diagnostics_path = resolve_output_path(args.outdir, args.output_support_diagnostics)
+    clipping_sensitivity_path = resolve_output_path(args.outdir, args.output_clipping_sensitivity)
+    current_practice_path = resolve_output_path(args.outdir, args.output_current_practice)
+    metadata_path = resolve_output_path(args.outdir, args.output_metadata)
+
+    policy_df = load_policy_panel(args.policy_panel)
+    scored_df = load_scored_panel(args.scored_panel)
+
+    joined_df = join_scored_panel(policy_df, scored_df)
+    joined_df = pec.add_period_duration_days(joined_df, context="joined IPW policy rows")
+    joined_df = pec.add_observed_icu_exit_alive_period(joined_df)
+    joined_df = add_ipw_row_quantities(joined_df, args.clip_lower, args.clip_upper)
+    joined_df = add_adherence(joined_df)
+
+    support_diagnostics_df = build_support_diagnostics(joined_df)
+    episode_all, policy_episode_df = build_policy_episode_panel(
+        joined_df,
+        args.zero_applicable_policy_episodes,
     )
-    parser.add_argument(
-        "--output-clipping-sensitivity",
-        default=DEFAULT_OUTPUT_CLIPPING_SENSITIVITY_PATH,
-        help="Output CSV for clipped-weight sensitivity estimates.",
+    episode_all = order_episode_columns(episode_all)
+    policy_episode_df = order_episode_columns(policy_episode_df)
+
+    if policy_episode_df.empty:
+        raise ValueError(
+            "No target policies have adherent episodes after IPW adherence "
+            "assessment. Support and weight diagnostics cannot produce policy estimates."
+        )
+
+    current_practice_episode_df = build_current_practice_episode_panel(scored_df, policy_df)
+    output_episode_df = pd.concat(
+        [current_practice_episode_df, policy_episode_df],
+        ignore_index=True,
+        sort=False,
     )
-    args = parser.parse_args()
 
-    input_path = Path(args.input)
-    scored_panel_path = Path(args.scored_panel)
-    output_summary_path = Path(args.output_summary)
-    output_episodes_path = Path(args.output_episodes)
-    output_weight_diagnostics_path = Path(args.output_weight_diagnostics)
-    output_clipping_sensitivity_path = Path(args.output_clipping_sensitivity)
+    summary_df = build_policy_summary(
+        episode_all,
+        policy_episode_df,
+        current_practice_episode_df,
+    )
+    weight_diagnostics_df = build_weight_diagnostics(episode_all, policy_episode_df)
+    clipping_sensitivity_df = build_clipping_sensitivity(
+        policy_episode_df,
+        args.clip_lower,
+        args.clip_upper,
+    )
+    summary_df = pec.add_overlap_quality_flags(
+        summary_df,
+        support_diagnostics=support_diagnostics_df,
+        weight_diagnostics=weight_diagnostics_df,
+        current_practice_label=CURRENT_PRACTICE_LABEL,
+    )
+    output_paths = {
+        "summary": summary_path,
+        "episodes": episodes_path,
+        "weight_diagnostics": weight_diagnostics_path,
+        "support_diagnostics": support_diagnostics_path,
+        "clipping_sensitivity": clipping_sensitivity_path,
+        "current_practice": current_practice_path,
+        "metadata": metadata_path,
+    }
 
-    df = pd.read_csv(input_path)
-    policy_episode_df = normalise_policy_remove_day(build_episode_level_panel(df))
+    save_df(output_episode_df, episodes_path)
+    save_df(summary_df, summary_path)
+    save_df(weight_diagnostics_df, weight_diagnostics_path)
+    save_df(support_diagnostics_df, support_diagnostics_path)
+    save_df(clipping_sensitivity_df, clipping_sensitivity_path)
+    save_df(current_practice_episode_df, current_practice_path)
+    pec.save_json(
+        metadata_payload(args, output_paths, joined_df, episode_all, policy_episode_df),
+        metadata_path,
+    )
 
-    scored_df = pd.read_csv(scored_panel_path, low_memory=False)
-    current_practice_episode_df = normalise_policy_remove_day(build_current_practice_episode_panel(scored_df))
-
-    episode_df = normalise_policy_remove_day(pd.concat([current_practice_episode_df, policy_episode_df], ignore_index=True))
-    summary_df = add_current_practice_comparisons(build_summary(episode_df))
-    weight_diagnostics_df = build_weight_diagnostics(policy_episode_df)
-    clipping_sensitivity_df = build_clipping_sensitivity(policy_episode_df)
-
-    output_summary_path.parent.mkdir(exist_ok=True, parents=True)
-    output_episodes_path.parent.mkdir(exist_ok=True, parents=True)
-    output_weight_diagnostics_path.parent.mkdir(exist_ok=True, parents=True)
-    output_clipping_sensitivity_path.parent.mkdir(exist_ok=True, parents=True)
-
-    episode_df.to_csv(output_episodes_path, index=False)
-    summary_df.to_csv(output_summary_path, index=False)
-    weight_diagnostics_df.to_csv(output_weight_diagnostics_path, index=False)
-    clipping_sensitivity_df.to_csv(output_clipping_sensitivity_path, index=False)
-
-    print("IPW policy outcome summary")
-    print("==========================")
-    print(f"Input panel: {input_path}")
-    print(f"Current-practice scored panel: {scored_panel_path}")
-    print(f"Current-practice episodes analysed: {len(current_practice_episode_df):,}")
-    print(f"Policy-episodes analysed: {len(policy_episode_df):,}")
-    if "policy_name" in policy_episode_df.columns:
-        print(f"IPW policies analysed: {policy_episode_df['policy_name'].nunique():,}")
-    print()
-    print(summary_df.to_string(index=False))
-    print()
-    print("IPW weight diagnostics")
-    print("======================")
-    print(weight_diagnostics_df.to_string(index=False))
-    print()
-    print("Clipped-weight sensitivity")
-    print("==========================")
-    print(clipping_sensitivity_df.to_string(index=False))
-    print()
-    print(f"Saved episode-level data to: {output_episodes_path}")
-    print(f"Saved summary to: {output_summary_path}")
-    print(f"Saved weight diagnostics to: {output_weight_diagnostics_path}")
-    print(f"Saved clipping sensitivity to: {output_clipping_sensitivity_path}")
+    print_summary(
+        args.policy_panel,
+        args.scored_panel,
+        episode_all,
+        policy_episode_df,
+        current_practice_episode_df,
+        summary_path,
+        episodes_path,
+        weight_diagnostics_path,
+        support_diagnostics_path,
+        clipping_sensitivity_path,
+        current_practice_path,
+        metadata_path,
+    )
 
 
 if __name__ == "__main__":
