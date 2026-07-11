@@ -1,25 +1,10 @@
 #!/usr/bin/env python3
-"""
-Evaluate deterministic catheter-removal policies using sequential inverse
-probability weighting from an estimator-agnostic policy-intervention panel.
+"""Evaluate catheter-removal policies with sequential IPW estimates."""
 
-Policy definitions are created upstream by `build_policy_intervention_panels.py`.
-This script does not mutate or redefine candidate policies. It performs the
-IPW-specific calculations only: behaviour-policy support, support clipping,
-adherence, sequential weights, effective sample size, clipping sensitivity, and
-weighted observed-outcome summaries.
-
-It does not perform g-formula, AIPW, DML, DR-Learner, TMLE, or LTMLE
-calculations. Those estimator-specific scripts should consume the same
-policy-intervention panel without inheriting IPW-specific filtering.
-"""
-
-from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -27,9 +12,7 @@ import pandas as pd
 import policy_eval_common as pec
 
 
-# =============================================================================
 # Paths and constants
-# =============================================================================
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -74,40 +57,6 @@ ROW_JOIN_KEY_COLS = [
     "periods_in_state",
     "observed_action",
     "action_remove",
-]
-
-REQUIRED_POLICY_PANEL_COLS = [
-    *EPISODE_KEY_COLS,
-    EPISODE_ID_COL,
-    "decision_row_id",
-    "period_start",
-    "period_end",
-    "catheter_state",
-    "periods_in_state",
-    "observed_action",
-    "action_remove",
-    "is_decision_row",
-    "policy_name",
-    "policy_remove_day",
-    "policy_action",
-    "policy_action_remove",
-    "policy_applicable",
-    "policy_reason",
-    "policy_matches_observed_action_today",
-    "episode_day_since_insertion",
-    *pec.RESOLVED_TIMELINE_COLUMNS,
-    "policy_removal_day_extra_row_treated_as_out",
-]
-
-REQUIRED_SCORED_PANEL_COLS = [
-    *EPISODE_KEY_COLS,
-    "period_start",
-    "period_end",
-    "catheter_state",
-    "periods_in_state",
-    "observed_action",
-    "action_remove",
-    "p_remove_obs",
 ]
 
 OPTIONAL_SCORED_COLS = [
@@ -170,11 +119,10 @@ OUTCOME_SPECS = {
 }
 
 
-# =============================================================================
 # Generic helpers
-# =============================================================================
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description=(
             "Evaluate deterministic catheter-removal policies using sequential "
@@ -259,35 +207,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_output_path(outdir: Path, name_or_path: str) -> Path:
+def resolve_output_path(outdir, name_or_path):
+    """Resolve an output file path."""
     path = Path(name_or_path)
     return path if path.is_absolute() else outdir / path
 
 
-def require_columns(df: pd.DataFrame, cols: Iterable[str], context: str) -> None:
-    missing = [col for col in cols if col not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required {context} columns: {missing}")
-
-
-def save_df(df: pd.DataFrame, path: Path) -> None:
+def save_df(df, path):
+    """Save a data frame as CSV."""
     path.parent.mkdir(exist_ok=True, parents=True)
     df.to_csv(path, index=False)
 
 
-def first_non_null(series: pd.Series):
+def first_non_null(series):
+    """Return the first non-missing value."""
     non_null = series.dropna()
     return non_null.iloc[0] if len(non_null) else np.nan
 
 
-def max_binary(series: pd.Series):
+def max_binary(series):
+    """Return whether any binary value is present."""
     numeric = pd.to_numeric(series, errors="coerce").fillna(0)
     if numeric.empty:
         return np.nan
     return int(numeric.max() > 0)
 
 
-def weighted_mean(values: pd.Series, weights: pd.Series) -> float:
+def weighted_mean(values, weights):
+    """Calculate a weighted mean."""
     values = pd.to_numeric(values, errors="coerce")
     weights = pd.to_numeric(weights, errors="coerce")
     valid = (
@@ -302,12 +249,15 @@ def weighted_mean(values: pd.Series, weights: pd.Series) -> float:
     return float(np.sum(values.loc[valid] * weights.loc[valid]) / np.sum(weights.loc[valid]))
 
 
-def valid_weight_series(weights: pd.Series) -> pd.Series:
+def valid_weight_series(weights):
+    """Return positive finite weights."""
     weights = pd.to_numeric(weights, errors="coerce")
     return weights[weights.notna() & np.isfinite(weights) & (weights > 0)]
 
 
-def effective_sample_size(weights: pd.Series) -> float:
+def effective_sample_size(weights):
+    """Calculate the effective sample size."""
+    # Return positive finite weights.
     weights = valid_weight_series(weights)
     if weights.empty:
         return np.nan
@@ -317,12 +267,14 @@ def effective_sample_size(weights: pd.Series) -> float:
 
 
 def safe_ratio(numerator, denominator):
+    """Calculate a ratio with missing-value protection."""
     if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
         return np.nan
     return float(numerator / denominator)
 
 
-def coerce_bool(series: pd.Series) -> pd.Series:
+def coerce_bool(series):
+    """Convert common text values to booleans."""
     if pd.api.types.is_bool_dtype(series):
         return series.fillna(False).astype(bool)
 
@@ -342,7 +294,8 @@ def coerce_bool(series: pd.Series) -> pd.Series:
     return mapped.fillna(False).astype(bool)
 
 
-def canonical_numeric_value(value) -> str:
+def canonical_numeric_value(value):
+    """Format a numeric join value consistently."""
     if pd.isna(value):
         return "<NA>"
     try:
@@ -356,7 +309,8 @@ def canonical_numeric_value(value) -> str:
     return f"{numeric:.12g}"
 
 
-def canonical_key_series(series: pd.Series, column: str) -> pd.Series:
+def canonical_key_series(series, column):
+    """Create a stable join-key series."""
     if column in DATETIME_KEY_COLS:
         raw = series.astype("string").str.strip()
         parsed = pd.to_datetime(series, errors="coerce")
@@ -377,35 +331,33 @@ def canonical_key_series(series: pd.Series, column: str) -> pd.Series:
     return out.fillna("<NA>")
 
 
-def add_join_key_columns(df: pd.DataFrame, key_cols: list[str]) -> tuple[pd.DataFrame, list[str]]:
-    require_columns(df, key_cols, "join-key")
+def add_join_key_columns(df, key_cols):
+    """Add stable join-key columns."""
     out = df.copy()
     join_cols = []
+    # Create a stable join-key series.
     for idx, col in enumerate(key_cols):
         join_col = f"__join_key_{idx}"
+        # Create a stable join-key series.
         out[join_col] = canonical_key_series(out[col], col)
         join_cols.append(join_col)
     return out, join_cols
 
 
-def duplicate_key_examples(df: pd.DataFrame, join_cols: list[str], display_cols: list[str]) -> pd.DataFrame:
+def duplicate_key_examples(df, join_cols, display_cols):
+    """Return examples of duplicate join keys."""
     duplicated = df.duplicated(join_cols, keep=False)
     if not duplicated.any():
         return pd.DataFrame()
     return df.loc[duplicated, display_cols].head(10)
 
 
-# =============================================================================
 # Loading and joining
-# =============================================================================
 
-def load_policy_panel(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"Policy-intervention panel not found: {path}")
-
+def load_policy_panel(path):
+    """Load and validate the policy panel."""
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
-    require_columns(df, REQUIRED_POLICY_PANEL_COLS, "policy-panel")
 
     stale_cols = [col for col in STALE_POLICY_PANEL_ESTIMATOR_COLS if col in df.columns]
     if stale_cols:
@@ -415,19 +367,19 @@ def load_policy_panel(path: Path) -> pd.DataFrame:
         )
         df = df.drop(columns=stale_cols)
 
+    # Normalise policy panel types.
     df = normalise_policy_panel_types(df)
+    # Validate policy-panel structure.
     validate_policy_panel(df)
     return df
 
 
-def load_scored_panel(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"Scored nuisance panel not found: {path}")
-
+def load_scored_panel(path):
+    """Load and validate the scored nuisance panel."""
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
-    require_columns(df, REQUIRED_SCORED_PANEL_COLS, "scored-panel")
 
+    # Normalise row-key columns for joining.
     df = normalise_row_key_types(df)
     df["p_remove_obs"] = pd.to_numeric(df["p_remove_obs"], errors="coerce")
     if "p_keep_obs" not in df.columns:
@@ -437,7 +389,8 @@ def load_scored_panel(path: Path) -> pd.DataFrame:
     return df
 
 
-def normalise_row_key_types(df: pd.DataFrame) -> pd.DataFrame:
+def normalise_row_key_types(df):
+    """Normalise row-key columns for joining."""
     df = df.copy()
     if "catheter_state" in df.columns:
         df["catheter_state"] = df["catheter_state"].astype("string").str.strip().str.lower()
@@ -450,9 +403,13 @@ def normalise_row_key_types(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def normalise_policy_panel_types(df: pd.DataFrame) -> pd.DataFrame:
+def normalise_policy_panel_types(df):
+    """Normalise policy panel types."""
+    # Normalise row-key columns for joining.
     df = normalise_row_key_types(df)
+    # Convert common text values to booleans.
     df["is_decision_row"] = coerce_bool(df["is_decision_row"])
+    # Convert common text values to booleans.
     df["policy_applicable"] = coerce_bool(df["policy_applicable"])
     df["policy_action"] = df["policy_action"].astype("string").str.strip().str.lower()
     df["policy_reason"] = df["policy_reason"].astype("string").str.strip().str.lower()
@@ -479,7 +436,8 @@ def normalise_policy_panel_types(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def validate_policy_panel(df: pd.DataFrame) -> None:
+def validate_policy_panel(df):
+    """Validate policy-panel structure."""
     policies = sorted(df["policy_name"].dropna().unique().tolist())
     if not policies:
         raise ValueError("Policy panel contains no policy_name values.")
@@ -519,9 +477,11 @@ def validate_policy_panel(df: pd.DataFrame) -> None:
     )
 
 
-def join_scored_panel(policy_df: pd.DataFrame, scored_df: pd.DataFrame) -> pd.DataFrame:
-    """Join nuisance probabilities and outcomes onto the policy panel."""
+def join_scored_panel(policy_df, scored_df):
+    """Join nuisance scores to policy rows."""
+    # Add stable join-key columns.
     policy_keyed, join_cols = add_join_key_columns(policy_df, ROW_JOIN_KEY_COLS)
+    # Add stable join-key columns.
     scored_keyed, _ = add_join_key_columns(scored_df, ROW_JOIN_KEY_COLS)
 
     scored_add_cols = [
@@ -541,7 +501,9 @@ def join_scored_panel(policy_df: pd.DataFrame, scored_df: pd.DataFrame) -> pd.Da
     ]
 
     duplicates = scored_keyed.duplicated(join_cols, keep=False)
+    # Return examples of duplicate join keys.
     if duplicates.any():
+        # Return examples of duplicate join keys.
         examples = duplicate_key_examples(scored_keyed, join_cols, ROW_JOIN_KEY_COLS)
         raise ValueError(
             "Scored panel is not unique on the natural patient-day join keys. "
@@ -576,11 +538,10 @@ def join_scored_panel(policy_df: pd.DataFrame, scored_df: pd.DataFrame) -> pd.Da
     return merged
 
 
-# =============================================================================
 # IPW row-level calculations and adherence
-# =============================================================================
 
-def validate_clip_bounds(clip_lower: float, clip_upper: float) -> None:
+def validate_clip_bounds(clip_lower, clip_upper):
+    """Validate support clipping bounds."""
     if not (0 < clip_lower < clip_upper <= 1):
         raise ValueError(
             "Support clipping bounds must satisfy 0 < clip_lower < clip_upper <= 1. "
@@ -589,16 +550,16 @@ def validate_clip_bounds(clip_lower: float, clip_upper: float) -> None:
 
 
 def add_ipw_row_quantities(
-    df: pd.DataFrame,
-    clip_lower: float,
-    clip_upper: float,
-) -> pd.DataFrame:
+    df,
+    clip_lower,
+    clip_upper,
+):
+    """Add row-level IPW quantities."""
+    # Validate support clipping bounds.
     validate_clip_bounds(clip_lower, clip_upper)
     df = df.copy()
 
     for col in ["p_remove_obs", "p_keep_obs"]:
-        if col not in df.columns:
-            raise ValueError(f"Joined policy panel is missing required propensity column: {col}")
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     applicable = df["policy_applicable"]
@@ -670,7 +631,8 @@ def add_ipw_row_quantities(
     return df
 
 
-def add_adherence(df: pd.DataFrame) -> pd.DataFrame:
+def add_adherence(df):
+    """Add cumulative policy-adherence flags."""
     df = df.copy()
     sort_cols = ["policy_name", EPISODE_ID_COL, "period_start", "period_end", "decision_row_id"]
     df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
@@ -683,11 +645,10 @@ def add_adherence(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# =============================================================================
 # Episode-level collapse
-# =============================================================================
 
-def product_components_by_episode(df: pd.DataFrame, component_col: str) -> pd.DataFrame:
+def product_components_by_episode(df, component_col):
+    """Multiply row components within each episode."""
     group_cols = ["policy_name", "policy_remove_day", EPISODE_ID_COL]
     out = (
         df.groupby(group_cols, dropna=False, sort=False)[component_col]
@@ -697,7 +658,8 @@ def product_components_by_episode(df: pd.DataFrame, component_col: str) -> pd.Da
     return out
 
 
-def add_episode_level_flags(df: pd.DataFrame) -> pd.DataFrame:
+def add_episode_level_flags(df):
+    """Add helper flags for episode aggregation."""
     df = df.copy()
     df["_applicable_int"] = df["policy_applicable"].astype(int)
     df["_matched_applicable_int"] = (
@@ -720,10 +682,11 @@ def add_episode_level_flags(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_policy_episode_panel(
-    df: pd.DataFrame,
-    zero_applicable_policy_episodes: str,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Collapse the unfiltered policy panel to one row per policy × episode."""
+    df,
+    zero_applicable_policy_episodes,
+):
+    """Build adherent policy-episode outcomes."""
+    # Add helper flags for episode aggregation.
     df = add_episode_level_flags(df)
     group_cols = ["policy_name", "policy_remove_day", EPISODE_ID_COL]
     aggregations = {
@@ -777,7 +740,9 @@ def build_policy_episode_panel(
         if col not in episode_all.columns:
             episode_all[col] = np.nan
 
+    # Multiply row components within each episode.
     weight_products = product_components_by_episode(df, "ipw_component")
+    # Multiply row components within each episode.
     unclipped_weight_products = product_components_by_episode(df, "ipw_component_unclipped")
     episode_all = episode_all.merge(weight_products, on=group_cols, how="left")
     episode_all = episode_all.merge(
@@ -840,13 +805,17 @@ def build_policy_episode_panel(
     return episode_all, policy_episode_df
 
 
-def build_current_practice_episode_panel(scored_df: pd.DataFrame, policy_df: pd.DataFrame) -> pd.DataFrame:
+def build_current_practice_episode_panel(scored_df, policy_df):
+    """Build observed current-practice episode outcomes."""
     scored_df = scored_df.copy()
     scored_df = pec.add_period_duration_days(scored_df, context="current-practice IPW scored rows")
     scored_df = pec.add_observed_icu_exit_alive_period(scored_df)
+    # Add stable join-key columns.
     if EPISODE_ID_COL not in scored_df.columns:
         episode_map = policy_df[[*EPISODE_KEY_COLS, EPISODE_ID_COL]].drop_duplicates()
+        # Add stable join-key columns.
         scored_keyed, join_cols = add_join_key_columns(scored_df, EPISODE_KEY_COLS)
+        # Add stable join-key columns.
         map_keyed, _ = add_join_key_columns(episode_map, EPISODE_KEY_COLS)
 
         duplicated_episode_keys = map_keyed.duplicated(join_cols, keep=False)
@@ -919,10 +888,12 @@ def build_current_practice_episode_panel(scored_df: pd.DataFrame, policy_df: pd.
     episode_df["zero_applicable_rows_weight_assigned"] = 0
     episode_df[WEIGHT_COL] = 1.0
     episode_df[UNCLIPPED_WEIGHT_COL] = 1.0
+    # Order episode-level output columns.
     return order_episode_columns(episode_df)
 
 
-def order_episode_columns(df: pd.DataFrame) -> pd.DataFrame:
+def order_episode_columns(df):
+    """Order episode-level output columns."""
     preferred = [
         "policy_name",
         POLICY_TYPE_COL,
@@ -954,23 +925,25 @@ def order_episode_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[[*ordered, *remaining]].copy()
 
 
-# =============================================================================
 # Diagnostics and summaries
-# =============================================================================
 
-def inverse_support_ess(support: pd.Series) -> float:
+def inverse_support_ess(support):
+    """Calculate inverse-support effective sample size."""
     support = pd.to_numeric(support, errors="coerce")
     valid = support[support.notna() & np.isfinite(support) & support.gt(0)]
     if valid.empty:
         return np.nan
+    # Calculate the effective sample size.
     return effective_sample_size(1.0 / valid)
 
 
-def support_diagnostic_row(df: pd.DataFrame, label: str, metadata: dict) -> dict:
+def support_diagnostic_row(df, label, metadata):
+    """Build one support diagnostic row."""
     applicable = df["policy_applicable"]
     support = pd.to_numeric(df.loc[applicable, "policy_support"], errors="coerce")
     finite = support.notna() & np.isfinite(support)
     valid = support.loc[finite]
+    # Calculate inverse-support effective sample size.
     row = {
         **metadata,
         "group": label,
@@ -992,19 +965,26 @@ def support_diagnostic_row(df: pd.DataFrame, label: str, metadata: dict) -> dict
     return row
 
 
-def build_support_diagnostics(df: pd.DataFrame) -> pd.DataFrame:
+def build_support_diagnostics(df):
+    """Build support diagnostic output."""
     rows = []
     policy_cols = ["policy_name", "policy_remove_day"]
+    # Build one support diagnostic row.
     for policy_values, policy_df in df.groupby(policy_cols, dropna=False, sort=False):
         metadata = {
             "policy_name": policy_values[0],
             "policy_remove_day": policy_values[1],
         }
+        # Build one support diagnostic row.
         rows.append(support_diagnostic_row(policy_df, "all", metadata))
 
+        # Build one support diagnostic row.
         for split_col in ["split", "crossfit_fold", "_crossfit_fold", "fold_id"]:
+            # Build one support diagnostic row.
             if split_col in policy_df.columns:
+                # Build one support diagnostic row.
                 for split_value, split_df in policy_df.groupby(split_col, dropna=False, sort=False):
+                    # Build one support diagnostic row.
                     rows.append(
                         support_diagnostic_row(
                             split_df,
@@ -1018,14 +998,17 @@ def build_support_diagnostics(df: pd.DataFrame) -> pd.DataFrame:
 def weight_diagnostic_row(
     policy_name,
     policy_remove_day,
-    episode_all: pd.DataFrame,
-    adherent_df: pd.DataFrame,
-) -> dict:
+    episode_all,
+    adherent_df,
+):
+    """Build one weight diagnostic row."""
+    # Return positive finite weights.
     weights = valid_weight_series(adherent_df[WEIGHT_COL]) if WEIGHT_COL in adherent_df.columns else pd.Series(dtype=float)
     n_total = int(len(episode_all))
     n_adherent = int(episode_all["episode_adherent_to_policy"].eq(1).sum())
     n_non_adherent = int(n_total - n_adherent)
 
+    # Calculate the effective sample size.
     ess = effective_sample_size(weights)
     pct_adherent = n_adherent / n_total if n_total else np.nan
     p99 = float(weights.quantile(0.99)) if len(weights) else np.nan
@@ -1062,20 +1045,24 @@ def weight_diagnostic_row(
     }
 
 
-def build_weight_diagnostics(episode_all: pd.DataFrame, policy_episode_df: pd.DataFrame) -> pd.DataFrame:
+def build_weight_diagnostics(episode_all, policy_episode_df):
+    """Build weight diagnostic output."""
     rows = []
     group_cols = ["policy_name", "policy_remove_day"]
+    # Build one weight diagnostic row.
     for policy_values, all_df in episode_all.groupby(group_cols, dropna=False, sort=False):
         policy_name, policy_remove_day = policy_values
         adherent_df = policy_episode_df.loc[
             policy_episode_df["policy_name"].eq(policy_name)
             & policy_episode_df["policy_remove_day"].eq(policy_remove_day)
         ]
+        # Build one weight diagnostic row.
         rows.append(weight_diagnostic_row(policy_name, policy_remove_day, all_df, adherent_df))
     return pd.DataFrame(rows)
 
 
-def available_outcome_columns(df: pd.DataFrame) -> dict[str, str]:
+def available_outcome_columns(df):
+    """List available episode outcome columns."""
     return {
         outcome_name: episode_col
         for outcome_name, (episode_col, _) in OUTCOME_SPECS.items()
@@ -1084,14 +1071,16 @@ def available_outcome_columns(df: pd.DataFrame) -> dict[str, str]:
 
 
 def summarise_episode_estimates(
-    episode_df: pd.DataFrame,
+    episode_df,
     policy_name,
     policy_remove_day,
-    n_total_policy_episodes: int,
-    n_adherent_episodes: int,
-    weight_col: str = WEIGHT_COL,
-) -> dict:
+    n_total_policy_episodes,
+    n_adherent_episodes,
+    weight_col=WEIGHT_COL,
+):
+    """Summarise episode-level estimates."""
     weights = pd.to_numeric(episode_df[weight_col], errors="coerce") if weight_col in episode_df.columns else pd.Series(dtype=float)
+    # Calculate the effective sample size.
     row = {
         "policy_name": policy_name,
         "policy_remove_day": policy_remove_day,
@@ -1109,19 +1098,23 @@ def summarise_episode_estimates(
         "effective_sample_size": effective_sample_size(weights),
     }
 
+    # Calculate a weighted mean.
     for outcome_name, episode_col in available_outcome_columns(episode_df).items():
         unweighted = pd.to_numeric(episode_df[episode_col], errors="coerce").mean()
+        # Calculate a weighted mean.
         weighted = weighted_mean(episode_df[episode_col], weights)
         row[f"unweighted_{outcome_name}_risk"] = float(unweighted) if pd.notna(unweighted) else np.nan
         row[f"ipw_weighted_{outcome_name}_risk"] = weighted
         row[f"unweighted_{outcome_name}_risk_pct"] = row[f"unweighted_{outcome_name}_risk"] * 100
         row[f"ipw_weighted_{outcome_name}_risk_pct"] = weighted * 100 if pd.notna(weighted) else np.nan
 
+    # Calculate a weighted mean.
     if "observed_catheter_in_intervals" in episode_df.columns:
         unweighted_rows = pd.to_numeric(
             episode_df["observed_catheter_in_intervals"],
             errors="coerce",
         ).mean()
+        # Calculate a weighted mean.
         weighted_rows = weighted_mean(episode_df["observed_catheter_in_intervals"], weights)
         row["unweighted_mean_catheter_in_intervals"] = (
             float(unweighted_rows) if pd.notna(unweighted_rows) else np.nan
@@ -1134,11 +1127,13 @@ def summarise_episode_estimates(
             "ipw_weighted_mean_catheter_in_intervals"
         ]
 
+    # Calculate a weighted mean.
     if "observed_catheter_exposure_days" in episode_df.columns:
         unweighted_exposure = pd.to_numeric(
             episode_df["observed_catheter_exposure_days"],
             errors="coerce",
         ).mean()
+        # Calculate a weighted mean.
         weighted_exposure = weighted_mean(episode_df["observed_catheter_exposure_days"], weights)
         row["unweighted_mean_catheter_exposure_days"] = (
             float(unweighted_exposure) if pd.notna(unweighted_exposure) else np.nan
@@ -1149,11 +1144,13 @@ def summarise_episode_estimates(
 
 
 def build_policy_summary(
-    episode_all: pd.DataFrame,
-    policy_episode_df: pd.DataFrame,
-    current_practice_episode_df: pd.DataFrame,
-) -> pd.DataFrame:
+    episode_all,
+    policy_episode_df,
+    current_practice_episode_df,
+):
+    """Build policy-level summary estimates."""
     rows = []
+    # Summarise episode-level estimates.
     rows.append(
         summarise_episode_estimates(
             current_practice_episode_df,
@@ -1165,12 +1162,14 @@ def build_policy_summary(
     )
 
     group_cols = ["policy_name", "policy_remove_day"]
+    # Summarise episode-level estimates.
     for policy_values, all_df in episode_all.groupby(group_cols, dropna=False, sort=False):
         policy_name, policy_remove_day = policy_values
         adherent_df = policy_episode_df.loc[
             policy_episode_df["policy_name"].eq(policy_name)
             & policy_episode_df["policy_remove_day"].eq(policy_remove_day)
         ]
+        # Summarise episode-level estimates.
         rows.append(
             summarise_episode_estimates(
                 adherent_df,
@@ -1181,10 +1180,12 @@ def build_policy_summary(
             )
         )
 
+    # Add comparisons against current practice.
     return add_current_practice_comparisons(pd.DataFrame(rows))
 
 
-def add_current_practice_comparisons(summary: pd.DataFrame) -> pd.DataFrame:
+def add_current_practice_comparisons(summary):
+    """Add comparisons against current practice."""
     return pec.add_standard_comparisons(
         summary,
         baseline_label=CURRENT_PRACTICE_LABEL,
@@ -1199,16 +1200,19 @@ def add_current_practice_comparisons(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def clipping_estimate_row(
-    episode_df: pd.DataFrame,
+    episode_df,
     policy_name,
     policy_remove_day,
-    clipping_rule: str,
-    weights: pd.Series,
+    clipping_rule,
+    weights,
     clip_upper_weight,
     support_clip_lower=np.nan,
     support_clip_upper=np.nan,
-) -> dict:
+):
+    """Build one clipping-sensitivity row."""
+    # Return positive finite weights.
     valid_weights = valid_weight_series(weights)
+    # Calculate the effective sample size.
     row = {
         "policy_name": policy_name,
         "policy_remove_day": policy_remove_day,
@@ -1221,11 +1225,15 @@ def clipping_estimate_row(
         "sum_weights": float(valid_weights.sum()) if len(valid_weights) else np.nan,
         "effective_sample_size": effective_sample_size(weights),
     }
+    # Calculate a weighted mean.
     for outcome_name, episode_col in available_outcome_columns(episode_df).items():
+        # Calculate a weighted mean.
         weighted = weighted_mean(episode_df[episode_col], weights)
         row[f"ipw_weighted_{outcome_name}_risk"] = weighted
         row[f"ipw_weighted_{outcome_name}_risk_pct"] = weighted * 100 if pd.notna(weighted) else np.nan
+    # Calculate a weighted mean.
     if "observed_catheter_in_intervals" in episode_df.columns:
+        # Calculate a weighted mean.
         row["ipw_weighted_mean_catheter_in_intervals"] = weighted_mean(
             episode_df["observed_catheter_in_intervals"],
             weights,
@@ -1233,7 +1241,9 @@ def clipping_estimate_row(
         row["ipw_weighted_mean_catheter_in_interval_rows"] = row[
             "ipw_weighted_mean_catheter_in_intervals"
         ]
+    # Calculate a weighted mean.
     if "observed_catheter_exposure_days" in episode_df.columns:
+        # Calculate a weighted mean.
         row["ipw_weighted_mean_catheter_exposure_days"] = weighted_mean(
             episode_df["observed_catheter_exposure_days"],
             weights,
@@ -1242,19 +1252,23 @@ def clipping_estimate_row(
 
 
 def build_clipping_sensitivity(
-    policy_episode_df: pd.DataFrame,
-    clip_lower: float,
-    clip_upper: float,
-) -> pd.DataFrame:
+    policy_episode_df,
+    clip_lower,
+    clip_upper,
+):
+    """Build clipping-sensitivity output."""
     rows = []
     group_cols = ["policy_name", "policy_remove_day"]
+    # Return positive finite weights.
     for policy_values, episode_df in policy_episode_df.groupby(group_cols, dropna=False, sort=False):
         policy_name, policy_remove_day = policy_values
         default_weights = pd.to_numeric(episode_df[WEIGHT_COL], errors="coerce")
         unclipped_weights = pd.to_numeric(episode_df[UNCLIPPED_WEIGHT_COL], errors="coerce")
+        # Return positive finite weights.
         valid_default = valid_weight_series(default_weights)
         p99 = float(valid_default.quantile(0.99)) if len(valid_default) else np.nan
 
+        # Build one clipping-sensitivity row.
         rows.append(
             clipping_estimate_row(
                 episode_df,
@@ -1265,6 +1279,7 @@ def build_clipping_sensitivity(
                 np.nan,
             )
         )
+        # Build one clipping-sensitivity row.
         rows.append(
             clipping_estimate_row(
                 episode_df,
@@ -1277,12 +1292,14 @@ def build_clipping_sensitivity(
                 clip_upper,
             )
         )
+        # Build one clipping-sensitivity row.
         for label, upper in [
             ("upper_weight_clipped_at_p99", p99),
             ("upper_weight_clipped_at_30", 30.0),
             ("upper_weight_clipped_at_20", 20.0),
         ]:
             clipped = default_weights.clip(upper=upper) if pd.notna(upper) else default_weights
+            # Build one clipping-sensitivity row.
             rows.append(
                 clipping_estimate_row(
                     episode_df,
@@ -1299,12 +1316,13 @@ def build_clipping_sensitivity(
 
 
 def metadata_payload(
-    args: argparse.Namespace,
-    output_paths: dict,
-    joined_df: pd.DataFrame,
-    episode_all: pd.DataFrame,
-    policy_episode_df: pd.DataFrame,
-) -> dict:
+    args,
+    output_paths,
+    joined_df,
+    episode_all,
+    policy_episode_df,
+):
+    """Build run metadata."""
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "estimator": "sequential_ipw",
@@ -1361,24 +1379,23 @@ def metadata_payload(
     }
 
 
-# =============================================================================
 # Main
-# =============================================================================
 
 def print_summary(
-    policy_panel_path: Path,
-    scored_panel_path: Path,
-    episode_all: pd.DataFrame,
-    policy_episode_df: pd.DataFrame,
-    current_practice_episode_df: pd.DataFrame,
-    summary_path: Path,
-    episodes_path: Path,
-    weight_diagnostics_path: Path,
-    support_diagnostics_path: Path,
-    clipping_sensitivity_path: Path,
-    current_practice_path: Path,
-    metadata_path: Path,
-) -> None:
+    policy_panel_path,
+    scored_panel_path,
+    episode_all,
+    policy_episode_df,
+    current_practice_episode_df,
+    summary_path,
+    episodes_path,
+    weight_diagnostics_path,
+    support_diagnostics_path,
+    clipping_sensitivity_path,
+    current_practice_path,
+    metadata_path,
+):
+    """Print a concise run summary."""
     n_policies = int(episode_all["policy_name"].nunique()) if "policy_name" in episode_all.columns else 0
     zero_adherent = (
         episode_all.groupby("policy_name")["episode_adherent_to_policy"].sum().loc[lambda s: s == 0].index.tolist()
@@ -1402,33 +1419,51 @@ def print_summary(
     print(f"Saved metadata: {metadata_path}")
 
 
-def main() -> None:
+def main():
+    """Run the script workflow."""
+    # Parse command-line arguments.
     args = parse_args()
     args.outdir.mkdir(exist_ok=True, parents=True)
 
+    # Resolve an output file path.
     summary_path = resolve_output_path(args.outdir, args.output_summary)
+    # Resolve an output file path.
     episodes_path = resolve_output_path(args.outdir, args.output_episodes)
+    # Resolve an output file path.
     weight_diagnostics_path = resolve_output_path(args.outdir, args.output_weight_diagnostics)
+    # Resolve an output file path.
     support_diagnostics_path = resolve_output_path(args.outdir, args.output_support_diagnostics)
+    # Resolve an output file path.
     clipping_sensitivity_path = resolve_output_path(args.outdir, args.output_clipping_sensitivity)
+    # Resolve an output file path.
     current_practice_path = resolve_output_path(args.outdir, args.output_current_practice)
+    # Resolve an output file path.
     metadata_path = resolve_output_path(args.outdir, args.output_metadata)
 
+    # Load and validate the policy panel.
     policy_df = load_policy_panel(args.policy_panel)
+    # Load and validate the scored nuisance panel.
     scored_df = load_scored_panel(args.scored_panel)
 
+    # Join nuisance scores to policy rows.
     joined_df = join_scored_panel(policy_df, scored_df)
     joined_df = pec.add_period_duration_days(joined_df, context="joined IPW policy rows")
     joined_df = pec.add_observed_icu_exit_alive_period(joined_df)
+    # Add row-level IPW quantities.
     joined_df = add_ipw_row_quantities(joined_df, args.clip_lower, args.clip_upper)
+    # Add cumulative policy-adherence flags.
     joined_df = add_adherence(joined_df)
 
+    # Build support diagnostic output.
     support_diagnostics_df = build_support_diagnostics(joined_df)
+    # Build adherent policy-episode outcomes.
     episode_all, policy_episode_df = build_policy_episode_panel(
         joined_df,
         args.zero_applicable_policy_episodes,
     )
+    # Order episode-level output columns.
     episode_all = order_episode_columns(episode_all)
+    # Order episode-level output columns.
     policy_episode_df = order_episode_columns(policy_episode_df)
 
     if policy_episode_df.empty:
@@ -1437,6 +1472,7 @@ def main() -> None:
             "assessment. Support and weight diagnostics cannot produce policy estimates."
         )
 
+    # Build observed current-practice episode outcomes.
     current_practice_episode_df = build_current_practice_episode_panel(scored_df, policy_df)
     output_episode_df = pd.concat(
         [current_practice_episode_df, policy_episode_df],
@@ -1444,12 +1480,15 @@ def main() -> None:
         sort=False,
     )
 
+    # Build policy-level summary estimates.
     summary_df = build_policy_summary(
         episode_all,
         policy_episode_df,
         current_practice_episode_df,
     )
+    # Build weight diagnostic output.
     weight_diagnostics_df = build_weight_diagnostics(episode_all, policy_episode_df)
+    # Build clipping-sensitivity output.
     clipping_sensitivity_df = build_clipping_sensitivity(
         policy_episode_df,
         args.clip_lower,
@@ -1471,17 +1510,25 @@ def main() -> None:
         "metadata": metadata_path,
     }
 
+    # Save a data frame as CSV.
     save_df(output_episode_df, episodes_path)
+    # Save a data frame as CSV.
     save_df(summary_df, summary_path)
+    # Save a data frame as CSV.
     save_df(weight_diagnostics_df, weight_diagnostics_path)
+    # Save a data frame as CSV.
     save_df(support_diagnostics_df, support_diagnostics_path)
+    # Save a data frame as CSV.
     save_df(clipping_sensitivity_df, clipping_sensitivity_path)
+    # Save a data frame as CSV.
     save_df(current_practice_episode_df, current_practice_path)
+    # Build run metadata.
     pec.save_json(
         metadata_payload(args, output_paths, joined_df, episode_all, policy_episode_df),
         metadata_path,
     )
 
+    # Print a concise run summary.
     print_summary(
         args.policy_panel,
         args.scored_panel,
@@ -1498,5 +1545,7 @@ def main() -> None:
     )
 
 
+# Run the script workflow.
 if __name__ == "__main__":
+    # Run the script workflow.
     main()

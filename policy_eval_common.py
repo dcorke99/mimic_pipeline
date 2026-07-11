@@ -1,16 +1,9 @@
-"""Shared utilities for catheter-removal policy-evaluation scripts.
+"""Share estimator-agnostic helpers for policy-evaluation scripts."""
 
-The three estimator scripts keep separate estimator-specific logic, but share
-basic definitions for period duration, ICU-exit-alive outcomes, bootstrap
-metadata placeholders, current-practice comparisons, and overlap-quality flags.
-"""
-
-from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -40,13 +33,8 @@ TARGET_POLICY_TIMELINE_SEMANTICS = (
 )
 
 
-def add_bootstrap_args(parser: argparse.ArgumentParser) -> None:
-    """Add common clustered-bootstrap arguments.
-
-    Bootstrap confidence intervals are intentionally not implemented in these
-    scripts yet. The arguments are accepted and recorded in metadata so future
-    patient-clustered uncertainty can be added without changing the CLI.
-    """
+def add_bootstrap_args(parser):
+    """Add bootstrap-related command-line arguments."""
     parser.add_argument(
         "--n-bootstrap",
         type=int,
@@ -66,7 +54,8 @@ def add_bootstrap_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def bootstrap_metadata(args: argparse.Namespace, available_columns: Iterable[str]) -> dict:
+def bootstrap_metadata(args, available_columns):
+    """Record bootstrap settings in metadata."""
     cluster_col = getattr(args, "cluster_col", "subject_id")
     n_bootstrap = int(getattr(args, "n_bootstrap", 0))
     return {
@@ -83,7 +72,8 @@ def bootstrap_metadata(args: argparse.Namespace, available_columns: Iterable[str
     }
 
 
-def save_json(payload: dict, path: Path) -> None:
+def save_json(payload, path):
+    """Save a dictionary as JSON."""
     path.parent.mkdir(exist_ok=True, parents=True)
     import json
 
@@ -91,22 +81,12 @@ def save_json(payload: dict, path: Path) -> None:
 
 
 def add_period_duration_days(
-    df: pd.DataFrame,
+    df,
     *,
-    context: str,
-    max_reasonable_days: float = MAX_REASONABLE_PERIOD_DURATION_DAYS,
-) -> pd.DataFrame:
-    """Add period_duration_days and validate the row interval.
-
-    Non-positive or unparsable durations are fatal because all exposure
-    estimands depend on valid time intervals. Very long intervals are flagged
-    and warned about rather than silently ignored.
-    """
-    required = ["period_start", "period_end"]
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        raise ValueError(f"Cannot calculate period durations for {context}; missing columns: {missing}")
-
+    context,
+    max_reasonable_days=MAX_REASONABLE_PERIOD_DURATION_DAYS,
+):
+    """Add period duration in days."""
     out = df.copy()
     start = pd.to_datetime(out["period_start"], errors="coerce")
     end = pd.to_datetime(out["period_end"], errors="coerce")
@@ -132,8 +112,8 @@ def add_period_duration_days(
     return out
 
 
-def add_observed_icu_exit_alive_period(df: pd.DataFrame) -> pd.DataFrame:
-    """Add observed_icu_exit_alive_in_period with death taking precedence."""
+def add_observed_icu_exit_alive_period(df):
+    """Add ICU-exit-alive outcome flags."""
     out = df.copy()
     death = (
         pd.to_numeric(out["death_in_period"], errors="coerce").fillna(0)
@@ -151,46 +131,22 @@ def add_observed_icu_exit_alive_period(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_fixed_day_target_policy_timeline(
-    df: pd.DataFrame,
+    df,
     *,
-    episode_id_col: str,
-    action_col: str = "policy_action_resolved",
-    action_remove_col: str = "policy_action_remove_resolved",
-    policy_name_col: str = "policy_name",
-    policy_remove_day_col: str = "policy_remove_day",
-    episode_day_col: str = "episode_day_since_insertion",
-    period_start_col: str = "period_start",
-    period_end_col: str = "period_end",
-    decision_row_id_col: str = "decision_row_id",
-    state_col: str = "policy_catheter_state",
-    periods_in_col: str = "policy_periods_in",
-    periods_out_col: str = "policy_periods_out",
-) -> pd.DataFrame:
-    """Apply the shared fixed-day catheter-removal target-policy timeline.
-
-    Transition-day convention:
-      * before policy removal day: IN / keep;
-      * first row on policy removal day: IN / remove;
-      * later rows on policy removal day: OUT / out with periods_out = 0;
-      * after policy removal day: OUT / out.
-
-    This handles observed-grid panels where a single calendar/episode day can
-    contain split within-day intervals, for example an IN row before removal and
-    an OUT row after removal.
-    """
-    required = [
-        policy_name_col,
-        episode_id_col,
-        episode_day_col,
-        policy_remove_day_col,
-        period_start_col,
-        period_end_col,
-        decision_row_id_col,
-    ]
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        raise ValueError(f"Cannot build fixed-day target-policy timeline; missing columns: {missing}")
-
+    episode_id_col,
+    action_col="policy_action_resolved",
+    action_remove_col="policy_action_remove_resolved",
+    policy_name_col="policy_name",
+    policy_remove_day_col="policy_remove_day",
+    episode_day_col="episode_day_since_insertion",
+    period_start_col="period_start",
+    period_end_col="period_end",
+    decision_row_id_col="decision_row_id",
+    state_col="policy_catheter_state",
+    periods_in_col="policy_periods_in",
+    periods_out_col="policy_periods_out",
+):
+    """Add the resolved fixed-day policy timeline."""
     out = df.copy()
     out = out.sort_values(
         [
@@ -244,28 +200,14 @@ def add_fixed_day_target_policy_timeline(
 
 
 def resolved_timeline_diagnostics(
-    df: pd.DataFrame,
+    df,
     *,
-    episode_id_col: str = "catheter_episode_id",
-    policy_name_col: str = "policy_name",
-    policy_remove_day_col: str = "policy_remove_day",
-    episode_day_col: str = "episode_day_since_insertion",
-) -> pd.DataFrame:
-    """Summarise fixed-day resolved target-policy timeline safety diagnostics."""
-    required = [
-        policy_name_col,
-        episode_id_col,
-        policy_remove_day_col,
-        episode_day_col,
-        "policy_catheter_state",
-        "policy_action_resolved",
-        "policy_action_remove_resolved",
-        "policy_removal_day_extra_row_treated_as_out",
-    ]
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        raise ValueError(f"Resolved target-policy timeline is missing required columns: {missing}")
-
+    episode_id_col="catheter_episode_id",
+    policy_name_col="policy_name",
+    policy_remove_day_col="policy_remove_day",
+    episode_day_col="episode_day_since_insertion",
+):
+    """Summarise resolved timeline diagnostics."""
     rows = []
     for policy_name, policy_df in df.groupby(policy_name_col, dropna=False, sort=False):
         remove_day = pd.to_numeric(policy_df[policy_remove_day_col], errors="coerce").dropna()
@@ -309,27 +251,12 @@ def resolved_timeline_diagnostics(
 
 
 def validate_resolved_target_policy_timeline(
-    df: pd.DataFrame,
+    df,
     *,
-    episode_id_col: str = "catheter_episode_id",
-    context: str = "policy_intervention_panel_long.csv",
-) -> None:
-    """Fail fast if the resolved target-policy timeline is internally unsafe."""
-    required = [
-        "episode_day_since_insertion",
-        *RESOLVED_TIMELINE_COLUMNS,
-        "policy_removal_day_extra_row_treated_as_out",
-        "policy_name",
-        "policy_remove_day",
-        episode_id_col,
-    ]
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        raise ValueError(
-            f"{context} is missing resolved target-policy timeline columns: {missing}. "
-            "Rebuild it with build_policy_intervention_panels.py."
-        )
-
+    episode_id_col="catheter_episode_id",
+    context="policy_intervention_panel_long.csv",
+):
+    """Validate the resolved policy timeline."""
     state = df["policy_catheter_state"].astype("string").str.strip().str.lower()
     action = df["policy_action_resolved"].astype("string").str.strip().str.lower()
     action_remove = pd.to_numeric(df["policy_action_remove_resolved"], errors="coerce")
@@ -361,6 +288,7 @@ def validate_resolved_target_policy_timeline(
             f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
         )
 
+    # Summarise resolved timeline diagnostics.
     diagnostics = resolved_timeline_diagnostics(df, episode_id_col=episode_id_col)
     too_many = diagnostics["n_episodes_with_more_than_one_remove_row"].gt(0)
     shortfall = diagnostics["n_policy_remove_row_shortfall_vs_reached_episodes"].ne(0)
@@ -374,14 +302,15 @@ def validate_resolved_target_policy_timeline(
 
 
 def attach_resolved_timeline_aliases(
-    df: pd.DataFrame,
+    df,
     *,
-    action_col: str,
-    action_remove_col: str,
-    episode_id_col: str = "catheter_episode_id",
-    context: str = "policy_intervention_panel_long.csv",
-) -> pd.DataFrame:
-    """Copy authoritative resolved policy timeline columns into estimator aliases."""
+    action_col,
+    action_remove_col,
+    episode_id_col="catheter_episode_id",
+    context="policy_intervention_panel_long.csv",
+):
+    """Attach estimator aliases for resolved timeline columns."""
+    # Validate the resolved policy timeline.
     validate_resolved_target_policy_timeline(
         df,
         episode_id_col=episode_id_col,
@@ -400,14 +329,14 @@ def attach_resolved_timeline_aliases(
 
 
 def catheter_exposure_aggregation(
-    df: pd.DataFrame,
-    group_cols: list[str],
+    df,
+    group_cols,
     *,
-    state_col: str,
-    row_count_col: str,
-    exposure_col: str,
-) -> pd.DataFrame:
-    """Aggregate IN-row counts and duration-based catheter exposure."""
+    state_col,
+    row_count_col,
+    exposure_col,
+):
+    """Aggregate catheter-in intervals and exposure days."""
     in_mask = df[state_col].astype("string").str.lower().eq("in")
     temp = df[[*group_cols, "period_duration_days"]].copy()
     temp["__in_row"] = in_mask.astype(int)
@@ -421,23 +350,22 @@ def catheter_exposure_aggregation(
 
 
 def duplicate_episode_day_count(
-    df: pd.DataFrame,
-    group_cols: list[str],
-    day_col: str = "episode_day_since_insertion",
-) -> int:
-    if day_col not in df.columns:
-        return 0
+    df,
+    group_cols,
+    day_col="episode_day_since_insertion",
+):
+    """Count duplicate episode-day rows."""
     duplicated = df.duplicated([*group_cols, day_col], keep=False)
     return int(duplicated.sum())
 
 
 def add_standard_comparisons(
-    summary: pd.DataFrame,
+    summary,
     *,
-    baseline_label: str,
-    comparison_map: dict[str, str],
-) -> pd.DataFrame:
-    """Add standard difference/percentage-point/ratio columns vs current practice."""
+    baseline_label,
+    comparison_map,
+):
+    """Add standard comparisons against current practice."""
     baseline_rows = summary.loc[summary["policy_name"].eq(baseline_label)]
     if baseline_rows.empty:
         return summary
@@ -463,13 +391,13 @@ def add_standard_comparisons(
 
 
 def add_overlap_quality_flags(
-    summary: pd.DataFrame,
+    summary,
     *,
-    support_diagnostics: pd.DataFrame | None = None,
-    weight_diagnostics: pd.DataFrame | None = None,
-    current_practice_label: str = "current_practice",
-) -> pd.DataFrame:
-    """Add low-support/low-ESS/extreme-weight warning flags."""
+    support_diagnostics=None,
+    weight_diagnostics=None,
+    current_practice_label="current_practice",
+):
+    """Add overlap quality flags."""
     out = summary.copy()
     if "pct_adherent_episodes" in out.columns:
         out["low_adherence_flag"] = out["pct_adherent_episodes"].lt(LOW_ADHERENCE_THRESHOLD)

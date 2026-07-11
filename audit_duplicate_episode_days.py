@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-Audit duplicate episode-day rows in the catheter patient-day panel.
-
-This checks whether the input panel has more than one row per:
-catheter_episode_id × episode_day_since_insertion
-
-It also checks whether those rows are exact duplicate intervals or different
-within-day intervals.
-"""
+"""Audit duplicate episode-day rows in the catheter panel."""
 
 from pathlib import Path
 import argparse
@@ -20,28 +12,19 @@ DEFAULT_OUTDIR = Path("artifacts/diagnostics/duplicate_episode_days")
 
 
 def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-panel", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
     return parser.parse_args()
 
 
-def require_columns(df, cols):
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-
-
 def add_episode_day_since_insertion(df):
+    """Add episode day since catheter insertion."""
     df = df.copy()
 
     inserted = pd.to_datetime(df["inserted"], errors="coerce")
     period_start = pd.to_datetime(df["period_start"], errors="coerce")
-
-    bad = inserted.isna() | period_start.isna()
-    if bad.any():
-        examples = df.loc[bad, ["inserted", "period_start"]].head(20)
-        raise ValueError(f"Could not parse inserted/period_start. Examples:\n{examples}")
 
     elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
     df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
@@ -51,21 +34,13 @@ def add_episode_day_since_insertion(df):
 
 
 def main():
+    """Run the script workflow."""
+    # Parse command-line arguments.
     args = parse_args()
     args.outdir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(args.input_panel, low_memory=False)
     df.columns = df.columns.str.strip()
-
-    required = [
-        "subject_id",
-        "hadm_id",
-        "stay_id",
-        "inserted",
-        "period_start",
-        "period_end",
-    ]
-    require_columns(df, required)
 
     if "catheter_episode_id" not in df.columns:
         episode_key_cols = ["subject_id", "hadm_id", "stay_id", "inserted"]
@@ -76,6 +51,7 @@ def main():
             sort=True,
         )[0] + 1
 
+    # Add episode day since catheter insertion.
     df = add_episode_day_since_insertion(df)
 
     # Main duplicate check: more than one row per episode-day
@@ -175,5 +151,7 @@ def main():
     print(args.outdir / "duplicate_episode_day_rows.csv")
 
 
+# Run the script workflow.
 if __name__ == "__main__":
+    # Run the script workflow.
     main()

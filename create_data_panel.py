@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
-"""
-Create the full modeling data panel for the CAUTI catheter-removal pipeline.
+"""Create the modelling data panel for the catheter-removal pipeline."""
 
-This script consolidates the original panel-building scripts while preserving
-the same logical development flow and intermediate outputs.
-
-The code is organised as a single readable pipeline:
-- define the catheter episode cohort and base row-level panel
-- extract, preprocess, filter, validate, and clean chart-event covariates
-- aggregate cleaned covariates onto the base panel
-- retain usable covariates and create the train/test split
-- write the final modeling panel, feature spec, and covariate dictionary
-"""
-
-from __future__ import annotations
 
 import argparse
 import json
@@ -28,9 +15,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 
-# =============================================================================
 # Configuration
-# =============================================================================
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_MIMIC_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1")
@@ -56,8 +41,8 @@ VALUE_COL = "valuenum"
 MIN_N_FOR_RULES = 100
 ZERO_MAX_FRAC = 0.10
 FAR_OUT_SPREAD_MULT = 3.0
-ALWAYS_ZERO_TO_MISSING: set[int] = set()
-NEVER_ZERO_TO_MISSING: set[int] = set()
+ALWAYS_ZERO_TO_MISSING = set()
+NEVER_ZERO_TO_MISSING = set()
 
 AGG_STATS = [
     "count",
@@ -94,101 +79,122 @@ END_REASON_COL = "episode_end_reason"
 
 @dataclass(frozen=True)
 class PanelBuildConfig:
+    """Store paths and options for panel construction."""
     repo_root: Path
     mimic_dir: Path
     data_dir: Path
     config_dir: Path
 
     @property
-    def d_items_path(self) -> Path:
+    def d_items_path(self):
+        """Return the D items path."""
         return self.mimic_dir / "icu" / "d_items.csv"
 
     @property
-    def required_episodes_file(self) -> Path:
+    def required_episodes_file(self):
+        """Return the required episodes file path."""
         return self.data_dir / "required_catheter_episodes.csv"
 
     @property
-    def base_panel_file(self) -> Path:
+    def base_panel_file(self):
+        """Return the base panel file path."""
         return self.data_dir / "base_panel.csv"
 
     @property
-    def raw_chart_file(self) -> Path:
+    def raw_chart_file(self):
+        """Return the raw chart file path."""
         return self.data_dir / "raw_chart_covariates.csv"
 
     @property
-    def raw_chart_sample_file(self) -> Path:
+    def raw_chart_sample_file(self):
+        """Return the raw chart sample file path."""
         return self.data_dir / "raw_chart_covariates__first_1000_rows.csv"
 
     @property
-    def preprocessed_chart_file(self) -> Path:
+    def preprocessed_chart_file(self):
+        """Return the preprocessed chart file path."""
         return self.data_dir / "preprocessed_raw_chart_covariates.csv"
 
     @property
-    def preprocessed_chart_sample_file(self) -> Path:
+    def preprocessed_chart_sample_file(self):
+        """Return the preprocessed chart sample file path."""
         return self.data_dir / "preprocessed_raw_chart_covariates__first_1000_rows.csv"
 
     @property
-    def kept_preprocessed_chart_file(self) -> Path:
+    def kept_preprocessed_chart_file(self):
+        """Return the kept preprocessed chart file path."""
         return self.data_dir / "preprocessed_raw_chart_covariates_kept.csv"
 
     @property
-    def kept_preprocessed_chart_sample_file(self) -> Path:
+    def kept_preprocessed_chart_sample_file(self):
+        """Return the kept preprocessed chart sample file path."""
         return self.data_dir / "preprocessed_raw_chart_covariates_kept__first_1000_rows.csv"
 
     @property
-    def cleaned_chart_file(self) -> Path:
+    def cleaned_chart_file(self):
+        """Return the cleaned chart file path."""
         return self.data_dir / "cleaned_chart_covariates.csv"
 
     @property
-    def cleaning_rules_file(self) -> Path:
+    def cleaning_rules_file(self):
+        """Return the cleaning rules file path."""
         return self.data_dir / "chart_covariate_cleaning_rules.csv"
 
     @property
-    def cleaning_audit_file(self) -> Path:
+    def cleaning_audit_file(self):
+        """Return the cleaning audit file path."""
         return self.data_dir / "chart_covariate_cleaning_audit.csv"
 
     @property
-    def master_panel_file(self) -> Path:
+    def master_panel_file(self):
+        """Return the master panel file path."""
         return self.data_dir / "master_panel.csv"
 
     @property
-    def covariate_retention_log_file(self) -> Path:
+    def covariate_retention_log_file(self):
+        """Return the covariate retention log file path."""
         return self.data_dir / "covariate_retention_log.csv"
 
     @property
-    def filtered_panel_file(self) -> Path:
+    def filtered_panel_file(self):
+        """Return the filtered panel file path."""
         return self.data_dir / "filtered_panel.csv"
 
     @property
-    def train_test_split_file(self) -> Path:
+    def train_test_split_file(self):
+        """Return the train test split file path."""
         return self.data_dir / "train_test_split.csv"
 
     @property
-    def modeling_panel_file(self) -> Path:
+    def modeling_panel_file(self):
+        """Return the modelling panel file path."""
         return self.data_dir / "modeling_panel.csv"
 
     @property
-    def feature_spec_file(self) -> Path:
+    def feature_spec_file(self):
+        """Return the feature spec file path."""
         return self.data_dir / "feature_spec.json"
 
     @property
-    def covariate_dictionary_file(self) -> Path:
+    def covariate_dictionary_file(self):
+        """Return the covariate dictionary file path."""
         return self.data_dir / "covariate_dictionary.csv"
 
     @property
-    def d_items_keep_file(self) -> Path:
+    def d_items_keep_file(self):
+        """Return the D items keep file path."""
         return self.config_dir / "d_items_keep.csv"
 
     @property
-    def bounds_file(self) -> Path:
+    def bounds_file(self):
+        """Return the bounds file path."""
         return self.data_dir / "panel_covariate_bounds.csv"
 
 
-# =============================================================================
 # Generic helpers
-# =============================================================================
 
-def remove_if_exists(path: Path) -> None:
+def remove_if_exists(path):
+    """Remove if exists."""
     try:
         if path.exists():
             path.unlink()
@@ -200,7 +206,8 @@ def remove_if_exists(path: Path) -> None:
         ) from exc
 
 
-def replace_output(tmp_path: Path, final_path: Path) -> None:
+def replace_output(tmp_path, final_path):
+    """Replace output."""
     try:
         tmp_path.replace(final_path)
     except PermissionError as exc:
@@ -212,10 +219,8 @@ def replace_output(tmp_path: Path, final_path: Path) -> None:
         ) from exc
 
 
-def load_item_labels(d_items_path: Path) -> dict[int, str]:
-    if not d_items_path.exists():
-        raise FileNotFoundError(f"d_items file not found: {d_items_path}")
-
+def load_item_labels(d_items_path):
+    """Load item labels."""
     d_items_df = pd.read_csv(d_items_path, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
     d_items_df["itemid"] = pd.to_numeric(d_items_df["itemid"], errors="coerce")
     d_items_df = d_items_df.dropna(subset=["itemid"]).copy()
@@ -224,17 +229,14 @@ def load_item_labels(d_items_path: Path) -> dict[int, str]:
     return d_items_df.set_index("itemid")["label"].to_dict()
 
 
-def load_bounds(bounds_file: Path) -> dict[int, tuple[float, float]]:
-    by_itemid: dict[int, tuple[float, float]] = {}
+def load_bounds(bounds_file):
+    """Load bounds."""
+    by_itemid = {}
 
     if not bounds_file.exists():
         return by_itemid
 
     bounds_df = pd.read_csv(bounds_file)
-    required_cols = {"itemid", "lower_bound", "upper_bound"}
-    if not required_cols.issubset(bounds_df.columns):
-        raise ValueError(f"Bounds file is missing required columns: {sorted(required_cols)}")
-
     bounds_rows = bounds_df[["itemid", "lower_bound", "upper_bound"]].copy()
     bounds_rows["itemid"] = pd.to_numeric(bounds_rows["itemid"], errors="coerce")
     bounds_rows["lower_bound"] = pd.to_numeric(bounds_rows["lower_bound"], errors="coerce")
@@ -249,23 +251,24 @@ def load_bounds(bounds_file: Path) -> dict[int, tuple[float, float]]:
     return by_itemid
 
 
-def print_section(title: str) -> float:
+def print_section(title):
+    """Print section."""
     print()
     print(f"=== {title} ===")
     print(time.strftime("Start: %Y-%m-%d %H:%M:%S"))
     return time.time()
 
 
-def print_section_done(start_time: float) -> None:
+def print_section_done(start_time):
+    """Print section done."""
     print(time.strftime("Done:  %Y-%m-%d %H:%M:%S"))
     print(f"Elapsed: {time.time() - start_time:.1f}s")
 
 
-# =============================================================================
 # Catheter episode cohort and base panel
-# =============================================================================
 
 def map_ethnicity_group(value):
+    """Map ethnicity group."""
     if pd.isna(value):
         return "Unknown"
     ethnicity_text = str(value).upper()
@@ -282,7 +285,8 @@ def map_ethnicity_group(value):
     return "Other"
 
 
-def merge_overlapping_foley_events(df: pd.DataFrame) -> pd.DataFrame:
+def merge_overlapping_foley_events(df):
+    """Merge overlapping foley events."""
     episodes = []
 
     for stay_id, stay_events in df.groupby("stay_id"):
@@ -312,7 +316,8 @@ def merge_overlapping_foley_events(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(episodes, columns=["stay_id", "inserted", "removed"])
 
 
-def build_required_catheter_episodes(mimic_dir: Path) -> pd.DataFrame:
+def build_required_catheter_episodes(mimic_dir):
+    """Build required catheter episodes."""
     icu = pd.read_csv(
         mimic_dir / "icu" / "icustays.csv",
         usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime"],
@@ -372,6 +377,7 @@ def build_required_catheter_episodes(mimic_dir: Path) -> pd.DataFrame:
     procedure_events = procedure_events.dropna(subset=["inserted", "removed", "ICU_in", "ICU_out"]).copy()
     procedure_events = procedure_events.sort_values(["stay_id", "inserted"])
 
+    # Merge overlapping foley events.
     collapsed = merge_overlapping_foley_events(procedure_events)
     catheterised = collapsed.merge(
         icu[[
@@ -425,6 +431,7 @@ def build_required_catheter_episodes(mimic_dir: Path) -> pd.DataFrame:
 
 
 def make_state_windows(state_start, state_end):
+    """Make state windows."""
     if pd.isna(state_start) or pd.isna(state_end) or state_end <= state_start:
         return []
 
@@ -442,10 +449,13 @@ def make_state_windows(state_start, state_end):
     return rows
 
 
-def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
+def build_base_panel(catheterised):
+    """Build base panel."""
     rows = []
 
+    # Make state windows.
     for episode in catheterised.itertuples():
+        # Make state windows.
         for state_idx, period_start, period_end, interval_hours in make_state_windows(episode.inserted, episode.removed):
             rows.append({
                 "subject_id": episode.subject_id,
@@ -469,6 +479,7 @@ def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
             })
 
         out_state_end = episode.reinsertion_time if pd.notna(episode.reinsertion_time) else episode.ICU_out
+        # Make state windows.
         for state_idx, period_start, period_end, interval_hours in make_state_windows(episode.removed, out_state_end):
             rows.append({
                 "subject_id": episode.subject_id,
@@ -608,9 +619,12 @@ def build_base_panel(catheterised: pd.DataFrame) -> pd.DataFrame:
     return panel[[c for c in ordered_cols if c in non_ethnicity_cols or c in ethnicity_cols]]
 
 
-def create_episode_cohort_and_base_panel(config: PanelBuildConfig) -> None:
+def create_episode_cohort_and_base_panel(config):
+    """Create episode cohort and base panel."""
     config.data_dir.mkdir(exist_ok=True, parents=True)
+    # Build required catheter episodes.
     episodes = build_required_catheter_episodes(config.mimic_dir)
+    # Build base panel.
     base_panel = build_base_panel(episodes)
 
     episode_export = episodes[
@@ -637,11 +651,10 @@ def create_episode_cohort_and_base_panel(config: PanelBuildConfig) -> None:
     print("Base panel rows:", len(base_panel))
 
 
-# =============================================================================
 # Raw chart-event extraction
-# =============================================================================
 
-def build_chart_extraction_windows(episodes: pd.DataFrame, lookback_hours: int = LOOKBACK_HOURS) -> pd.DataFrame:
+def build_chart_extraction_windows(episodes, lookback_hours=LOOKBACK_HOURS):
+    """Build chart extraction windows."""
     windows = episodes.copy()
     window_end = windows["reinsertion_time"].where(windows["reinsertion_time"].notna(), windows["ICU_out"])
     window_start = windows["inserted"] - pd.Timedelta(hours=lookback_hours)
@@ -676,11 +689,13 @@ def build_chart_extraction_windows(episodes: pd.DataFrame, lookback_hours: int =
     return pd.DataFrame(merged_windows, columns=["stay_id", "window_start", "window_end"])
 
 
-def extract_raw_chart_covariates(config: PanelBuildConfig) -> None:
+def extract_raw_chart_covariates(config):
+    """Extract raw chart covariates."""
     episodes = pd.read_csv(config.required_episodes_file, low_memory=False)
     for col in ["inserted", "removed", "reinsertion_time", "ICU_in", "ICU_out"]:
         episodes[col] = pd.to_datetime(episodes[col], errors="coerce")
 
+    # Build chart extraction windows.
     windows = build_chart_extraction_windows(episodes)
 
     print("[CONFIG]", config.mimic_dir)
@@ -694,7 +709,9 @@ def extract_raw_chart_covariates(config: PanelBuildConfig) -> None:
     ]
 
     config.data_dir.mkdir(exist_ok=True)
+    # Remove if exists.
     remove_if_exists(config.raw_chart_file)
+    # Remove if exists.
     remove_if_exists(config.raw_chart_sample_file)
 
     stay_ids = set(windows["stay_id"].dropna().astype(int).unique())
@@ -761,23 +778,26 @@ def extract_raw_chart_covariates(config: PanelBuildConfig) -> None:
     print("Rows:", kept_rows_total)
 
 
-# =============================================================================
 # Chart covariate preprocessing and allowlist filtering
-# =============================================================================
 
-def fahrenheit_to_celsius(values: pd.Series) -> pd.Series:
+def fahrenheit_to_celsius(values):
+    """Convert to celsius."""
     return (values - 32.0) * (5.0 / 9.0)
 
 
-def preprocess_raw_chart_covariates(config: PanelBuildConfig) -> None:
+def preprocess_raw_chart_covariates(config):
+    """Preprocess raw chart covariates."""
     config.data_dir.mkdir(exist_ok=True, parents=True)
+    # Remove if exists.
     remove_if_exists(config.preprocessed_chart_file)
+    # Remove if exists.
     remove_if_exists(config.preprocessed_chart_sample_file)
 
     first_write = True
     converted_rows_total = 0
     sample_rows_written = 0
 
+    # Convert to celsius.
     for chunk_idx, chunk in enumerate(
         pd.read_csv(config.raw_chart_file, chunksize=CHUNK_ROWS, low_memory=False),
         start=1,
@@ -786,16 +806,20 @@ def preprocess_raw_chart_covariates(config: PanelBuildConfig) -> None:
         itemids = pd.to_numeric(chunk["itemid"], errors="coerce")
         fahrenheit_mask = unit_clean.isin(FAHRENHEIT_UNITS) | itemids.eq(TEMP_F_ITEMID)
 
+        # Convert to celsius.
         if fahrenheit_mask.any():
             chunk.loc[fahrenheit_mask, "valuenum"] = pd.to_numeric(
                 chunk.loc[fahrenheit_mask, "valuenum"],
                 errors="coerce",
             )
+            # Convert to celsius.
             chunk.loc[fahrenheit_mask, "valuenum"] = fahrenheit_to_celsius(chunk.loc[fahrenheit_mask, "valuenum"])
 
             numeric_value = pd.to_numeric(chunk.loc[fahrenheit_mask, "value"], errors="coerce")
             numeric_mask = numeric_value.notna()
+            # Convert to celsius.
             if numeric_mask.any():
+                # Convert to celsius.
                 converted_value = fahrenheit_to_celsius(numeric_value.loc[numeric_mask]).round(3)
                 chunk.loc[numeric_value.loc[numeric_mask].index, "value"] = converted_value.astype(str)
 
@@ -832,22 +856,27 @@ def preprocess_raw_chart_covariates(config: PanelBuildConfig) -> None:
     print("Converted rows:", converted_rows_total)
 
 
-def load_keep_itemids(config: PanelBuildConfig) -> set[int]:
+def load_keep_itemids(config):
+    """Load keep item IDs."""
     keep_df = pd.read_csv(config.d_items_keep_file, usecols=["itemid"], low_memory=False)
     keep_df["itemid"] = pd.to_numeric(keep_df["itemid"], errors="coerce")
     keep_df = keep_df.dropna(subset=["itemid"]).copy()
     return set(keep_df["itemid"].astype(int))
 
 
-def filter_preprocessed_chart_covariates(config: PanelBuildConfig) -> None:
+def filter_preprocessed_chart_covariates(config):
+    """Filter preprocessed chart covariates."""
     config.data_dir.mkdir(exist_ok=True, parents=True)
 
+    # Load keep item IDs.
     keep_itemids = load_keep_itemids(config)
     tmp_outfile = config.kept_preprocessed_chart_file.with_suffix(config.kept_preprocessed_chart_file.suffix + ".writing")
     tmp_sample_outfile = config.kept_preprocessed_chart_sample_file.with_suffix(
         config.kept_preprocessed_chart_sample_file.suffix + ".writing"
     )
+    # Remove if exists.
     remove_if_exists(tmp_outfile)
+    # Remove if exists.
     remove_if_exists(tmp_sample_outfile)
 
     first_write = True
@@ -887,9 +916,12 @@ def filter_preprocessed_chart_covariates(config: PanelBuildConfig) -> None:
         header.to_csv(tmp_outfile, index=False)
         print(f"[WARN] no rows matched d_items_keep.csv; wrote empty file with headers: {config.kept_preprocessed_chart_file}")
 
+    # Replace output.
     replace_output(tmp_outfile, config.kept_preprocessed_chart_file)
     print(f"[SAVE] {config.kept_preprocessed_chart_file}")
+    # Replace output.
     if tmp_sample_outfile.exists():
+        # Replace output.
         replace_output(tmp_sample_outfile, config.kept_preprocessed_chart_sample_file)
         print(f"[SAVE SAMPLE] {config.kept_preprocessed_chart_sample_file}")
     print(f"[INFO] rows read: {read_rows_total:,}")
@@ -897,18 +929,17 @@ def filter_preprocessed_chart_covariates(config: PanelBuildConfig) -> None:
     print(f"[INFO] rows dropped: {read_rows_total - kept_rows_total:,}")
 
 
-# =============================================================================
 # Chart covariate validation
-# =============================================================================
 
 def build_chart_value_audit_from_parts(
-    value_parts: dict[int, list[pd.Series]],
-    row_counts: dict[int, int],
-    unit_counts_by_itemid: dict[int, dict[str, int]],
-    itemid_to_label: dict[int, str],
-    bounds_by_itemid: dict[int, tuple[float, float]],
-) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
+    value_parts,
+    row_counts,
+    unit_counts_by_itemid,
+    itemid_to_label,
+    bounds_by_itemid,
+):
+    """Build chart value audit from parts."""
+    rows = []
 
     for itemid in sorted(row_counts):
         non_missing = (
@@ -984,9 +1015,10 @@ def build_chart_value_audit_from_parts(
 
 
 def build_unit_audit_from_parts(
-    unit_counts_by_itemid: dict[int, dict[str, int]],
-    itemid_to_label: dict[int, str],
-) -> pd.DataFrame:
+    unit_counts_by_itemid,
+    itemid_to_label,
+):
+    """Build unit audit from parts."""
     rows = []
     for itemid in sorted(unit_counts_by_itemid):
         for unit, n_rows in unit_counts_by_itemid[itemid].items():
@@ -1008,16 +1040,14 @@ def build_unit_audit_from_parts(
 
 
 def validate_chart_covariates(
-    data_file: Path,
-    outdir: Path,
-    d_items_path: Path,
-    bounds_file: Path,
-    output_prefix: str,
-) -> None:
+    data_file,
+    outdir,
+    d_items_path,
+    bounds_file,
+    output_prefix,
+):
+    """Validate chart covariates."""
     outdir.mkdir(exist_ok=True, parents=True)
-
-    if not data_file.exists():
-        raise FileNotFoundError(f"Chart covariate file not found: {data_file}")
 
     header = pd.read_csv(data_file, nrows=0)
     header.columns = header.columns.str.strip()
@@ -1029,16 +1059,16 @@ def validate_chart_covariates(
     print(f"[AVAILABLE COLS] {sorted(available_cols)}")
     print(f"[READING COLS] {usecols}")
 
-    if "itemid" not in available_cols:
-        raise ValueError("Chart file must contain 'itemid'.")
     if "valuenum" not in available_cols and "value" not in available_cols:
         raise ValueError("Chart file must contain at least one of 'valuenum' or 'value'.")
 
+    # Load item labels.
     itemid_to_label = load_item_labels(d_items_path)
+    # Load bounds.
     bounds_by_itemid = load_bounds(bounds_file)
-    row_counts: dict[int, int] = defaultdict(int)
-    value_parts: dict[int, list[pd.Series]] = defaultdict(list)
-    unit_counts_by_itemid: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    row_counts = defaultdict(int)
+    value_parts = defaultdict(list)
+    unit_counts_by_itemid = defaultdict(lambda: defaultdict(int))
 
     for chunk in pd.read_csv(data_file, usecols=usecols, chunksize=CHUNK_ROWS, low_memory=False):
         chunk.columns = chunk.columns.str.strip()
@@ -1069,6 +1099,7 @@ def validate_chart_covariates(
             for (itemid, unit), count in unit_count_chunk.items():
                 unit_counts_by_itemid[int(itemid)][str(unit)] += int(count)
 
+    # Build chart value audit from parts.
     audit = build_chart_value_audit_from_parts(
         value_parts=value_parts,
         row_counts=row_counts,
@@ -1104,6 +1135,7 @@ def validate_chart_covariates(
     audit_problem = audit_problem.sort_values(sort_cols, ascending=[False, False, False, False, False, False])
     audit_problem.to_csv(audit_problem_file, index=False)
 
+    # Build unit audit from parts.
     unit_audit = build_unit_audit_from_parts(unit_counts_by_itemid, itemid_to_label)
     unit_audit.to_csv(units_file, index=False)
 
@@ -1112,7 +1144,9 @@ def validate_chart_covariates(
     print(f"Saved: {units_file}")
 
 
-def validate_raw_chart_covariates(config: PanelBuildConfig) -> None:
+def validate_raw_chart_covariates(config):
+    """Validate raw chart covariates."""
+    # Validate chart covariates.
     validate_chart_covariates(
         data_file=config.kept_preprocessed_chart_file,
         outdir=config.data_dir,
@@ -1122,7 +1156,9 @@ def validate_raw_chart_covariates(config: PanelBuildConfig) -> None:
     )
 
 
-def validate_cleaned_chart_covariates(config: PanelBuildConfig) -> None:
+def validate_cleaned_chart_covariates(config):
+    """Validate cleaned chart covariates."""
+    # Validate chart covariates.
     validate_chart_covariates(
         data_file=config.cleaned_chart_file,
         outdir=config.data_dir,
@@ -1132,12 +1168,11 @@ def validate_cleaned_chart_covariates(config: PanelBuildConfig) -> None:
     )
 
 
-# =============================================================================
 # Chart covariate cleaning
-# =============================================================================
 
-def _load_numeric_values_by_itemid(infile: Path) -> dict[int, pd.Series]:
-    value_parts: dict[int, list[pd.Series]] = defaultdict(list)
+def _load_numeric_values_by_itemid(infile):
+    """Load numeric values by item ID."""
+    value_parts = defaultdict(list)
 
     for chunk in pd.read_csv(infile, usecols=[ITEM_COL, VALUE_COL], chunksize=CHUNK_ROWS, low_memory=False):
         chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL], errors="coerce")
@@ -1157,7 +1192,8 @@ def _load_numeric_values_by_itemid(infile: Path) -> dict[int, pd.Series]:
     }
 
 
-def _count_numeric_values_by_itemid(infile: Path) -> pd.DataFrame:
+def _count_numeric_values_by_itemid(infile):
+    """Count numeric chart values by item ID."""
     count_parts = []
 
     for chunk in pd.read_csv(infile, usecols=[ITEM_COL, VALUE_COL], chunksize=CHUNK_ROWS, low_memory=False):
@@ -1182,7 +1218,9 @@ def _count_numeric_values_by_itemid(infile: Path) -> pd.DataFrame:
     return counts
 
 
-def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
+def fit_cleaning_rules(infile):
+    """Fit cleaning rules."""
+    # Load numeric values by item ID.
     values_by_itemid = _load_numeric_values_by_itemid(infile)
     if not values_by_itemid:
         raise ValueError("No numeric valuenum rows found in input file.")
@@ -1259,7 +1297,9 @@ def fit_cleaning_rules(infile: Path) -> pd.DataFrame:
     return rules.reset_index()
 
 
-def apply_cleaning_rules(infile: Path, outfile: Path, rules: pd.DataFrame) -> pd.DataFrame:
+def apply_cleaning_rules(infile, outfile, rules):
+    """Apply cleaning rules."""
+    # Remove if exists.
     remove_if_exists(outfile)
 
     rules_small = rules[
@@ -1333,7 +1373,9 @@ def apply_cleaning_rules(infile: Path, outfile: Path, rules: pd.DataFrame) -> pd
     audit_wide.columns.name = None
     audit_wide = audit_wide.reset_index()
 
+    # Count numeric chart values by item ID.
     before_counts = _count_numeric_values_by_itemid(infile).rename(columns={"n_non_missing": "n_non_missing_before"})
+    # Count numeric chart values by item ID.
     after_counts = _count_numeric_values_by_itemid(outfile).rename(columns={"n_non_missing": "n_non_missing_after"})[
         [ITEM_COL, "n_non_missing_after"]
     ]
@@ -1368,13 +1410,16 @@ def apply_cleaning_rules(infile: Path, outfile: Path, rules: pd.DataFrame) -> pd
     return audit
 
 
-def clean_chart_covariates(config: PanelBuildConfig) -> None:
+def clean_chart_covariates(config):
+    """Clean chart covariates."""
     print("[FIT RULES]", config.kept_preprocessed_chart_file)
+    # Fit cleaning rules.
     rules = fit_cleaning_rules(config.kept_preprocessed_chart_file)
     rules.to_csv(config.cleaning_rules_file, index=False)
     print("[SAVE RULES]", config.cleaning_rules_file)
 
     print("[APPLY RULES]", config.kept_preprocessed_chart_file)
+    # Apply cleaning rules.
     audit = apply_cleaning_rules(config.kept_preprocessed_chart_file, config.cleaned_chart_file, rules)
     audit.to_csv(config.cleaning_audit_file, index=False)
 
@@ -1382,11 +1427,10 @@ def clean_chart_covariates(config: PanelBuildConfig) -> None:
     print("[SAVE AUDIT]", config.cleaning_audit_file)
 
 
-# =============================================================================
 # Master panel aggregation
-# =============================================================================
 
-def aggregate_itemid_covariates(panel: pd.DataFrame, cleaned_chart_file: Path) -> pd.DataFrame:
+def aggregate_itemid_covariates(panel, cleaned_chart_file):
+    """Aggregate item ID covariates onto panel rows."""
     windows = panel[["row_id", "stay_id", "cov_start", "cov_end"]].copy()
     stay_ids = set(windows["stay_id"].dropna().astype(int).unique())
 
@@ -1531,11 +1575,13 @@ def aggregate_itemid_covariates(panel: pd.DataFrame, cleaned_chart_file: Path) -
     return panel
 
 
-def build_master_panel(config: PanelBuildConfig) -> None:
+def build_master_panel(config):
+    """Build master panel."""
     panel = pd.read_csv(config.base_panel_file, low_memory=False)
     for col in ["inserted", "removed", "reinsertion_time", "period_start", "period_end", "cov_start", "cov_end"]:
         panel[col] = pd.to_datetime(panel[col], errors="coerce")
 
+    # Aggregate item ID covariates onto panel rows.
     panel = aggregate_itemid_covariates(panel, config.cleaned_chart_file)
     panel = panel.drop(columns=["cov_start", "cov_end", "row_id"])
 
@@ -1553,17 +1599,16 @@ def build_master_panel(config: PanelBuildConfig) -> None:
     print("Rows:", len(panel))
 
 
-# =============================================================================
 # Covariate retention
-# =============================================================================
 
-def detect_covariate_cols(columns: list[str]) -> list[dict[str, object]]:
+def detect_covariate_cols(columns):
+    """Detect covariate columns."""
     if MEAN_ONLY:
         col_pattern = re.compile(r"^itemid_(\d+)__mean$")
     else:
         col_pattern = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
 
-    covariates: list[dict[str, object]] = []
+    covariates = []
     for column_name in columns:
         match = col_pattern.match(column_name)
         if match:
@@ -1575,21 +1620,24 @@ def detect_covariate_cols(columns: list[str]) -> list[dict[str, object]]:
     return covariates
 
 
-def decide_retention(row_cov: float, stay_cov: float) -> tuple[str, str]:
+def decide_retention(row_cov, stay_cov):
+    """Decide retention."""
     keep_col = row_cov >= MIN_ROW_COVERAGE and stay_cov >= MIN_STAY_COVERAGE
     return ("retain" if keep_col else "drop", "coverage")
 
 
 def build_retention_log(
-    panel: pd.DataFrame,
-    covariates: list[dict[str, object]],
-    itemid_to_label: dict[int, str],
-) -> pd.DataFrame:
+    panel,
+    covariates,
+    itemid_to_label,
+):
+    """Build retention log."""
     total_rows = len(panel)
     total_stays = panel["stay_id"].nunique()
     stay_ids = panel["stay_id"]
 
-    rows: list[dict[str, object]] = []
+    rows = []
+    # Decide retention.
     for covariate in covariates:
         column_name = str(covariate["column_name"])
         itemid = int(covariate["itemid"])
@@ -1602,6 +1650,7 @@ def build_retention_log(
         n_stays = int(has_value_by_stay.sum())
         stay_cov = n_stays / total_stays if total_stays else 0.0
 
+        # Decide retention.
         decision, reason = decide_retention(row_cov, stay_cov)
         rows.append({
             "itemid": itemid,
@@ -1623,8 +1672,10 @@ def build_retention_log(
     ).reset_index(drop=True)
 
 
-def select_retained_covariates(config: PanelBuildConfig) -> None:
+def select_retained_covariates(config):
+    """Select retained covariates."""
     all_columns = pd.read_csv(config.master_panel_file, nrows=0).columns.tolist()
+    # Detect covariate columns.
     covariates = detect_covariate_cols(all_columns)
     usecols = ["stay_id"] + [str(covariate["column_name"]) for covariate in covariates]
 
@@ -1632,6 +1683,7 @@ def select_retained_covariates(config: PanelBuildConfig) -> None:
     print(f"[INFO] loading stay_id + {len(covariates):,} covariate columns")
 
     panel = pd.read_csv(config.master_panel_file, usecols=usecols, low_memory=False)
+    # Build retention log.
     summary_df = build_retention_log(panel, covariates, load_item_labels(config.d_items_path))
     summary_df.to_csv(config.covariate_retention_log_file, index=False)
 
@@ -1646,11 +1698,10 @@ def select_retained_covariates(config: PanelBuildConfig) -> None:
     print(f"[INFO] dropped columns: {dropped_total:,}")
 
 
-# =============================================================================
 # Filtered panel and train/test split
-# =============================================================================
 
-def create_patient_split(panel: pd.DataFrame) -> pd.DataFrame:
+def create_patient_split(panel):
+    """Create patient split."""
     subject_ids = panel[SUBJECT_ID_COL].dropna().astype(str).unique()
     train_ids, test_ids = train_test_split(subject_ids, test_size=TEST_SIZE, random_state=SEED)
 
@@ -1660,7 +1711,8 @@ def create_patient_split(panel: pd.DataFrame) -> pd.DataFrame:
     })
 
 
-def build_filtered_panel(config: PanelBuildConfig) -> None:
+def build_filtered_panel(config):
+    """Build filtered panel."""
     summary_df = pd.read_csv(config.covariate_retention_log_file, low_memory=False)
     retained_cov_cols = summary_df.loc[
         summary_df["decision"].astype(str).str.lower() == "retain",
@@ -1680,6 +1732,7 @@ def build_filtered_panel(config: PanelBuildConfig) -> None:
         filtered_panel[column_name] = pd.to_numeric(filtered_panel[column_name], errors="coerce")
     filtered_panel[kept_cov_cols] = filtered_panel[kept_cov_cols].round(ROUND_DP)
 
+    # Create patient split.
     split_df = create_patient_split(filtered_panel)
     split_df[SUBJECT_ID_COL] = split_df[SUBJECT_ID_COL].astype(str)
     filtered_panel = filtered_panel.merge(split_df, on=SUBJECT_ID_COL, how="left")
@@ -1701,11 +1754,10 @@ def build_filtered_panel(config: PanelBuildConfig) -> None:
     print(f"[WRITE] {config.train_test_split_file} rows={len(split_df):,} cols={len(split_df.columns):,}")
 
 
-# =============================================================================
-# Modeling panel and feature metadata
-# =============================================================================
+# Modelling panel and feature metadata
 
-def validate_split(df: pd.DataFrame) -> None:
+def validate_split(df):
+    """Validate split."""
     df[SPLIT_COL] = df[SPLIT_COL].astype(str).str.strip().str.lower()
     valid_splits = {"train", "test"}
     found_splits = set(df[SPLIT_COL].dropna().unique())
@@ -1714,7 +1766,8 @@ def validate_split(df: pd.DataFrame) -> None:
         raise ValueError(f"Unexpected split values in {SPLIT_COL}: {invalid_splits}")
 
 
-def base_feature_cols(df: pd.DataFrame) -> list[str]:
+def base_feature_cols(df):
+    """Select baseline feature columns."""
     cols = [
         c for c in df.columns
         if c.startswith("itemid_") or c.startswith("sex_") or c.startswith("ethnicity_")
@@ -1730,10 +1783,9 @@ def base_feature_cols(df: pd.DataFrame) -> list[str]:
     return out
 
 
-def coerce_numeric(df: pd.DataFrame, cols: list[str], fill_missing_with_zero: bool) -> None:
+def coerce_numeric(df, cols, fill_missing_with_zero):
+    """Coerce numeric."""
     for col in cols:
-        if col not in df.columns:
-            continue
         if df[col].dtype == object:
             df[col] = df[col].replace({
                 "TRUE": 1,
@@ -1749,14 +1801,20 @@ def coerce_numeric(df: pd.DataFrame, cols: list[str], fill_missing_with_zero: bo
 
 
 def json_ready(obj):
+    """Prepare ready."""
+    # Prepare ready.
     if isinstance(obj, dict):
+        # Prepare ready.
         return {k: json_ready(v) for k, v in obj.items()}
+    # Prepare ready.
     if isinstance(obj, list):
+        # Prepare ready.
         return [json_ready(v) for v in obj]
     return obj
 
 
-def detect_covariate_itemids(columns: list[str]) -> pd.DataFrame:
+def detect_covariate_itemids(columns):
+    """Detect covariate item IDs."""
     pattern = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
     itemids = set()
     for col in columns:
@@ -1766,12 +1824,8 @@ def detect_covariate_itemids(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame({"itemid": sorted(itemids)})
 
 
-def add_transition_columns(df: pd.DataFrame) -> None:
-    required_cols = [STATE_COL, ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT]
-    missing_cols = [c for c in required_cols if c not in df.columns]
-    if missing_cols:
-        raise ValueError(f"Missing required transition-label columns: {missing_cols}")
-
+def add_transition_columns(df):
+    """Add transition columns."""
     for col in [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
@@ -1788,7 +1842,8 @@ def add_transition_columns(df: pd.DataFrame) -> None:
     df[ACTION_REMOVE_COL] = (df[OBSERVED_ACTION_COL] == "remove").astype(int)
 
 
-def build_modeling_panel(config: PanelBuildConfig) -> None:
+def build_modeling_panel(config):
+    """Build modelling panel."""
     config.data_dir.mkdir(exist_ok=True, parents=True)
 
     df = pd.read_csv(config.filtered_panel_file, low_memory=False)
@@ -1798,11 +1853,15 @@ def build_modeling_panel(config: PanelBuildConfig) -> None:
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
     df[END_REASON_COL] = df[END_REASON_COL].astype(str).str.strip().str.lower()
 
+    # Validate split.
     validate_split(df)
     df["state_is_out"] = (df[STATE_COL] == "out").astype(int)
+    # Add transition columns.
     add_transition_columns(df)
 
+    # Select baseline feature columns.
     base_cols_for_features = base_feature_cols(df)
+    # Coerce numeric.
     coerce_numeric(
         df,
         base_cols_for_features + [TIME_COL, PERIODS_COL, "state_is_out", ACTION_REMOVE_COL],
@@ -1810,6 +1869,7 @@ def build_modeling_panel(config: PanelBuildConfig) -> None:
     )
 
     target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT, LAST_PERIOD_COL]
+    # Coerce numeric.
     coerce_numeric(df, target_flag_cols, fill_missing_with_zero=True)
 
     feature_cols = list(base_cols_for_features)
@@ -1818,16 +1878,13 @@ def build_modeling_panel(config: PanelBuildConfig) -> None:
     x_cols_reins = [PERIODS_COL, *feature_cols]
     x_cols_transition = [TIME_COL, PERIODS_COL, "state_is_out", ACTION_REMOVE_COL, *feature_cols]
 
-    required_feature_cols = sorted(set(x_cols_remove + x_cols_cauti + x_cols_reins + x_cols_transition))
-    missing_required = [c for c in required_feature_cols if c not in df.columns]
-    if missing_required:
-        raise ValueError(f"Missing required model feature columns after preprocessing: {missing_required}")
-
     df.to_csv(config.modeling_panel_file, index=False)
 
     period_hours = int(pd.to_numeric(df["interval_hours"], errors="coerce").dropna().mode().iloc[0])
 
+    # Detect covariate item IDs.
     covariate_dict = detect_covariate_itemids(df.columns.tolist())
+    # Load item labels.
     itemid_to_label = load_item_labels(config.d_items_path)
     covariate_dict["label"] = covariate_dict["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
     covariate_dict.sort_values(["label", "itemid"]).to_csv(config.covariate_dictionary_file, index=False)
@@ -1859,6 +1916,7 @@ def build_modeling_panel(config: PanelBuildConfig) -> None:
         "n_rows": int(len(df)),
         "n_features": int(len(feature_cols)),
     }
+    # Prepare ready.
     config.feature_spec_file.write_text(json.dumps(json_ready(spec), indent=2), encoding="utf-8")
 
     print(f"[SAVE] modeling panel: {config.modeling_panel_file}")
@@ -1869,11 +1927,10 @@ def build_modeling_panel(config: PanelBuildConfig) -> None:
     print(f"Total features: {len(feature_cols)}")
 
 
-# =============================================================================
 # Entrypoint
-# =============================================================================
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Create the full CAUTI modeling data panel.")
     parser.add_argument("--mimic-dir", type=Path, default=DEFAULT_MIMIC_DIR, help="Path to the MIMIC-IV root directory.")
     parser.add_argument("--data-dir", type=Path, default=REPO_ROOT / "data", help="Pipeline data directory.")
@@ -1881,7 +1938,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
+def main():
+    """Run the script workflow."""
+    # Parse command-line arguments.
     args = parse_args()
     config = PanelBuildConfig(
         repo_root=REPO_ROOT,
@@ -1895,53 +1954,88 @@ def main() -> None:
     print("[CONFIG] data dir:", config.data_dir)
     print("[CONFIG] config dir:", config.config_dir)
 
+    # Print section.
     start_time = print_section("Define catheter episode cohort and base panel")
+    # Create episode cohort and base panel.
     create_episode_cohort_and_base_panel(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Extract raw chart-event covariates")
+    # Extract raw chart covariates.
     extract_raw_chart_covariates(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Preprocess raw chart-event covariates")
+    # Preprocess raw chart covariates.
     preprocess_raw_chart_covariates(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Filter chart covariates to the item allowlist")
+    # Filter preprocessed chart covariates.
     filter_preprocessed_chart_covariates(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Validate raw kept chart covariates")
+    # Validate raw chart covariates.
     validate_raw_chart_covariates(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Clean chart covariates")
+    # Clean chart covariates.
     clean_chart_covariates(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Validate cleaned chart covariates")
+    # Validate cleaned chart covariates.
     validate_cleaned_chart_covariates(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Aggregate cleaned covariates onto the base panel")
+    # Build master panel.
     build_master_panel(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Select retained covariates")
+    # Select retained covariates.
     select_retained_covariates(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Build filtered panel and train/test split")
+    # Build filtered panel.
     build_filtered_panel(config)
+    # Print section done.
     print_section_done(start_time)
 
+    # Print section.
     start_time = print_section("Build modeling panel and feature metadata")
+    # Build modelling panel.
     build_modeling_panel(config)
+    # Print section done.
     print_section_done(start_time)
 
     print()
     print("Data panel creation completed.")
 
 
+# Run the script workflow.
 if __name__ == "__main__":
+    # Run the script workflow.
     main()

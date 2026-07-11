@@ -1,0 +1,135 @@
+{
+  "timestamp_utc": "2026-07-10T14:52:24.009370+00:00",
+  "estimator": "plugin_gformula",
+  "prediction_mode": "observed_grid_plugin",
+  "current_practice_comparator_type": "model_based_plugin_observed_regime",
+  "horizon_days": null,
+  "input_paths": {
+    "policy_panel": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\policy_interventions\\policy_intervention_panel_long.csv",
+    "scored_panel": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\nuisance_models\\scored_panel.csv",
+    "outcome_models": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\nuisance_models\\outcome_models.pkl"
+  },
+  "output_paths": {
+    "summary": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\policy_eval\\gformula\\gformula_policy_outcomes_summary.csv",
+    "episodes": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\policy_eval\\gformula\\gformula_episode_predictions.csv",
+    "rows": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\policy_eval\\gformula\\gformula_row_predictions.csv",
+    "diagnostics": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\policy_eval\\gformula\\gformula_diagnostics.csv",
+    "current_practice": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\policy_eval\\gformula\\current_practice_gformula_episode_predictions.csv",
+    "metadata": "C:\\Users\\DavidUni\\OneDrive - University of Reading\\repos\\mimic_pipeline\\artifacts\\policy_eval\\gformula\\gformula_run_metadata.json"
+  },
+  "required_prediction_columns": [
+    "p_cauti_if_keep",
+    "p_cauti_if_remove",
+    "p_cauti_if_out",
+    "p_reinsertion_if_out",
+    "p_death_if_keep",
+    "p_death_if_remove",
+    "p_death_if_out",
+    "p_icu_exit_alive_if_keep",
+    "p_icu_exit_alive_if_remove",
+    "p_icu_exit_alive_if_out",
+    "p_no_event_if_keep",
+    "p_no_event_if_remove",
+    "p_no_event_if_out"
+  ],
+  "allow_missing_counterfactual_state_predictions": false,
+  "number_of_policies": 5,
+  "number_of_episodes": 15460,
+  "number_of_complete_prediction_episodes": 92760,
+  "target_policy_timing_source": "policy_intervention_panel_long.csv resolved target-policy timeline",
+  "target_policy_timeline_helper": "policy_eval_common.add_fixed_day_target_policy_timeline",
+  "target_policy_timeline_semantics": "fixed-day removal: before removal day is in/keep; first row on removal day is in/remove; later rows on the same removal day are out/out with policy_periods_out = 0; later days are out/out",
+  "duration_semantics": {
+    "period_duration_days": "period_end - period_start in days",
+    "catheter_exposure_days": "sum of period_duration_days where policy_catheter_state == in",
+    "max_reasonable_period_duration_days": 7.0,
+    "n_long_period_duration_rows": 0
+  },
+  "catheter_count_semantics": {
+    "expected_catheter_in_intervals": "count of policy-implied catheter-in interval rows on the observed grid; not necessarily one row per patient-day because transition days may be split into in and out intervals",
+    "expected_catheter_exposure_days": "sum of period_duration_days where policy_catheter_state == in; preferred exposure measure for interpretation"
+  },
+  "icu_exit_alive_definition": "max(icu_end_in_period == 1 and death_in_period != 1); death takes precedence when death and ICU exit occur in the same interval",
+  "bootstrap": {
+    "n_bootstrap": 0,
+    "bootstrap_seed": 20260708,
+    "cluster_col": "subject_id",
+    "cluster_col_available": true,
+    "bootstrap_ci_calculated": false,
+    "bootstrap_status": "not_requested"
+  },
+  "rescoring": {
+    "outcome_models_used_for_rescoring": true,
+    "outcome_models_missing": false,
+    "missing_prediction_counts_before_rescoring": {
+      "p_cauti_if_keep": 27123,
+      "p_cauti_if_remove": 4085,
+      "p_cauti_if_out": 68688,
+      "p_reinsertion_if_out": 182323,
+      "p_death_if_keep": 27123,
+      "p_death_if_remove": 4085,
+      "p_death_if_out": 182323,
+      "p_icu_exit_alive_if_keep": 27123,
+      "p_icu_exit_alive_if_remove": 4085,
+      "p_icu_exit_alive_if_out": 182323,
+      "p_no_event_if_keep": 27123,
+      "p_no_event_if_remove": 4085,
+      "p_no_event_if_out": 182323
+    },
+    "rescored_prediction_counts": {
+      "p_cauti_if_keep": 27123,
+      "p_cauti_if_remove": 4085,
+      "p_cauti_if_out": 68688,
+      "p_reinsertion_if_out": 182323,
+      "p_death_if_keep": 27123,
+      "p_death_if_remove": 4085,
+      "p_death_if_out": 182323,
+      "p_icu_exit_alive_if_keep": 27123,
+      "p_icu_exit_alive_if_remove": 4085,
+      "p_icu_exit_alive_if_out": 182323,
+      "p_no_event_if_keep": 27123,
+      "p_no_event_if_remove": 4085,
+      "p_no_event_if_out": 182323
+    },
+    "current_practice_rescoring": {
+      "outcome_models_used_for_rescoring": false,
+      "missing_prediction_counts_before_rescoring": {
+        "p_cauti_if_keep": 0,
+        "p_cauti_if_remove": 0,
+        "p_cauti_if_out": 0,
+        "p_reinsertion_if_out": 0,
+        "p_death_if_keep": 0,
+        "p_death_if_remove": 0,
+        "p_death_if_out": 0,
+        "p_icu_exit_alive_if_keep": 0,
+        "p_icu_exit_alive_if_remove": 0,
+        "p_icu_exit_alive_if_out": 0,
+        "p_no_event_if_keep": 0,
+        "p_no_event_if_remove": 0,
+        "p_no_event_if_out": 0
+      },
+      "rescored_prediction_counts": {
+        "p_cauti_if_keep": 0,
+        "p_cauti_if_remove": 0,
+        "p_cauti_if_out": 0,
+        "p_reinsertion_if_out": 0,
+        "p_death_if_keep": 0,
+        "p_death_if_remove": 0,
+        "p_death_if_out": 0,
+        "p_icu_exit_alive_if_keep": 0,
+        "p_icu_exit_alive_if_remove": 0,
+        "p_icu_exit_alive_if_out": 0,
+        "p_no_event_if_keep": 0,
+        "p_no_event_if_remove": 0,
+        "p_no_event_if_out": 0
+      }
+    }
+  },
+  "methodological_limitations": [
+    "Plug-in estimates depend on the fitted nuisance outcome models.",
+    "The implementation uses the observed patient-day covariate grid.",
+    "The implementation does not simulate future time-varying covariates under each policy.",
+    "The implementation does not model absorbing terminal state propagation beyond observed rows.",
+    "The implementation is not IPW, AIPW, DML, DR-Learner, TMLE, or LTMLE."
+  ]
+}
