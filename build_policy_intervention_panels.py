@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build estimator-agnostic target-policy intervention panels."""
+# Build estimator-agnostic target-policy intervention panels.
 
 
 import argparse
@@ -58,7 +58,6 @@ OPTIONAL_INPUT_COLS = [
 DERIVED_BASE_COLS = [
     "catheter_episode_id",
     "decision_row_id",
-    "is_decision_row",
     "episode_day_since_insertion",
 ]
 
@@ -122,7 +121,7 @@ POLICY_TYPE = "fixed_day_removal"
 
 
 def parse_args():
-    """Parse command-line arguments."""
+    # Parse command-line arguments.
     parser = argparse.ArgumentParser(
         description=(
             "Build estimator-agnostic catheter-removal policy-intervention "
@@ -175,13 +174,13 @@ def parse_args():
 
 
 def resolve_output_path(outdir, name_or_path):
-    """Resolve an output file path."""
+    # Resolve an output file path.
     path = Path(name_or_path)
     return path if path.is_absolute() else outdir / path
 
 
 def normalise_policy_days(policy_days):
-    """Normalise policy days."""
+    # Normalise policy days.
     if not policy_days:
         raise ValueError("At least one policy day must be supplied.")
 
@@ -197,7 +196,7 @@ def normalise_policy_days(policy_days):
 
 
 def find_estimator_columns(columns):
-    """Find estimator columns."""
+    # Find estimator columns.
     estimator_cols = []
     for col in columns:
         col_lower = col.lower()
@@ -209,7 +208,7 @@ def find_estimator_columns(columns):
 
 
 def drop_generated_or_estimator_columns(df):
-    """Drop generated or estimator columns."""
+    # Drop generated or estimator columns.
     generated_cols = [
         col for col in [*DERIVED_BASE_COLS, *POLICY_COLS] if col in df.columns
     ]
@@ -228,7 +227,7 @@ def drop_generated_or_estimator_columns(df):
 
 
 def load_patient_day_panel(input_path):
-    """Load patient day panel."""
+    # Load patient day panel.
     df = pd.read_csv(input_path, low_memory=False)
     df.columns = df.columns.str.strip()
     # Drop generated or estimator columns.
@@ -237,12 +236,12 @@ def load_patient_day_panel(input_path):
 
 
 def normalise_text_column(df, column):
-    """Normalise text column."""
+    # Normalise text column.
     df[column] = df[column].astype(str).str.strip().str.lower()
 
 
 def add_stable_ids_and_decision_flag(df):
-    """Add stable IDs and decision flag."""
+    # Add stable IDs and decision flag.
     df = df.copy()
 
     # Normalise text column.
@@ -251,6 +250,12 @@ def add_stable_ids_and_decision_flag(df):
     normalise_text_column(df, "observed_action")
     df["periods_in_state"] = pd.to_numeric(df["periods_in_state"], errors="coerce")
     df["action_remove"] = pd.to_numeric(df["action_remove"], errors="coerce")
+    if "is_decision_row" not in df.columns:
+        raise ValueError("Input panel is missing required column: is_decision_row")
+    decision_values = pd.to_numeric(df["is_decision_row"], errors="coerce")
+    if decision_values.isna().any() or not decision_values.isin([0, 1]).all():
+        raise ValueError("is_decision_row must contain only 0/1 values")
+    df["is_decision_row"] = decision_values.astype(bool)
 
     unknown_states = sorted(set(df["catheter_state"].dropna()) - {"in", "out"})
     if unknown_states:
@@ -275,20 +280,29 @@ def add_stable_ids_and_decision_flag(df):
     ).reset_index(drop=True)
     df["decision_row_id"] = np.arange(1, len(df) + 1, dtype=np.int64)
 
-    df["is_decision_row"] = (
-        df["observed_action"].isin(["keep", "remove"])
-        & df["catheter_state"].eq("in")
+    expected_decision_rows = (
+        df["catheter_state"].eq("in") |
+        (
+            df["catheter_state"].eq("out") &
+            df["observed_action"].eq("remove") &
+            df["action_remove"].eq(1)
+        )
     )
+    if not df["is_decision_row"].equals(expected_decision_rows):
+        raise ValueError(
+            "is_decision_row must mark every catheter-in row and the first "
+            "catheter-out removal row only"
+        )
     return df
 
 
 def policy_name_for_day(policy_remove_day):
-    """Build name for day."""
+    # Build name for day.
     return f"remove_on_day_{policy_remove_day}"
 
 
 def policy_library_row(policy_remove_day):
-    """Build library row."""
+    # Build library row.
     # Build name for day.
     policy_name = policy_name_for_day(policy_remove_day)
     return {
@@ -303,7 +317,7 @@ def policy_library_row(policy_remove_day):
         "rule_summary": (
             f"Resolved target-policy timeline uses episode day {policy_remove_day}: "
             "before removal day is in/keep; first row on removal day is "
-            "in/remove; later rows on the same removal day and later days are "
+            "out/remove; later rows on the same removal day and later days are "
             "out/out."
         ),
         "is_proof_of_concept": True,
@@ -317,13 +331,13 @@ def policy_library_row(policy_remove_day):
 
 
 def build_policy_library(policy_days):
-    """Build policy library."""
+    # Build policy library.
     # Build library row.
     return pd.DataFrame([policy_library_row(day) for day in policy_days])
 
 
 def add_policy_episode_day(df):
-    """Add policy episode day."""
+    # Add policy episode day.
     df = df.copy()
     inserted = pd.to_datetime(df["inserted"], errors="coerce")
     period_start = pd.to_datetime(df["period_start"], errors="coerce")
@@ -335,7 +349,7 @@ def add_policy_episode_day(df):
 
 
 def apply_fixed_day_policy(base_df, policy_remove_day):
-    """Apply fixed day policy."""
+    # Apply fixed day policy.
     # Add policy episode day.
     df = add_policy_episode_day(base_df)
     # Build name for day.
@@ -403,7 +417,7 @@ def apply_fixed_day_policy(base_df, policy_remove_day):
 
 
 def order_long_columns(df, original_columns):
-    """Order long columns."""
+    # Order long columns.
     base_order = [
         "catheter_episode_id",
         "decision_row_id",
@@ -426,7 +440,7 @@ def build_long_policy_panel(
     policy_days,
     original_columns,
 ):
-    """Build long policy panel."""
+    # Build long policy panel.
     # Apply fixed day policy.
     policy_frames = [
         apply_fixed_day_policy(base_df, policy_remove_day)
@@ -443,7 +457,7 @@ def build_wide_policy_action_matrix(
     policy_library,
     original_columns,
 ):
-    """Build wide policy action matrix."""
+    # Build wide policy action matrix.
     id_columns = [
         "decision_row_id",
         "catheter_episode_id",
@@ -486,7 +500,7 @@ def build_wide_policy_action_matrix(
 
 
 def qa_row(policy_df):
-    """Build one QA row."""
+    # Build one QA row.
     applicable = policy_df["policy_applicable"]
     matches = policy_df["policy_matches_observed_action_today"]
     n_applicable = int(applicable.sum())
@@ -535,7 +549,7 @@ def qa_row(policy_df):
 
 
 def build_qa_report(long_df, policy_days):
-    """Build QA report."""
+    # Build QA report.
     rows = []
     # Build name for day.
     for policy_remove_day in policy_days:
@@ -548,7 +562,7 @@ def build_qa_report(long_df, policy_days):
 
 
 def save_df(df, path):
-    """Save a data frame as CSV."""
+    # Save a data frame as CSV.
     path.parent.mkdir(exist_ok=True, parents=True)
     df.to_csv(path, index=False)
 
@@ -563,7 +577,7 @@ def print_console_summary(
     qa_output_path,
     policy_library_output_path,
 ):
-    """Print a concise run summary."""
+    # Print a concise run summary.
     print()
     print("--- POLICY-INTERVENTION PANEL BUILD COMPLETE ---")
     print(f"Input panel: {input_path}")
@@ -591,7 +605,7 @@ def print_console_summary(
 
 
 def main():
-    """Run the script workflow."""
+    # Run the script workflow.
     # Parse command-line arguments.
     args = parse_args()
     # Normalise policy days.
@@ -632,13 +646,13 @@ def main():
     # Build QA report.
     qa_df = build_qa_report(long_df, policy_days)
 
-    # Save a data frame as CSV.
+    # Save the long policy panel at full precision for evaluators.
     save_df(long_df, long_output_path)
-    # Save a data frame as CSV.
+    # Save the wide policy matrix at full precision.
     save_df(wide_df, wide_output_path)
-    # Save a data frame as CSV.
-    save_df(qa_df, qa_output_path)
-    # Save a data frame as CSV.
+    # Save the rounded QA report.
+    pec.save_report_df(qa_df, qa_output_path)
+    # Save the policy library.
     save_df(policy_library, policy_library_output_path)
 
     # Print a concise run summary.

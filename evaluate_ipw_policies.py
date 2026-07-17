@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Evaluate catheter-removal policies with sequential IPW estimates."""
+# Evaluate catheter-removal policies with sequential IPW estimates.
 
 
 import argparse
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -122,7 +121,7 @@ OUTCOME_SPECS = {
 # Generic helpers
 
 def parse_args():
-    """Parse command-line arguments."""
+    # Parse command-line arguments.
     parser = argparse.ArgumentParser(
         description=(
             "Evaluate deterministic catheter-removal policies using sequential "
@@ -208,25 +207,25 @@ def parse_args():
 
 
 def resolve_output_path(outdir, name_or_path):
-    """Resolve an output file path."""
+    # Resolve an output file path.
     path = Path(name_or_path)
     return path if path.is_absolute() else outdir / path
 
 
 def save_df(df, path):
-    """Save a data frame as CSV."""
+    # Save a data frame as CSV.
     path.parent.mkdir(exist_ok=True, parents=True)
     df.to_csv(path, index=False)
 
 
 def first_non_null(series):
-    """Return the first non-missing value."""
+    # Return the first non-missing value.
     non_null = series.dropna()
     return non_null.iloc[0] if len(non_null) else np.nan
 
 
 def max_binary(series):
-    """Return whether any binary value is present."""
+    # Return whether any binary value is present.
     numeric = pd.to_numeric(series, errors="coerce").fillna(0)
     if numeric.empty:
         return np.nan
@@ -234,7 +233,7 @@ def max_binary(series):
 
 
 def weighted_mean(values, weights):
-    """Calculate a weighted mean."""
+    # Calculate a weighted mean.
     values = pd.to_numeric(values, errors="coerce")
     weights = pd.to_numeric(weights, errors="coerce")
     valid = (
@@ -250,13 +249,13 @@ def weighted_mean(values, weights):
 
 
 def valid_weight_series(weights):
-    """Return positive finite weights."""
+    # Return positive finite weights.
     weights = pd.to_numeric(weights, errors="coerce")
     return weights[weights.notna() & np.isfinite(weights) & (weights > 0)]
 
 
 def effective_sample_size(weights):
-    """Calculate the effective sample size."""
+    # Calculate the effective sample size.
     # Return positive finite weights.
     weights = valid_weight_series(weights)
     if weights.empty:
@@ -267,14 +266,14 @@ def effective_sample_size(weights):
 
 
 def safe_ratio(numerator, denominator):
-    """Calculate a ratio with missing-value protection."""
+    # Calculate a ratio with missing-value protection.
     if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
         return np.nan
     return float(numerator / denominator)
 
 
 def coerce_bool(series):
-    """Convert common text values to booleans."""
+    # Convert common text values to booleans.
     if pd.api.types.is_bool_dtype(series):
         return series.fillna(False).astype(bool)
 
@@ -295,7 +294,7 @@ def coerce_bool(series):
 
 
 def canonical_numeric_value(value):
-    """Format a numeric join value consistently."""
+    # Format a numeric join value consistently.
     if pd.isna(value):
         return "<NA>"
     try:
@@ -310,7 +309,7 @@ def canonical_numeric_value(value):
 
 
 def canonical_key_series(series, column):
-    """Create a stable join-key series."""
+    # Create a stable join-key series.
     if column in DATETIME_KEY_COLS:
         raw = series.astype("string").str.strip()
         parsed = pd.to_datetime(series, errors="coerce")
@@ -332,7 +331,7 @@ def canonical_key_series(series, column):
 
 
 def add_join_key_columns(df, key_cols):
-    """Add stable join-key columns."""
+    # Add stable join-key columns.
     out = df.copy()
     join_cols = []
     # Create a stable join-key series.
@@ -345,7 +344,7 @@ def add_join_key_columns(df, key_cols):
 
 
 def duplicate_key_examples(df, join_cols, display_cols):
-    """Return examples of duplicate join keys."""
+    # Return examples of duplicate join keys.
     duplicated = df.duplicated(join_cols, keep=False)
     if not duplicated.any():
         return pd.DataFrame()
@@ -355,7 +354,7 @@ def duplicate_key_examples(df, join_cols, display_cols):
 # Loading and joining
 
 def load_policy_panel(path):
-    """Load and validate the policy panel."""
+    # Load and validate the policy panel.
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
 
@@ -375,7 +374,7 @@ def load_policy_panel(path):
 
 
 def load_scored_panel(path):
-    """Load and validate the scored nuisance panel."""
+    # Load and validate the scored nuisance panel.
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
 
@@ -390,7 +389,7 @@ def load_scored_panel(path):
 
 
 def normalise_row_key_types(df):
-    """Normalise row-key columns for joining."""
+    # Normalise row-key columns for joining.
     df = df.copy()
     if "catheter_state" in df.columns:
         df["catheter_state"] = df["catheter_state"].astype("string").str.strip().str.lower()
@@ -404,7 +403,7 @@ def normalise_row_key_types(df):
 
 
 def normalise_policy_panel_types(df):
-    """Normalise policy panel types."""
+    # Normalise policy panel types.
     # Normalise row-key columns for joining.
     df = normalise_row_key_types(df)
     # Convert common text values to booleans.
@@ -437,7 +436,7 @@ def normalise_policy_panel_types(df):
 
 
 def validate_policy_panel(df):
-    """Validate policy-panel structure."""
+    # Validate policy-panel structure.
     policies = sorted(df["policy_name"].dropna().unique().tolist())
     if not policies:
         raise ValueError("Policy panel contains no policy_name values.")
@@ -478,7 +477,7 @@ def validate_policy_panel(df):
 
 
 def join_scored_panel(policy_df, scored_df):
-    """Join nuisance scores to policy rows."""
+    # Join nuisance scores to policy rows.
     # Add stable join-key columns.
     policy_keyed, join_cols = add_join_key_columns(policy_df, ROW_JOIN_KEY_COLS)
     # Add stable join-key columns.
@@ -541,7 +540,7 @@ def join_scored_panel(policy_df, scored_df):
 # IPW row-level calculations and adherence
 
 def validate_clip_bounds(clip_lower, clip_upper):
-    """Validate support clipping bounds."""
+    # Validate support clipping bounds.
     if not (0 < clip_lower < clip_upper <= 1):
         raise ValueError(
             "Support clipping bounds must satisfy 0 < clip_lower < clip_upper <= 1. "
@@ -554,7 +553,7 @@ def add_ipw_row_quantities(
     clip_lower,
     clip_upper,
 ):
-    """Add row-level IPW quantities."""
+    # Add row-level IPW quantities.
     # Validate support clipping bounds.
     validate_clip_bounds(clip_lower, clip_upper)
     df = df.copy()
@@ -570,7 +569,7 @@ def add_ipw_row_quantities(
             ["policy_name", "decision_row_id", "p_remove_obs", "p_keep_obs"],
         ].head(10)
         raise ValueError(
-            "Applicable IN decision rows are missing p_remove_obs or p_keep_obs "
+            "Applicable decision rows are missing p_remove_obs or p_keep_obs "
             f"after joining scored panel. Examples:\n{examples}"
         )
 
@@ -632,7 +631,7 @@ def add_ipw_row_quantities(
 
 
 def add_adherence(df):
-    """Add cumulative policy-adherence flags."""
+    # Add cumulative policy-adherence flags.
     df = df.copy()
     sort_cols = ["policy_name", EPISODE_ID_COL, "period_start", "period_end", "decision_row_id"]
     df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
@@ -648,7 +647,7 @@ def add_adherence(df):
 # Episode-level collapse
 
 def product_components_by_episode(df, component_col):
-    """Multiply row components within each episode."""
+    # Multiply row components within each episode.
     group_cols = ["policy_name", "policy_remove_day", EPISODE_ID_COL]
     out = (
         df.groupby(group_cols, dropna=False, sort=False)[component_col]
@@ -659,7 +658,7 @@ def product_components_by_episode(df, component_col):
 
 
 def add_episode_level_flags(df):
-    """Add helper flags for episode aggregation."""
+    # Add helper flags for episode aggregation.
     df = df.copy()
     df["_applicable_int"] = df["policy_applicable"].astype(int)
     df["_matched_applicable_int"] = (
@@ -685,7 +684,7 @@ def build_policy_episode_panel(
     df,
     zero_applicable_policy_episodes,
 ):
-    """Build adherent policy-episode outcomes."""
+    # Build adherent policy-episode outcomes.
     # Add helper flags for episode aggregation.
     df = add_episode_level_flags(df)
     group_cols = ["policy_name", "policy_remove_day", EPISODE_ID_COL]
@@ -806,7 +805,7 @@ def build_policy_episode_panel(
 
 
 def build_current_practice_episode_panel(scored_df, policy_df):
-    """Build observed current-practice episode outcomes."""
+    # Build observed current-practice episode outcomes.
     scored_df = scored_df.copy()
     scored_df = pec.add_period_duration_days(scored_df, context="current-practice IPW scored rows")
     scored_df = pec.add_observed_icu_exit_alive_period(scored_df)
@@ -893,7 +892,7 @@ def build_current_practice_episode_panel(scored_df, policy_df):
 
 
 def order_episode_columns(df):
-    """Order episode-level output columns."""
+    # Order episode-level output columns.
     preferred = [
         "policy_name",
         POLICY_TYPE_COL,
@@ -928,7 +927,7 @@ def order_episode_columns(df):
 # Diagnostics and summaries
 
 def inverse_support_ess(support):
-    """Calculate inverse-support effective sample size."""
+    # Calculate inverse-support effective sample size.
     support = pd.to_numeric(support, errors="coerce")
     valid = support[support.notna() & np.isfinite(support) & support.gt(0)]
     if valid.empty:
@@ -938,7 +937,7 @@ def inverse_support_ess(support):
 
 
 def support_diagnostic_row(df, label, metadata):
-    """Build one support diagnostic row."""
+    # Build one support diagnostic row.
     applicable = df["policy_applicable"]
     support = pd.to_numeric(df.loc[applicable, "policy_support"], errors="coerce")
     finite = support.notna() & np.isfinite(support)
@@ -966,7 +965,7 @@ def support_diagnostic_row(df, label, metadata):
 
 
 def build_support_diagnostics(df):
-    """Build support diagnostic output."""
+    # Build support diagnostic output.
     rows = []
     policy_cols = ["policy_name", "policy_remove_day"]
     # Build one support diagnostic row.
@@ -1001,7 +1000,7 @@ def weight_diagnostic_row(
     episode_all,
     adherent_df,
 ):
-    """Build one weight diagnostic row."""
+    # Build one weight diagnostic row.
     # Return positive finite weights.
     weights = valid_weight_series(adherent_df[WEIGHT_COL]) if WEIGHT_COL in adherent_df.columns else pd.Series(dtype=float)
     n_total = int(len(episode_all))
@@ -1046,7 +1045,7 @@ def weight_diagnostic_row(
 
 
 def build_weight_diagnostics(episode_all, policy_episode_df):
-    """Build weight diagnostic output."""
+    # Build weight diagnostic output.
     rows = []
     group_cols = ["policy_name", "policy_remove_day"]
     # Build one weight diagnostic row.
@@ -1062,7 +1061,7 @@ def build_weight_diagnostics(episode_all, policy_episode_df):
 
 
 def available_outcome_columns(df):
-    """List available episode outcome columns."""
+    # List available episode outcome columns.
     return {
         outcome_name: episode_col
         for outcome_name, (episode_col, _) in OUTCOME_SPECS.items()
@@ -1078,7 +1077,7 @@ def summarise_episode_estimates(
     n_adherent_episodes,
     weight_col=WEIGHT_COL,
 ):
-    """Summarise episode-level estimates."""
+    # Summarise episode-level estimates.
     weights = pd.to_numeric(episode_df[weight_col], errors="coerce") if weight_col in episode_df.columns else pd.Series(dtype=float)
     # Calculate the effective sample size.
     row = {
@@ -1148,7 +1147,7 @@ def build_policy_summary(
     policy_episode_df,
     current_practice_episode_df,
 ):
-    """Build policy-level summary estimates."""
+    # Build policy-level summary estimates.
     rows = []
     # Summarise episode-level estimates.
     rows.append(
@@ -1185,7 +1184,7 @@ def build_policy_summary(
 
 
 def add_current_practice_comparisons(summary):
-    """Add comparisons against current practice."""
+    # Add comparisons against current practice.
     return pec.add_standard_comparisons(
         summary,
         baseline_label=CURRENT_PRACTICE_LABEL,
@@ -1209,7 +1208,7 @@ def clipping_estimate_row(
     support_clip_lower=np.nan,
     support_clip_upper=np.nan,
 ):
-    """Build one clipping-sensitivity row."""
+    # Build one clipping-sensitivity row.
     # Return positive finite weights.
     valid_weights = valid_weight_series(weights)
     # Calculate the effective sample size.
@@ -1256,7 +1255,7 @@ def build_clipping_sensitivity(
     clip_lower,
     clip_upper,
 ):
-    """Build clipping-sensitivity output."""
+    # Build clipping-sensitivity output.
     rows = []
     group_cols = ["policy_name", "policy_remove_day"]
     # Return positive finite weights.
@@ -1322,9 +1321,8 @@ def metadata_payload(
     episode_all,
     policy_episode_df,
 ):
-    """Build run metadata."""
+    # Build run metadata.
     return {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "estimator": "sequential_ipw",
         "current_practice_comparator_type": "observed_weight_one",
         "clipping_bounds": {"clip_lower": args.clip_lower, "clip_upper": args.clip_upper},
@@ -1395,7 +1393,7 @@ def print_summary(
     current_practice_path,
     metadata_path,
 ):
-    """Print a concise run summary."""
+    # Print a concise run summary.
     n_policies = int(episode_all["policy_name"].nunique()) if "policy_name" in episode_all.columns else 0
     zero_adherent = (
         episode_all.groupby("policy_name")["episode_adherent_to_policy"].sum().loc[lambda s: s == 0].index.tolist()
@@ -1420,7 +1418,7 @@ def print_summary(
 
 
 def main():
-    """Run the script workflow."""
+    # Run the script workflow.
     # Parse command-line arguments.
     args = parse_args()
     args.outdir.mkdir(exist_ok=True, parents=True)
@@ -1510,17 +1508,17 @@ def main():
         "metadata": metadata_path,
     }
 
-    # Save a data frame as CSV.
+    # Save episode-level data at full precision for later inference.
     save_df(output_episode_df, episodes_path)
-    # Save a data frame as CSV.
-    save_df(summary_df, summary_path)
-    # Save a data frame as CSV.
-    save_df(weight_diagnostics_df, weight_diagnostics_path)
-    # Save a data frame as CSV.
-    save_df(support_diagnostics_df, support_diagnostics_path)
-    # Save a data frame as CSV.
-    save_df(clipping_sensitivity_df, clipping_sensitivity_path)
-    # Save a data frame as CSV.
+    # Save rounded policy-level report outputs.
+    pec.save_report_df(summary_df, summary_path)
+    # Save rounded weight diagnostics.
+    pec.save_report_df(weight_diagnostics_df, weight_diagnostics_path)
+    # Save rounded support diagnostics.
+    pec.save_report_df(support_diagnostics_df, support_diagnostics_path)
+    # Save rounded clipping-sensitivity estimates.
+    pec.save_report_df(clipping_sensitivity_df, clipping_sensitivity_path)
+    # Save current-practice episode data at full precision.
     save_df(current_practice_episode_df, current_practice_path)
     # Build run metadata.
     pec.save_json(

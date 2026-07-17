@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit structural consistency across policy-evaluation outputs."""
+# Audit structural consistency across policy-evaluation outputs.
 
 
 import argparse
@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+import policy_eval_common as pec
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -42,7 +44,7 @@ CURRENT_PRACTICE_LABEL = "current_practice"
 
 
 def parse_args():
-    """Parse command-line arguments."""
+    # Parse command-line arguments.
     parser = argparse.ArgumentParser(
         description="Audit structural consistency across existing policy-evaluation outputs."
     )
@@ -66,12 +68,12 @@ def parse_args():
 
 
 def load_csv(path):
-    """Load CSV."""
+    # Load CSV.
     return pd.read_csv(path, low_memory=False)
 
 
 def policy_day_key(value):
-    """Build day key."""
+    # Build day key.
     if pd.isna(value):
         return "<NA>"
     numeric = float(value)
@@ -81,7 +83,7 @@ def policy_day_key(value):
 
 
 def add_policy_key(df):
-    """Add policy key."""
+    # Add policy key.
     out = df.copy()
     out["__policy_day_key"] = out["policy_remove_day"].map(policy_day_key)
     out["__policy_key"] = out["policy_name"].astype(str) + "|" + out["__policy_day_key"].astype(str)
@@ -89,20 +91,20 @@ def add_policy_key(df):
 
 
 def bool_series(series):
-    """Convert a series to booleans."""
+    # Convert a series to booleans.
     if pd.api.types.is_bool_dtype(series):
         return series.fillna(False).astype(bool)
     return series.astype("string").str.strip().str.lower().isin(["true", "1", "yes", "y"])
 
 
 def is_true(value):
-    """Check whether one value is true."""
+    # Check whether one value is true.
     # Convert a series to booleans.
     return bool_series(pd.Series([value])).iloc[0]
 
 
 def add_result(results, check, passed, detail):
-    """Add result."""
+    # Add result.
     results.append(
         {
             "check": check,
@@ -113,13 +115,13 @@ def add_result(results, check, passed, detail):
 
 
 def policy_key_set(df):
-    """Build key set."""
+    # Build key set.
     # Add policy key.
     return set(add_policy_key(df)["__policy_key"])
 
 
 def target_policy_names(df):
-    """Return target policy names."""
+    # Return target policy names.
     return set(df.loc[~df["policy_name"].eq(CURRENT_PRACTICE_LABEL), "policy_name"].astype(str))
 
 
@@ -129,7 +131,7 @@ def check_same_policies(
     aipw_summary,
     ipw_summary,
 ):
-    """Check same policies."""
+    # Check same policies.
     # Build key set.
     sets = {
         "gformula": policy_key_set(g_summary),
@@ -146,7 +148,7 @@ def check_same_policies(
 
 
 def structural_episode_counts(summary, method):
-    """Build structural episode counts."""
+    # Build structural episode counts.
     # Add policy key.
     df = add_policy_key(summary)
     if method == "ipw":
@@ -167,7 +169,7 @@ def check_same_episode_counts(
     aipw_summary,
     ipw_summary,
 ):
-    """Check same episode counts."""
+    # Check same episode counts.
     # Build structural episode counts.
     g = structural_episode_counts(g_summary, "gformula").rename(
         columns={"structural_n_episodes": "n_gformula"}
@@ -204,7 +206,7 @@ def check_gformula_matches_aipw_plugin(
     aipw_summary,
     tolerance,
 ):
-    """Check gformula matches AIPW plugin."""
+    # Check gformula matches AIPW plugin.
     mappings = [
         ("predicted_cauti_risk", "plugin_predicted_cauti_risk"),
         ("predicted_recatheterisation_risk", "plugin_predicted_recatheterisation_risk"),
@@ -252,7 +254,7 @@ def check_aipw_ess_leq_adherent(
     aipw_weight_diagnostics,
     tolerance,
 ):
-    """Check AIPW ESS leq adherent."""
+    # Check AIPW ESS leq adherent.
     failures = []
     for label, df in [
         ("aipw_summary", aipw_summary),
@@ -286,7 +288,7 @@ def check_ipw_summary_flags_match_diagnostics(
     ipw_weight_diagnostics,
     ipw_support_diagnostics,
 ):
-    """Check IPW summary flags match diagnostics."""
+    # Check IPW summary flags match diagnostics.
     # Add policy key.
     summary = add_policy_key(ipw_summary)
     # Add policy key.
@@ -352,7 +354,7 @@ def check_ipw_summary_flags_match_diagnostics(
 
 
 def check_remove_rows(results, policy_qa, g_diagnostics, aipw_summary):
-    """Check remove rows."""
+    # Check remove rows.
     failures = []
     for label, df in [
         ("policy_intervention_qa", policy_qa),
@@ -381,7 +383,7 @@ def check_no_missing_predictions(
     aipw_summary,
     aipw_episodes,
 ):
-    """Check no missing predictions."""
+    # Check no missing predictions.
     checks = []
     if "n_incomplete_prediction_episodes" in g_summary.columns:
         checks.append(("gformula_summary_incomplete", int(pd.to_numeric(g_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
@@ -409,7 +411,7 @@ def check_no_probabilities_outside_unit_interval(
     aipw_summary,
     ipw_summary,
 ):
-    """Check no probabilities outside unit interval."""
+    # Check no probabilities outside unit interval.
     failures = []
     for col in ["n_predictions_below_0", "n_predictions_above_1"]:
         if col in g_diagnostics.columns:
@@ -457,7 +459,7 @@ def check_remove_day_1_poor_support(
     ipw_support_diagnostics,
     aipw_summary,
 ):
-    """Check remove day 1 poor support."""
+    # Check remove day 1 poor support.
     failures = []
     # Check whether one value is true.
     for label, df in [("ipw_summary", ipw_summary), ("aipw_summary", aipw_summary)]:
@@ -483,13 +485,12 @@ def check_remove_day_1_poor_support(
 
 
 def save_report(report, path):
-    """Save report."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    report.to_csv(path, index=False)
+    # Save report.
+    pec.save_report_df(report, path)
 
 
 def main():
-    """Run the script workflow."""
+    # Run the script workflow.
     # Parse command-line arguments.
     args = parse_args()
     results = []

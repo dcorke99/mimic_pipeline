@@ -1,8 +1,7 @@
-"""Share estimator-agnostic helpers for policy-evaluation scripts."""
+# Share estimator-agnostic helpers for policy-evaluation scripts.
 
 
 import argparse
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -28,13 +27,13 @@ TARGET_POLICY_TIMING_SOURCE = "policy_intervention_panel_long.csv resolved targe
 TARGET_POLICY_TIMELINE_HELPER = "policy_eval_common.add_fixed_day_target_policy_timeline"
 TARGET_POLICY_TIMELINE_SEMANTICS = (
     "fixed-day removal: before removal day is in/keep; first row on removal "
-    "day is in/remove; later rows on the same removal day are out/out with "
-    "policy_periods_out = 0; later days are out/out"
+    "day is out/remove; later rows on the same removal day and later days are "
+    "out/out"
 )
 
 
 def add_bootstrap_args(parser):
-    """Add bootstrap-related command-line arguments."""
+    # Add bootstrap-related command-line arguments.
     parser.add_argument(
         "--n-bootstrap",
         type=int,
@@ -55,7 +54,7 @@ def add_bootstrap_args(parser):
 
 
 def bootstrap_metadata(args, available_columns):
-    """Record bootstrap settings in metadata."""
+    # Record bootstrap settings in metadata.
     cluster_col = getattr(args, "cluster_col", "subject_id")
     n_bootstrap = int(getattr(args, "n_bootstrap", 0))
     return {
@@ -73,11 +72,25 @@ def bootstrap_metadata(args, available_columns):
 
 
 def save_json(payload, path):
-    """Save a dictionary as JSON."""
+    # Save a dictionary as JSON.
     path.parent.mkdir(exist_ok=True, parents=True)
     import json
 
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+
+
+def round_report_df(df, decimals=3):
+    # Round numeric report columns without changing source artefacts.
+    out = df.copy()
+    numeric_cols = out.select_dtypes(include=[np.number]).columns
+    out[numeric_cols] = out[numeric_cols].round(decimals)
+    return out
+
+
+def save_report_df(df, path, decimals=3):
+    # Save a report CSV with rounded numeric columns.
+    path.parent.mkdir(exist_ok=True, parents=True)
+    round_report_df(df, decimals).to_csv(path, index=False, float_format=f"%.{decimals}f")
 
 
 def add_period_duration_days(
@@ -86,7 +99,7 @@ def add_period_duration_days(
     context,
     max_reasonable_days=MAX_REASONABLE_PERIOD_DURATION_DAYS,
 ):
-    """Add period duration in days."""
+    # Add period duration in days.
     out = df.copy()
     start = pd.to_datetime(out["period_start"], errors="coerce")
     end = pd.to_datetime(out["period_end"], errors="coerce")
@@ -113,7 +126,7 @@ def add_period_duration_days(
 
 
 def add_observed_icu_exit_alive_period(df):
-    """Add ICU-exit-alive outcome flags."""
+    # Add ICU-exit-alive outcome flags.
     out = df.copy()
     death = (
         pd.to_numeric(out["death_in_period"], errors="coerce").fillna(0)
@@ -146,7 +159,7 @@ def add_fixed_day_target_policy_timeline(
     periods_in_col="policy_periods_in",
     periods_out_col="policy_periods_out",
 ):
-    """Add the resolved fixed-day policy timeline."""
+    # Add the resolved fixed-day policy timeline.
     out = df.copy()
     out = out.sort_values(
         [
@@ -177,7 +190,7 @@ def add_fixed_day_target_policy_timeline(
     after_remove = day.gt(remove_day)
 
     out[state_col] = "out"
-    out.loc[before_remove | first_row_on_remove_day, state_col] = "in"
+    out.loc[before_remove, state_col] = "in"
 
     out[action_col] = "out"
     out.loc[before_remove, action_col] = "keep"
@@ -188,13 +201,17 @@ def add_fixed_day_target_policy_timeline(
     out.loc[first_row_on_remove_day, action_remove_col] = 1.0
 
     out[periods_in_col] = np.nan
-    out.loc[before_remove | first_row_on_remove_day, periods_in_col] = day.loc[
-        before_remove | first_row_on_remove_day
-    ]
+    out.loc[before_remove, periods_in_col] = day.loc[before_remove]
 
     out[periods_out_col] = np.nan
-    out.loc[later_row_on_remove_day, periods_out_col] = 0.0
-    out.loc[after_remove, periods_out_col] = day.loc[after_remove] - remove_day.loc[after_remove]
+    policy_out_rows = on_remove | after_remove
+    out.loc[policy_out_rows, periods_out_col] = (
+        policy_out_rows.astype(int)
+        .groupby([out[policy_name_col], out[episode_id_col]], sort=False)
+        .cumsum()
+        .loc[policy_out_rows]
+        .astype(float)
+    )
     out["policy_removal_day_extra_row_treated_as_out"] = later_row_on_remove_day.astype(int)
     return out
 
@@ -207,7 +224,7 @@ def resolved_timeline_diagnostics(
     policy_remove_day_col="policy_remove_day",
     episode_day_col="episode_day_since_insertion",
 ):
-    """Summarise resolved timeline diagnostics."""
+    # Summarise resolved timeline diagnostics.
     rows = []
     for policy_name, policy_df in df.groupby(policy_name_col, dropna=False, sort=False):
         remove_day = pd.to_numeric(policy_df[policy_remove_day_col], errors="coerce").dropna()
@@ -256,7 +273,7 @@ def validate_resolved_target_policy_timeline(
     episode_id_col="catheter_episode_id",
     context="policy_intervention_panel_long.csv",
 ):
-    """Validate the resolved policy timeline."""
+    # Validate the resolved policy timeline.
     state = df["policy_catheter_state"].astype("string").str.strip().str.lower()
     action = df["policy_action_resolved"].astype("string").str.strip().str.lower()
     action_remove = pd.to_numeric(df["policy_action_remove_resolved"], errors="coerce")
@@ -277,14 +294,30 @@ def validate_resolved_target_policy_timeline(
             f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
         )
 
-    out_remove = state.eq("out") & (action.eq("remove") | action_remove.eq(1))
-    if out_remove.any():
+    remove_rows = action.eq("remove") | action_remove.eq(1)
+    invalid_remove = remove_rows & ~(
+        state.eq("out") & action.eq("remove") & action_remove.eq(1)
+    )
+    if invalid_remove.any():
         examples = df.loc[
-            out_remove,
+            invalid_remove,
             ["policy_name", episode_id_col, "policy_catheter_state", "policy_action_resolved"],
         ].head(10)
         raise ValueError(
-            f"{context} assigns a resolved remove action on OUT-state rows. "
+            f"{context} assigns a resolved remove action outside an OUT-state row. "
+            f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
+        )
+
+    invalid_keep = action.eq("keep") & (~state.eq("in") | action_remove.ne(0))
+    invalid_out = action.eq("out") & (~state.eq("out") | action_remove.notna())
+    if invalid_keep.any() or invalid_out.any():
+        invalid = invalid_keep | invalid_out
+        examples = df.loc[
+            invalid,
+            ["policy_name", episode_id_col, "policy_catheter_state", "policy_action_resolved"],
+        ].head(10)
+        raise ValueError(
+            f"{context} has inconsistent resolved state/action rows. "
             f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
         )
 
@@ -309,7 +342,7 @@ def attach_resolved_timeline_aliases(
     episode_id_col="catheter_episode_id",
     context="policy_intervention_panel_long.csv",
 ):
-    """Attach estimator aliases for resolved timeline columns."""
+    # Attach estimator aliases for resolved timeline columns.
     # Validate the resolved policy timeline.
     validate_resolved_target_policy_timeline(
         df,
@@ -336,7 +369,7 @@ def catheter_exposure_aggregation(
     row_count_col,
     exposure_col,
 ):
-    """Aggregate catheter-in intervals and exposure days."""
+    # Aggregate catheter-in intervals and exposure days.
     in_mask = df[state_col].astype("string").str.lower().eq("in")
     temp = df[[*group_cols, "period_duration_days"]].copy()
     temp["__in_row"] = in_mask.astype(int)
@@ -354,7 +387,7 @@ def duplicate_episode_day_count(
     group_cols,
     day_col="episode_day_since_insertion",
 ):
-    """Count duplicate episode-day rows."""
+    # Count duplicate episode-day rows.
     duplicated = df.duplicated([*group_cols, day_col], keep=False)
     return int(duplicated.sum())
 
@@ -365,7 +398,7 @@ def add_standard_comparisons(
     baseline_label,
     comparison_map,
 ):
-    """Add standard comparisons against current practice."""
+    # Add standard comparisons against current practice.
     baseline_rows = summary.loc[summary["policy_name"].eq(baseline_label)]
     if baseline_rows.empty:
         return summary
@@ -397,7 +430,7 @@ def add_overlap_quality_flags(
     weight_diagnostics=None,
     current_practice_label="current_practice",
 ):
-    """Add overlap quality flags."""
+    # Add overlap quality flags.
     out = summary.copy()
     if "pct_adherent_episodes" in out.columns:
         out["low_adherence_flag"] = out["pct_adherent_episodes"].lt(LOW_ADHERENCE_THRESHOLD)

@@ -72,6 +72,7 @@ Y_ICU_EXIT = "icu_end_in_period"
 TRANSITION_LABEL_COL = "next_state"
 OBSERVED_ACTION_COL = "observed_action"
 ACTION_REMOVE_COL = "action_remove"
+DECISION_ROW_COL = "is_decision_row"
 LAST_PERIOD_COL = "is_last_period_of_episode"
 END_REASON_COL = "episode_end_reason"
 
@@ -92,6 +93,7 @@ class PanelBuildConfig:
     mimic_dir: Path
     data_dir: Path
     config_dir: Path
+    keep_chart_intermediates: bool = False
 
     @property
     def d_items_path(self):
@@ -204,6 +206,16 @@ class PanelBuildConfig:
 def remove_if_exists(path):
     # Remove if exists.
     path.unlink(missing_ok=True)
+
+
+def cleanup_chart_intermediate(path, keep_intermediates=False):
+    # Remove a regenerable full-size chart intermediate after its last consumer.
+    if keep_intermediates or not path.exists():
+        return 0
+    size_bytes = path.stat().st_size
+    path.unlink()
+    print(f"[CLEANUP] removed {path} ({size_bytes / (1024 ** 3):.2f} GB)")
+    return size_bytes
 
 
 def replace_output(tmp_path, final_path):
@@ -438,6 +450,128 @@ def make_state_windows(state_start, state_end):
     return rows
 
 
+def validate_base_panel(panel, catheterised):
+    # Validate removal allocation without changing the generated panel geometry.
+    episode_keys = ["stay_id", "inserted"]
+    event_cols = [
+        "cauti_in_period",
+        "reinsertion_in_period",
+        "death_in_period",
+        "icu_end_in_period",
+    ]
+
+    if ((panel["catheter_state"] == "in") & (panel["removed_in_period"] == 1)).any():
+        raise AssertionError("A catheter-in row has removed_in_period=1.")
+
+    removal_counts = panel.groupby(episode_keys, dropna=False)["removed_in_period"].sum()
+    if (removal_counts > 1).any():
+        raise AssertionError("An episode has more than one row with removed_in_period=1.")
+
+    panel_groups = {
+        key: group.sort_values(["period_start", "period_end", "catheter_state"])
+        for key, group in panel.groupby(episode_keys, dropna=False, sort=False)
+    }
+    expected_rows = []
+    episodes_without_positive_out_period = 0
+    for episode in catheterised.itertuples():
+        out_state_end = episode.reinsertion_time if pd.notna(episode.reinsertion_time) else episode.ICU_out
+        in_windows = make_state_windows(episode.inserted, episode.removed)
+        out_windows = make_state_windows(episode.removed, out_state_end)
+        if not out_windows:
+            episodes_without_positive_out_period += 1
+
+        episode_panel = panel_groups.get((episode.stay_id, episode.inserted), panel.iloc[0:0])
+        removal_rows = episode_panel.loc[episode_panel["removed_in_period"] == 1]
+
+        if out_windows:
+            if len(removal_rows) != 1:
+                raise AssertionError(
+                    f"Episode stay_id={episode.stay_id}, inserted={episode.inserted} "
+                    "does not have exactly one removal row."
+                )
+            removal_row = removal_rows.iloc[0]
+            if removal_row["catheter_state"] != "out":
+                raise AssertionError("The removal row is not a catheter-out row.")
+            if removal_row["period_start"] != episode.removed:
+                raise AssertionError("The removal row does not start at the removal timestamp.")
+            out_rows = episode_panel.loc[episode_panel["catheter_state"] == "out"]
+            if removal_row.name != out_rows.index[0]:
+                raise AssertionError("The removal row is not the first catheter-out row.")
+            later_out_rows = out_rows.loc[out_rows["period_start"] > removal_row["period_start"]]
+            if (later_out_rows["removed_in_period"] != 0).any():
+                raise AssertionError("A later catheter-out row has removed_in_period=1.")
+        elif len(removal_rows) != 0:
+            raise AssertionError("An episode without a positive-duration out period has a removal row.")
+
+        for catheter_state, windows in (("in", in_windows), ("out", out_windows)):
+            for _, period_start, period_end, interval_hours in windows:
+                expected_rows.append({
+                    "stay_id": episode.stay_id,
+                    "inserted": episode.inserted,
+                    "catheter_state": catheter_state,
+                    "period_start": period_start,
+                    "period_end": period_end,
+                    "interval_hours": interval_hours,
+                    "cauti_in_period": int(
+                        pd.notna(episode.cauti_time) and
+                        episode.cauti_time > period_start and
+                        episode.cauti_time <= period_end
+                    ),
+                    "reinsertion_in_period": int(
+                        catheter_state == "out" and
+                        pd.notna(episode.reinsertion_time) and
+                        episode.reinsertion_time > period_start and
+                        episode.reinsertion_time <= period_end
+                    ),
+                    "death_in_period": int(
+                        pd.notna(episode.death_time) and
+                        episode.death_time > period_start and
+                        episode.death_time <= period_end
+                    ),
+                    "icu_end_in_period": int(
+                        pd.notna(episode.ICU_out) and
+                        episode.ICU_out > period_start and
+                        episode.ICU_out <= period_end
+                    ),
+                })
+
+    expected = pd.DataFrame(expected_rows)
+    geometry_cols = [
+        "stay_id", "inserted", "catheter_state", "period_start", "period_end", "interval_hours"
+    ]
+    sort_cols = ["stay_id", "inserted", "period_start", "period_end", "catheter_state"]
+    actual_geometry = panel[geometry_cols].sort_values(sort_cols).reset_index(drop=True)
+    expected_geometry = expected[geometry_cols].sort_values(sort_cols).reset_index(drop=True)
+    pd.testing.assert_frame_equal(actual_geometry, expected_geometry, check_dtype=False)
+
+    actual_events = (
+        panel.groupby(episode_keys, dropna=False)[event_cols]
+        .sum()
+        .sort_index()
+    )
+    expected_events = (
+        expected.groupby(episode_keys, dropna=False)[event_cols]
+        .sum()
+        .sort_index()
+    )
+    pd.testing.assert_frame_equal(actual_events, expected_events, check_dtype=False)
+
+    expected_decision_rows = (
+        (panel["catheter_state"] == "in") | (panel["removed_in_period"] == 1)
+    ).astype(int)
+    if not panel[DECISION_ROW_COL].equals(expected_decision_rows):
+        raise AssertionError("is_decision_row does not match the required keep/remove rows.")
+
+    print(
+        "[VALIDATE] base panel removal allocation passed; "
+        f"episodes without a positive-duration out period={episodes_without_positive_out_period:,}"
+    )
+    return {
+        "episodes_without_positive_out_period": episodes_without_positive_out_period,
+        "row_count": len(panel),
+    }
+
+
 def build_base_panel(catheterised):
     # Build base panel.
     rows = []
@@ -501,9 +635,12 @@ def build_base_panel(catheterised):
     panel = panel.drop(columns=["state_index"])
 
     panel["removed_in_period"] = (
-        (panel["catheter_state"] == "in") &
-        (panel["removed"] > panel["period_start"]) &
-        (panel["removed"] <= panel["period_end"])
+        (panel["catheter_state"] == "out") &
+        (panel["period_start"] == panel["removed"])
+    ).astype(int)
+    panel[DECISION_ROW_COL] = (
+        (panel["catheter_state"] == "in") |
+        (panel["removed_in_period"] == 1)
     ).astype(int)
 
     panel["reinsertion_in_period"] = (
@@ -534,7 +671,6 @@ def build_base_panel(catheterised):
     panel["next_state"] = "NO_EVENT_CONTINUE"
     panel.loc[(panel["icu_end_in_period"] == 1) & (panel["death_in_period"] == 0), "next_state"] = "ICU_EXIT_ALIVE"
     panel.loc[panel["death_in_period"] == 1, "next_state"] = "DEATH"
-    panel.loc[panel["removed_in_period"] == 1, "next_state"] = "REMOVAL"
     panel.loc[panel["reinsertion_in_period"] == 1, "next_state"] = "REINSERTION"
     panel.loc[panel["cauti_in_period"] == 1, "next_state"] = "CAUTI"
 
@@ -588,6 +724,7 @@ def build_base_panel(catheterised):
         "interval_hours",
         "periods_in_state",
         "removed_in_period",
+        "is_decision_row",
         "reinsertion_in_period",
         "cauti_in_period",
         "death_in_period",
@@ -605,7 +742,9 @@ def build_base_panel(catheterised):
         "cov_end",
         "row_id",
     ]
-    return panel[[c for c in ordered_cols if c in non_ethnicity_cols or c in ethnicity_cols]]
+    panel = panel[[c for c in ordered_cols if c in non_ethnicity_cols or c in ethnicity_cols]]
+    validate_base_panel(panel, catheterised)
+    return panel
 
 
 def create_episode_cohort_and_base_panel(config):
@@ -1832,16 +1971,23 @@ def add_transition_columns(df):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     df[TRANSITION_LABEL_COL] = "no_event_continue"
-    df.loc[df[ACTION_COL] == 1, TRANSITION_LABEL_COL] = "removal"
     df.loc[df[Y_REINS] == 1, TRANSITION_LABEL_COL] = "reinsertion"
     df.loc[df[Y_CAUTI] == 1, TRANSITION_LABEL_COL] = "cauti"
     df.loc[(df[Y_ICU_EXIT] == 1) & (df[Y_DEATH] == 0), TRANSITION_LABEL_COL] = "icu_exit_alive"
     df.loc[df[Y_DEATH] == 1, TRANSITION_LABEL_COL] = "death"
 
-    df[OBSERVED_ACTION_COL] = "keep"
-    df.loc[(df[STATE_COL] == "in") & (df[ACTION_COL] == 1), OBSERVED_ACTION_COL] = "remove"
-    df.loc[df[STATE_COL] == "out", OBSERVED_ACTION_COL] = "out"
-    df[ACTION_REMOVE_COL] = (df[OBSERVED_ACTION_COL] == "remove").astype(int)
+    remove_rows = df[ACTION_COL] == 1
+    keep_rows = (df[STATE_COL] == "in") & (df[ACTION_COL] == 0)
+    out_rows = (df[STATE_COL] == "out") & (df[ACTION_COL] == 0)
+
+    df[OBSERVED_ACTION_COL] = pd.Series(pd.NA, index=df.index, dtype="string")
+    df.loc[remove_rows, OBSERVED_ACTION_COL] = "remove"
+    df.loc[keep_rows, OBSERVED_ACTION_COL] = "keep"
+    df.loc[out_rows, OBSERVED_ACTION_COL] = "out"
+
+    df[ACTION_REMOVE_COL] = pd.Series(pd.NA, index=df.index, dtype="Int64")
+    df.loc[remove_rows, ACTION_REMOVE_COL] = 1
+    df.loc[keep_rows, ACTION_REMOVE_COL] = 0
 
 
 def build_modeling_panel(config):
@@ -1905,6 +2051,11 @@ def build_modeling_panel(config):
         "transition_label_col": TRANSITION_LABEL_COL,
         "observed_action_col": OBSERVED_ACTION_COL,
         "action_remove_col": ACTION_REMOVE_COL,
+        "decision_row_col": DECISION_ROW_COL,
+        "decision_row_definition": (
+            "1 for every catheter-in row and for the first catheter-out row beginning at removal; "
+            "0 for later catheter-out rows. This is an eligibility indicator, not a model feature."
+        ),
         "last_period_col": LAST_PERIOD_COL,
         "end_reason_col": END_REASON_COL,
         "period_hours": period_hours,
@@ -1937,6 +2088,14 @@ def parse_args():
     parser.add_argument("--mimic-dir", type=Path, default=DEFAULT_MIMIC_DIR, help="Path to the MIMIC-IV root directory.")
     parser.add_argument("--data-dir", type=Path, default=REPO_ROOT / "data", help="Pipeline data directory.")
     parser.add_argument("--config-dir", type=Path, default=REPO_ROOT / "config", help="Pipeline config directory.")
+    parser.add_argument(
+        "--keep-chart-intermediates",
+        action="store_true",
+        help=(
+            "Retain the full raw, preprocessed, allowlisted, and cleaned chart CSVs. "
+            "By default they are removed after their last consumer to reduce disk use."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1949,6 +2108,7 @@ def main():
         mimic_dir=args.mimic_dir,
         data_dir=args.data_dir,
         config_dir=args.config_dir,
+        keep_chart_intermediates=args.keep_chart_intermediates,
     )
 
     print("[CONFIG] repo root:", config.repo_root)
@@ -1970,11 +2130,13 @@ def main():
     print_section("Preprocess raw chart-event covariates")
     # Preprocess raw chart covariates.
     preprocess_raw_chart_covariates(config)
+    cleanup_chart_intermediate(config.raw_chart_file, config.keep_chart_intermediates)
 
     # Print section.
     print_section("Filter chart covariates to the item allowlist")
     # Filter preprocessed chart covariates.
     filter_preprocessed_chart_covariates(config)
+    cleanup_chart_intermediate(config.preprocessed_chart_file, config.keep_chart_intermediates)
 
     # Print section.
     print_section("Validate raw kept chart covariates")
@@ -1985,6 +2147,7 @@ def main():
     print_section("Clean chart covariates")
     # Clean chart covariates.
     clean_chart_covariates(config)
+    cleanup_chart_intermediate(config.kept_preprocessed_chart_file, config.keep_chart_intermediates)
 
     # Print section.
     print_section("Validate cleaned chart covariates")
@@ -1995,6 +2158,7 @@ def main():
     print_section("Aggregate cleaned covariates onto the base panel")
     # Build master panel.
     build_master_panel(config)
+    cleanup_chart_intermediate(config.cleaned_chart_file, config.keep_chart_intermediates)
 
     # Print section.
     print_section("Select retained covariates")

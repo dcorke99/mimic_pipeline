@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Audit duplicate episode-day rows in the catheter panel."""
+# Audit duplicate episode-day rows in the catheter panel.
 
 from pathlib import Path
 import argparse
 import numpy as np
 import pandas as pd
+
+import policy_eval_common as pec
 
 
 DEFAULT_INPUT = Path("data/modeling_panel.csv")
@@ -12,7 +14,7 @@ DEFAULT_OUTDIR = Path("artifacts/diagnostics/duplicate_episode_days")
 
 
 def parse_args():
-    """Parse command-line arguments."""
+    # Parse command-line arguments.
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-panel", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
@@ -20,7 +22,7 @@ def parse_args():
 
 
 def add_episode_day_since_insertion(df):
-    """Add episode day since catheter insertion."""
+    # Add episode day since catheter insertion.
     df = df.copy()
 
     inserted = pd.to_datetime(df["inserted"], errors="coerce")
@@ -34,7 +36,7 @@ def add_episode_day_since_insertion(df):
 
 
 def main():
-    """Run the script workflow."""
+    # Run the script workflow.
     # Parse command-line arguments.
     args = parse_args()
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -129,12 +131,12 @@ def main():
         interval_summary = duplicate_days
 
     # Save outputs
-    counts.to_csv(args.outdir / "episode_day_row_counts_all.csv", index=False)
-    duplicate_days.to_csv(args.outdir / "duplicate_episode_day_summary.csv", index=False)
-    duplicate_rows.to_csv(args.outdir / "duplicate_episode_day_rows.csv", index=False)
-    exact_duplicates.to_csv(args.outdir / "exact_duplicate_interval_summary.csv", index=False)
-    exact_duplicate_rows.to_csv(args.outdir / "exact_duplicate_interval_rows.csv", index=False)
-    interval_summary.to_csv(args.outdir / "duplicate_episode_day_trace_summary.csv", index=False)
+    pec.save_report_df(counts, args.outdir / "episode_day_row_counts_all.csv")
+    pec.save_report_df(duplicate_days, args.outdir / "duplicate_episode_day_summary.csv")
+    pec.save_report_df(duplicate_rows, args.outdir / "duplicate_episode_day_rows.csv")
+    pec.save_report_df(exact_duplicates, args.outdir / "exact_duplicate_interval_summary.csv")
+    pec.save_report_df(exact_duplicate_rows, args.outdir / "exact_duplicate_interval_rows.csv")
+    pec.save_report_df(interval_summary, args.outdir / "duplicate_episode_day_trace_summary.csv")
 
     print()
     print("--- DUPLICATE EPISODE-DAY AUDIT COMPLETE ---")

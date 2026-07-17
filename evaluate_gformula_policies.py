@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Evaluate catheter-removal policies with plug-in g-formula estimates."""
+# Evaluate catheter-removal policies with plug-in g-formula estimates.
 
 
 import argparse
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
@@ -145,7 +144,7 @@ MISSING_COUNTERFACTUAL_MESSAGE = (
 # Argument parsing and generic helpers
 
 def parse_args():
-    """Parse command-line arguments."""
+    # Parse command-line arguments.
     parser = argparse.ArgumentParser(
         description=(
             "Evaluate catheter-removal policies using plug-in g-formula / "
@@ -236,25 +235,25 @@ def parse_args():
 
 
 def resolve_output_path(outdir, name_or_path):
-    """Resolve an output file path."""
+    # Resolve an output file path.
     path = Path(name_or_path)
     return path if path.is_absolute() else outdir / path
 
 
 def save_df(df, path):
-    """Save a data frame as CSV."""
+    # Save a data frame as CSV.
     path.parent.mkdir(exist_ok=True, parents=True)
     df.to_csv(path, index=False)
 
 
 def first_non_null(series):
-    """Return the first non-missing value."""
+    # Return the first non-missing value.
     non_null = series.dropna()
     return non_null.iloc[0] if len(non_null) else np.nan
 
 
 def max_binary(series):
-    """Return whether any binary value is present."""
+    # Return whether any binary value is present.
     numeric = pd.to_numeric(series, errors="coerce").fillna(0)
     if numeric.empty:
         return np.nan
@@ -262,7 +261,7 @@ def max_binary(series):
 
 
 def cumulative_event_probability(probabilities):
-    """Calculate cumulative event probability."""
+    # Calculate cumulative event probability.
     probs = pd.to_numeric(probabilities, errors="coerce")
     probs = probs.dropna()
     if probs.empty:
@@ -272,14 +271,14 @@ def cumulative_event_probability(probabilities):
 
 
 def safe_ratio(numerator, denominator):
-    """Calculate a ratio with missing-value protection."""
+    # Calculate a ratio with missing-value protection.
     if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
         return np.nan
     return float(numerator / denominator)
 
 
 def coerce_bool(series):
-    """Convert common text values to booleans."""
+    # Convert common text values to booleans.
     if pd.api.types.is_bool_dtype(series):
         return series.fillna(False).astype(bool)
     text = series.astype("string").str.strip().str.lower()
@@ -299,7 +298,7 @@ def coerce_bool(series):
 
 
 def canonical_numeric_value(value):
-    """Format a numeric join value consistently."""
+    # Format a numeric join value consistently.
     if pd.isna(value):
         return "<NA>"
     try:
@@ -314,7 +313,7 @@ def canonical_numeric_value(value):
 
 
 def canonical_key_series(series, column):
-    """Create a stable join-key series."""
+    # Create a stable join-key series.
     if column in DATETIME_KEY_COLS:
         raw = series.astype("string").str.strip()
         parsed = pd.to_datetime(series, errors="coerce")
@@ -336,7 +335,7 @@ def canonical_key_series(series, column):
 
 
 def add_join_key_columns(df, key_cols):
-    """Add stable join-key columns."""
+    # Add stable join-key columns.
     out = df.copy()
     join_cols = []
     # Create a stable join-key series.
@@ -349,7 +348,7 @@ def add_join_key_columns(df, key_cols):
 
 
 def duplicate_key_examples(df, join_cols, display_cols):
-    """Return examples of duplicate join keys."""
+    # Return examples of duplicate join keys.
     duplicated = df.duplicated(join_cols, keep=False)
     if not duplicated.any():
         return pd.DataFrame()
@@ -359,7 +358,7 @@ def duplicate_key_examples(df, join_cols, display_cols):
 # Loading and robust joining
 
 def normalise_row_key_types(df):
-    """Normalise row-key columns for joining."""
+    # Normalise row-key columns for joining.
     df = df.copy()
     if "catheter_state" in df.columns:
         df["catheter_state"] = df["catheter_state"].astype("string").str.strip().str.lower()
@@ -373,7 +372,7 @@ def normalise_row_key_types(df):
 
 
 def load_policy_panel(path):
-    """Load and validate the policy panel."""
+    # Load and validate the policy panel.
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
     # Normalise row-key columns for joining.
@@ -409,7 +408,7 @@ def load_policy_panel(path):
 
 
 def load_scored_panel(path):
-    """Load and validate the scored nuisance panel."""
+    # Load and validate the scored nuisance panel.
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
     # Normalise row-key columns for joining.
@@ -418,7 +417,7 @@ def load_scored_panel(path):
 
 
 def validate_policy_panel(df):
-    """Validate policy-panel structure."""
+    # Validate policy-panel structure.
     if df["policy_name"].dropna().empty:
         raise ValueError("Policy panel contains no policy_name values.")
     if df["policy_remove_day"].isna().any():
@@ -427,7 +426,7 @@ def validate_policy_panel(df):
 
 
 def join_scored_panel(policy_df, scored_df):
-    """Join nuisance scores to policy rows."""
+    # Join nuisance scores to policy rows.
     # Add stable join-key columns.
     policy_keyed, join_cols = add_join_key_columns(policy_df, ROW_JOIN_KEY_COLS)
     # Add stable join-key columns.
@@ -479,7 +478,7 @@ def join_scored_panel(policy_df, scored_df):
 # Target-policy state timeline
 
 def add_episode_day_since_insertion(df):
-    """Add episode day since catheter insertion."""
+    # Add episode day since catheter insertion.
     df = df.copy()
     inserted = pd.to_datetime(df["inserted"], errors="coerce")
     period_start = pd.to_datetime(df["period_start"], errors="coerce")
@@ -490,7 +489,7 @@ def add_episode_day_since_insertion(df):
 
 
 def apply_horizon(df, horizon_days):
-    """Restrict rows to the requested time horizon."""
+    # Restrict rows to the requested time horizon.
     if horizon_days is None:
         return df
     if horizon_days < 1:
@@ -501,7 +500,7 @@ def apply_horizon(df, horizon_days):
 # Counterfactual prediction rescoring
 
 def predict_fold_model(fold_model, features):
-    """Predict probabilities from one fold model."""
+    # Predict probabilities from one fold model.
     if fold_model.get("fallback"):
         return np.full(len(features), float(fold_model["fallback_probability"]), dtype=float)
     model = fold_model.get("model")
@@ -511,7 +510,7 @@ def predict_fold_model(fold_model, features):
 
 
 def fold_column(df):
-    """Find the available cross-fit fold column."""
+    # Find the available cross-fit fold column.
     for col in ["_crossfit_fold", "crossfit_fold", "fold_id"]:
         if col in df.columns:
             return col
@@ -519,7 +518,7 @@ def fold_column(df):
 
 
 def load_outcome_model_payload(path):
-    """Load saved outcome model artefacts."""
+    # Load saved outcome model artefacts.
     if not path.exists():
         return None
     return joblib.load(path)
@@ -534,7 +533,7 @@ def rescore_state_action_predictions(
     target_mask,
     action_remove=None,
 ):
-    """Rescore missing state-action predictions."""
+    # Rescore missing state-action predictions.
     if int(target_mask.sum()) == 0:
         return df
 
@@ -557,7 +556,7 @@ def rescore_state_action_predictions(
         features = df.loc[rows, feature_cols].copy()
         if state == "in":
             if action_remove is None:
-                raise ValueError("IN-state rescoring requires an action_remove value.")
+                raise ValueError("Keep/remove decision rescoring requires an action_remove value.")
             action_col = payload.get("action_remove_col", "action_remove")
             features[action_col] = action_remove
         # Predict probabilities from one fold model.
@@ -570,7 +569,7 @@ def fill_missing_counterfactual_predictions(
     df,
     outcome_models_path,
 ):
-    """Fill required counterfactual prediction columns."""
+    # Fill required counterfactual prediction columns.
     needed_specs = [
         ("in", "cauti", "p_cauti_if_keep", "keep", 0),
         ("in", "cauti", "p_cauti_if_remove", "remove", 1),
@@ -594,8 +593,8 @@ def fill_missing_counterfactual_predictions(
         df[f"__rescored_{col}"] = False
 
     masks = {
-        "keep": df["policy_catheter_state"].eq("in") & df["policy_action_remove_gformula"].eq(0),
-        "remove": df["policy_catheter_state"].eq("in") & df["policy_action_remove_gformula"].eq(1),
+        "keep": df["policy_action_remove_gformula"].eq(0),
+        "remove": df["policy_action_remove_gformula"].eq(1),
         "out": df["policy_catheter_state"].eq("out"),
     }
     # OUT CAUTI is only needed during the policy-implied attribution window.
@@ -655,7 +654,7 @@ def fill_missing_counterfactual_predictions(
 
 
 def ensure_prediction_columns(df):
-    """Ensure all prediction columns exist."""
+    # Ensure all prediction columns exist.
     df = df.copy()
     for col in PREDICTION_COLUMNS:
         if col not in df.columns:
@@ -672,7 +671,7 @@ def fill_missing_counterfactual_predictions_safely(
     allow_missing,
     context,
 ):
-    """Fill predictions and handle allowed failures."""
+    # Fill predictions and handle allowed failures.
     # Fill required counterfactual prediction columns.
     try:
         # Fill required counterfactual prediction columns.
@@ -704,7 +703,7 @@ def assign_prediction_from_source(
     source_col,
     mask,
 ):
-    """Copy selected prediction values into target columns."""
+    # Copy selected prediction values into target columns.
     df.loc[mask, target_col] = pd.to_numeric(df.loc[mask, source_col], errors="coerce")
     rescored_col = f"__rescored_{source_col}"
     if rescored_col in df.columns:
@@ -712,15 +711,15 @@ def assign_prediction_from_source(
 
 
 def select_policy_predictions(df):
-    """Select predictions implied by the target policy."""
+    # Select predictions implied by the target policy.
     df = df.copy()
     for col in UNDER_POLICY_COLUMNS:
         df[col] = np.nan
     df["__used_rescored_prediction"] = False
 
-    keep_rows = df["policy_catheter_state"].eq("in") & df["policy_action_remove_gformula"].eq(0)
-    remove_rows = df["policy_catheter_state"].eq("in") & df["policy_action_remove_gformula"].eq(1)
-    out_rows = df["policy_catheter_state"].eq("out")
+    keep_rows = df["policy_action_remove_gformula"].eq(0)
+    remove_rows = df["policy_action_remove_gformula"].eq(1)
+    out_rows = df["policy_catheter_state"].eq("out") & df["policy_action_remove_gformula"].isna()
     out_cauti_rows = out_rows & pd.to_numeric(df["policy_periods_out"], errors="coerce").le(
         POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
     )
@@ -743,7 +742,12 @@ def select_policy_predictions(df):
     assign_prediction_from_source(df, "p_icu_exit_alive_under_policy", "p_icu_exit_alive_if_remove", remove_rows)
     # Copy selected prediction values into target columns.
     assign_prediction_from_source(df, "p_no_event_under_policy", "p_no_event_if_remove", remove_rows)
-    df.loc[remove_rows, "p_recatheterisation_under_policy"] = 0.0
+    assign_prediction_from_source(
+        df,
+        "p_recatheterisation_under_policy",
+        "p_reinsertion_if_out",
+        remove_rows,
+    )
 
     df.loc[out_rows, "p_cauti_under_policy"] = 0.0
     # Copy selected prediction values into target columns.
@@ -778,7 +782,7 @@ def validate_prediction_completeness(
     df,
     allow_missing_counterfactual_state_predictions,
 ):
-    """Check prediction completeness and probability bounds."""
+    # Check prediction completeness and probability bounds.
     missing_counts = df.groupby("policy_name", dropna=False)[UNDER_POLICY_COLUMNS].apply(
         lambda frame: frame.isna().sum()
     )
@@ -807,7 +811,7 @@ def validate_prediction_completeness(
 # Current-practice model-based comparator
 
 def map_episode_ids_to_scored_panel(scored_df, policy_df):
-    """Map episode identifiers onto scored rows."""
+    # Map episode identifiers onto scored rows.
     if EPISODE_ID_COL in scored_df.columns:
         return scored_df.copy()
 
@@ -836,7 +840,7 @@ def map_episode_ids_to_scored_panel(scored_df, policy_df):
 
 
 def build_current_practice_rows(scored_df, policy_df):
-    """Build rows for the observed current-practice regime."""
+    # Build rows for the observed current-practice regime.
     # Map episode identifiers onto scored rows.
     df = map_episode_ids_to_scored_panel(scored_df, policy_df)
     df = pec.add_period_duration_days(df, context="current-practice g-formula rows")
@@ -846,12 +850,8 @@ def build_current_practice_rows(scored_df, policy_df):
     df[POLICY_TYPE_COL] = "observed"
     df["policy_remove_day"] = pd.NA
     df["policy_catheter_state"] = df["catheter_state"].astype("string").str.lower()
-    df["policy_action_gformula"] = "out"
-    df.loc[df["policy_catheter_state"].eq("in") & pd.to_numeric(df["action_remove"], errors="coerce").eq(0), "policy_action_gformula"] = "keep"
-    df.loc[df["policy_catheter_state"].eq("in") & pd.to_numeric(df["action_remove"], errors="coerce").eq(1), "policy_action_gformula"] = "remove"
-    df["policy_action_remove_gformula"] = np.nan
-    df.loc[df["policy_action_gformula"].eq("keep"), "policy_action_remove_gformula"] = 0.0
-    df.loc[df["policy_action_gformula"].eq("remove"), "policy_action_remove_gformula"] = 1.0
+    df["policy_action_gformula"] = df["observed_action"].astype("string").str.strip().str.lower()
+    df["policy_action_remove_gformula"] = pd.to_numeric(df["action_remove"], errors="coerce")
     df["policy_periods_in"] = np.where(df["policy_catheter_state"].eq("in"), df["periods_in_state"], np.nan)
     df["policy_periods_out"] = np.where(df["policy_catheter_state"].eq("out"), df["periods_in_state"], np.nan)
     return df
@@ -860,7 +860,7 @@ def build_current_practice_rows(scored_df, policy_df):
 # Episode and policy-level aggregation
 
 def add_observed_crude_episode_outcomes(episode_df, row_df):
-    """Add observed episode outcomes to predictions."""
+    # Add observed episode outcomes to predictions.
     row_df = pec.add_observed_icu_exit_alive_period(row_df)
     outcome_cols = [
         ("observed_any_cauti", "cauti_in_period"),
@@ -878,7 +878,7 @@ def add_observed_crude_episode_outcomes(episode_df, row_df):
 
 
 def build_episode_predictions(row_df):
-    """Collapse row predictions to episode predictions."""
+    # Collapse row predictions to episode predictions.
     row_df = row_df.copy()
     row_df["_policy_catheter_in_row_int"] = row_df["policy_catheter_state"].astype("string").str.lower().eq("in").astype(int)
     row_df["_policy_catheter_exposure_days"] = row_df["_policy_catheter_in_row_int"] * pd.to_numeric(
@@ -911,7 +911,7 @@ def build_episode_predictions(row_df):
 
 
 def order_episode_columns(df):
-    """Order episode-level output columns."""
+    # Order episode-level output columns.
     preferred = [
         "subject_id",
         "hadm_id",
@@ -948,7 +948,7 @@ def build_policy_summary(
     episode_df,
     prediction_mode,
 ):
-    """Build policy-level summary estimates."""
+    # Build policy-level summary estimates.
     rows = []
     group_cols = ["policy_name", POLICY_TYPE_COL, "policy_remove_day"]
     for policy_values, policy_df in episode_df.groupby(group_cols, dropna=False, sort=False):
@@ -985,7 +985,7 @@ def build_policy_summary(
 
 
 def add_current_practice_comparisons(summary):
-    """Add comparisons against current practice."""
+    # Add comparisons against current practice.
     return pec.add_standard_comparisons(
         summary,
         baseline_label=CURRENT_PRACTICE_LABEL,
@@ -1002,7 +1002,7 @@ def add_current_practice_comparisons(summary):
 # Diagnostics and metadata
 
 def prediction_bounds(df, col):
-    """Summarise prediction bounds for one column."""
+    # Summarise prediction bounds for one column.
     values = pd.to_numeric(df[col], errors="coerce")
     present = values.dropna()
     return {
@@ -1014,7 +1014,7 @@ def prediction_bounds(df, col):
 
 
 def build_diagnostics(row_df, episode_df):
-    """Build diagnostic rows for policy outputs."""
+    # Build diagnostic rows for policy outputs.
     rows = []
     # Return the first non-missing value.
     for policy_name, policy_df in row_df.groupby("policy_name", dropna=False, sort=False):
@@ -1113,9 +1113,8 @@ def metadata_payload(
     episode_df,
     rescore_metadata,
 ):
-    """Build run metadata."""
+    # Build run metadata.
     return {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "estimator": ESTIMATOR_NAME,
         "prediction_mode": args.prediction_mode,
         "current_practice_comparator_type": "model_based_plugin_observed_regime",
@@ -1170,7 +1169,7 @@ def metadata_payload(
 
 
 def save_json(payload, path):
-    """Save a dictionary as JSON."""
+    # Save a dictionary as JSON.
     path.parent.mkdir(exist_ok=True, parents=True)
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
@@ -1178,7 +1177,7 @@ def save_json(payload, path):
 # Output column ordering
 
 def order_row_columns(df):
-    """Order row-level output columns."""
+    # Order row-level output columns.
     preferred = [
         "decision_row_id",
         EPISODE_ID_COL,
@@ -1226,7 +1225,7 @@ def print_console_summary(
     episode_df,
     output_paths,
 ):
-    """Print a concise run summary."""
+    # Print a concise run summary.
     print()
     print("--- G-FORMULA POLICY EVALUATION COMPLETE ---")
     print(f"Policy-intervention panel: {args.policy_panel}")
@@ -1251,7 +1250,7 @@ def print_console_summary(
 
 
 def main():
-    """Run the script workflow."""
+    # Run the script workflow.
     # Parse command-line arguments.
     args = parse_args()
     args.outdir.mkdir(exist_ok=True, parents=True)
@@ -1330,15 +1329,15 @@ def main():
     # Build diagnostic rows for policy outputs.
     diagnostics_df = build_diagnostics(pd.concat([row_df, current_rows], ignore_index=True, sort=False), combined_episode_df)
 
-    # Save a data frame as CSV.
-    save_df(summary_df, output_paths["summary"])
-    # Save a data frame as CSV.
+    # Save rounded policy-level report outputs.
+    pec.save_report_df(summary_df, output_paths["summary"])
+    # Save episode-level data at full precision for later inference.
     save_df(combined_episode_df, output_paths["episodes"])
-    # Save a data frame as CSV.
+    # Save row-level scores at full precision.
     save_df(order_row_columns(row_df), output_paths["rows"])
-    # Save a data frame as CSV.
-    save_df(diagnostics_df, output_paths["diagnostics"])
-    # Save a data frame as CSV.
+    # Save rounded diagnostics.
+    pec.save_report_df(diagnostics_df, output_paths["diagnostics"])
+    # Save current-practice episode data at full precision.
     save_df(current_episode_df, output_paths["current_practice"])
     # Save a dictionary as JSON.
     save_json(

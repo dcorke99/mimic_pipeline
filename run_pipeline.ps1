@@ -1,0 +1,29 @@
+# Run the catheter-removal pipeline from VS Code.
+
+$ErrorActionPreference = "Stop"
+
+$Conda = "C:\ProgramData\miniconda3\Scripts\conda.exe"
+$EnvName = "datascience"
+
+$Scripts = @(
+    "create_data_panel_removal_at_out.py",
+    "fit_nuisance_models.py",
+    "build_policy_intervention_panels.py",
+    "evaluate_gformula_policies.py",
+    "evaluate_ipw_policies.py",
+    "evaluate_aipw_policies.py",
+    "audit_policy_evaluation_baseline.py",
+    "prepare_results_plots.py"
+)
+
+foreach ($Script in $Scripts) {
+    Write-Host ""
+    Write-Host "Running $Script" -ForegroundColor Cyan
+    & $Conda run -n $EnvName python $Script
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Script failed with exit code $LASTEXITCODE"
+    }
+}
+
+Write-Host ""
+Write-Host "Pipeline complete." -ForegroundColor Green

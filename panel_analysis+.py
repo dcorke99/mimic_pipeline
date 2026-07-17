@@ -1,4 +1,4 @@
-"""Build descriptive summaries for the catheter modelling panel."""
+# Build descriptive summaries for the catheter modelling panel.
 from pathlib import Path
 import re
 import numpy as np
@@ -30,6 +30,8 @@ STATE_COL = "catheter_state"
 PERIODS_COL = "periods_in_state"
 INTERVAL_COL = "interval_hours"
 ACTION_COL = "removed_in_period"
+DECISION_ROW_COL = "is_decision_row"
+DECISION_PERIOD_COL = "catheter_period_at_decision"
 SPLIT_COL = "split"
 Y_CAUTI = "cauti_in_period"
 Y_REINS = "reinsertion_in_period"
@@ -48,7 +50,7 @@ REINSERTION_FEATURE = "Bladder Scan Estimate [mean]"
 
 # Detect columns like itemid_<ID>__mean/min/max and return the matching columns plus metadata.
 def detect_covariate_cols(columns, keep_stats):
-    """Detect covariate columns."""
+    # Detect covariate columns.
     pat = re.compile(r"^itemid_(\d+)__(mean|min|max)$", flags=re.IGNORECASE)
     cov_cols = []
     meta = []
@@ -66,7 +68,7 @@ def detect_covariate_cols(columns, keep_stats):
 
 # Coerce a set of columns to numeric, handling TRUE/FALSE strings.
 def coerce_numeric(df, cols):
-    """Coerce numeric."""
+    # Coerce numeric.
     for col in cols:
         if df[col].dtype == object:
             df[col] = df[col].replace({
@@ -78,7 +80,7 @@ def coerce_numeric(df, cols):
 
 # Load a Step 1 top-features table saved by 01_step1_transition_models.py.
 def load_step1_top_features(path):
-    """Load step1 top features."""
+    # Load step1 top features.
     df = pd.read_csv(path)
 
     out = df.copy()
@@ -94,7 +96,7 @@ def load_step1_top_features(path):
 
 # Return the ordered feature names for one model from a Step 1 feature table.
 def get_step1_feature_names(step1_features, model_name):
-    """Get step1 feature names."""
+    # Get step1 feature names.
     tmp = step1_features[step1_features["model"] == model_name].copy()
 
     if "rank" in tmp.columns:
@@ -115,7 +117,7 @@ def get_step1_feature_names(step1_features, model_name):
 
 # Calculate Cliff's delta for two groups as a simple effect-size summary.
 def cliffs_delta(x1, x0):
-    """Calculate Cliff's delta."""
+    # Calculate Cliff's delta.
     xy = np.concatenate([x1, x0])
     ranks = stats.rankdata(xy)
     rx = ranks[: x1.size].sum()
@@ -126,7 +128,7 @@ def cliffs_delta(x1, x0):
 
 # Apply Benjamini-Hochberg correction to a list/series of p-values.
 def p_adjust_bh(pvalues):
-    """Calculate adjust BH."""
+    # Calculate adjust BH.
     p = pd.to_numeric(pvalues, errors="coerce")
     out = pd.Series(np.nan, index=p.index, dtype=float)
     valid = p.dropna().sort_values()
@@ -145,10 +147,15 @@ def p_adjust_bh(pvalues):
 # Build first-event CAUTI and reinsertion fitting flags used by the current panel logic.
 def build_risk_sets(df):
     # Mark which rows belong to each event process.
-    """Build risk sets."""
+    # Build risk sets.
     out = df.sort_values(EPISODE_KEYS + ["period_end"]).copy()
     y_cauti = pd.to_numeric(out[Y_CAUTI], errors="coerce").fillna(0)
     out["prior_cauti_count"] = out.groupby(EPISODE_KEYS)[Y_CAUTI].cumsum() - y_cauti
+    out[DECISION_PERIOD_COL] = (
+        out[STATE_COL].eq("in").astype(int).groupby(
+            [out[key] for key in EPISODE_KEYS], dropna=False
+        ).cumsum()
+    )
     out["cauti_risk_row"] = (
         (out[STATE_COL] == "in") |
         ((out[STATE_COL] == "out") & (out[PERIODS_COL] <= POST_REMOVE_RISK_PERIODS))
@@ -162,7 +169,7 @@ def build_risk_sets(df):
         )
     ).astype(int)
     out["removal_fit_row"] = (
-        (out[STATE_COL] == "in") &
+        (out[DECISION_ROW_COL] == 1) &
         (out["prior_cauti_count"] == 0)
     ).astype(int)
     return out
@@ -171,7 +178,7 @@ def build_risk_sets(df):
 # Convert the current panel structure into tidy overview tables suitable for sharing.
 def build_overview_tables(df):
     # Count rows and episodes at cohort level.
-    """Build overview tables."""
+    # Build overview tables.
     cohort_rows = [
         {
             "subset": "overall",
@@ -207,14 +214,17 @@ def build_overview_tables(df):
     # Summarise event counts on the relevant row subsets.
     event_rows = []
     masks = {
-        "removal_in_period_on_in_rows": df[STATE_COL] == "in",
-        "late_removal_in_period_on_in_rows": (df[STATE_COL] == "in") & (df[PERIODS_COL] >= LATE_REMOVAL_DAY_THRESHOLD),
+        "removal_in_period_on_decision_rows": df[DECISION_ROW_COL] == 1,
+        "late_removal_in_period_on_decision_rows": (
+            (df[DECISION_ROW_COL] == 1) &
+            (df[DECISION_PERIOD_COL] >= LATE_REMOVAL_DAY_THRESHOLD)
+        ),
         "cauti_in_period_on_cauti_risk_rows": df["cauti_risk_row"] == 1,
         "reinsertion_in_period_on_out_fit_rows": df["reinsertion_fit_row"] == 1,
     }
     targets = {
-        "removal_in_period_on_in_rows": ACTION_COL,
-        "late_removal_in_period_on_in_rows": LATE_REMOVAL_COL,
+        "removal_in_period_on_decision_rows": ACTION_COL,
+        "late_removal_in_period_on_decision_rows": LATE_REMOVAL_COL,
         "cauti_in_period_on_cauti_risk_rows": Y_CAUTI,
         "reinsertion_in_period_on_out_fit_rows": Y_REINS,
     }
@@ -260,10 +270,11 @@ def build_episode_level_table(
     reinsertion_feature,
 ):
     # Collapse panel periods down to one row per episode.
-    """Build episode level table."""
+    # Build episode level table.
     d = df.sort_values(EPISODE_KEYS + ["period_end"]).copy()
 
     in_rows = d.loc[d[STATE_COL] == "in"].copy()
+    decision_rows = d.loc[d[DECISION_ROW_COL] == 1].copy()
     cauti_rows = d.loc[d["cauti_risk_row"] == 1].copy()
     reinsertion_rows = d.loc[d["reinsertion_fit_row"] == 1].copy()
 
@@ -299,7 +310,7 @@ def build_episode_level_table(
     )
 
     removal_feature_episode = (
-        in_rows.groupby(EPISODE_KEYS, dropna=False)[removal_feature]
+        decision_rows.groupby(EPISODE_KEYS, dropna=False)[removal_feature]
         .median()
         .rename(removal_feature)
     )
@@ -377,7 +388,7 @@ def mannwhitney_group_test(
     group_col,
     test_name,
 ):
-    """Calculate Mann-Whitney group test."""
+    # Calculate Mann-Whitney group test.
     tmp = df[[value_col, group_col]].copy()
     tmp[value_col] = pd.to_numeric(tmp[value_col], errors="coerce")
     tmp[group_col] = pd.to_numeric(tmp[group_col], errors="coerce")
@@ -417,7 +428,7 @@ def binary_group_test(
     outcome_col,
     test_name,
 ):
-    """Convert group test."""
+    # Convert group test.
     tmp = df[[exposure_col, outcome_col]].copy()
     tmp[exposure_col] = pd.to_numeric(tmp[exposure_col], errors="coerce")
     tmp[outcome_col] = pd.to_numeric(tmp[outcome_col], errors="coerce")
@@ -470,7 +481,7 @@ def top_covariate_screen(
     top_n,
 ):
     # Rank raw covariates by univariable association strength.
-    """Build covariate screen."""
+    # Build covariate screen.
     rows = []
     d = df.copy()
     d[outcome_col] = pd.to_numeric(d[outcome_col], errors="coerce")
@@ -510,7 +521,7 @@ def resolve_feature_cols(
     available_cols,
 ):
     # Map saved Step 1 names back to panel columns.
-    """Resolve feature columns."""
+    # Resolve feature columns.
     cols = []
     seen = set()
 
@@ -533,7 +544,7 @@ def describe_selected_covariates(
     dp=3,
 ):
     # Build descriptive stats for the selected model features.
-    """Describe selected covariates."""
+    # Describe selected covariates.
     rows = []
 
     for col in value_cols:
@@ -563,19 +574,20 @@ def describe_selected_covariates(
 
 def save_csv(df, path, round_dp=None, sci_cols=None):
     # Apply output formatting only at save time.
-    """Save CSV."""
+    # Save CSV.
     out = df.copy()
     if round_dp is not None:
         numeric_cols = out.select_dtypes(include=[np.number]).columns
         out[numeric_cols] = out[numeric_cols].round(round_dp)
     for col in sci_cols or []:
         out[col] = df[col].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
-    out.to_csv(path, index=False)
+    float_format = f"%.{round_dp}f" if round_dp is not None else None
+    out.to_csv(path, index=False, float_format=float_format)
 
 
 # Save a simple line plot of event rates by periods_in_state for the main event processes.
 def plot_event_rates(cauti_period, reinsertion_period, outdir):
-    """Plot event rates."""
+    # Plot event rates.
     fig, ax = plt.subplots(figsize=(8, 5))
     in_rows = cauti_period[cauti_period[STATE_COL] == "in"]
     out_rows = cauti_period[cauti_period[STATE_COL] == "out"]
@@ -593,7 +605,7 @@ def plot_event_rates(cauti_period, reinsertion_period, outdir):
 
 # Run the merged panel diagnostics and supervisor-facing descriptive/inferential analysis.
 def main():
-    """Run the script workflow."""
+    # Run the script workflow.
     RESULTS_DIR.mkdir(exist_ok=True, parents=True)
 
     # Load and standardise the panel.
@@ -614,7 +626,7 @@ def main():
 
     # Coerce the core numeric inputs.
     numeric_cols = [
-        TIME_COL, PERIODS_COL, INTERVAL_COL, ACTION_COL, Y_CAUTI, Y_REINS,
+        TIME_COL, PERIODS_COL, INTERVAL_COL, ACTION_COL, DECISION_ROW_COL, Y_CAUTI, Y_REINS,
         LAST_PERIOD_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
     ] + cov_cols
     # Coerce numeric.
@@ -630,7 +642,6 @@ def main():
         "covariate_count": covariate_count,
         AGE_GROUP_COL: (age_numeric >= AGE_THRESHOLD).astype("int8"),
         "high_covariate_count": high_covariate_count,
-        LATE_REMOVAL_COL: ((df[ACTION_COL] == 1) & (df[PERIODS_COL] >= LATE_REMOVAL_DAY_THRESHOLD)).astype("int8"),
     }, index=df.index)
 
     df = pd.concat([df, derived_cols], axis=1).copy()
@@ -641,6 +652,10 @@ def main():
 
     # Build risk sets.
     df = build_risk_sets(df)
+    df[LATE_REMOVAL_COL] = (
+        (df[ACTION_COL] == 1) &
+        (df[DECISION_PERIOD_COL] >= LATE_REMOVAL_DAY_THRESHOLD)
+    ).astype("int8")
 
     # Load the Step 1 feature lists used later.
     step1_top_model_features = load_step1_top_features(STEP1_TOP_MODEL_FEATURES_FILE)
@@ -686,17 +701,18 @@ def main():
     analysis_sets = {
         "overall": df,
         "in_rows": df.loc[df[STATE_COL] == "in"],
+        "decision_rows": df.loc[df[DECISION_ROW_COL] == 1],
         "out_rows": df.loc[df[STATE_COL] == "out"],
         "cauti_risk_rows": df.loc[df["cauti_risk_row"] == 1],
         "reinsertion_fit_rows": df.loc[df["reinsertion_fit_row"] == 1],
     }
-    in_rows = analysis_sets["in_rows"]
+    decision_rows = analysis_sets["decision_rows"]
     cauti_rows = analysis_sets["cauti_risk_rows"]
     out_fit_rows = analysis_sets["reinsertion_fit_rows"]
 
     # Describe the Step 1 features highlighted by the models.
     model_describe_configs = [
-        ("removal", "in_rows"),
+        ("removal", "decision_rows"),
         ("cauti", "cauti_risk_rows"),
         ("reinsertion", "reinsertion_fit_rows"),
     ]
@@ -812,7 +828,7 @@ def main():
         [
             top_covariate_screen(df_slice, cov_cols, outcome_col, analysis_set, TOP_N_COVARIATES)
             for df_slice, outcome_col, analysis_set in [
-                (in_rows, ACTION_COL, "in_rows_removal_in_period"),
+                (decision_rows, ACTION_COL, "decision_rows_removal_in_period"),
                 (out_fit_rows, Y_REINS, "out_fit_rows_reinsertion_in_period"),
                 (cauti_rows, Y_CAUTI, "cauti_risk_rows_cauti_in_period"),
             ]
@@ -838,4 +854,3 @@ def main():
 if __name__ == "__main__":
     # Run the script workflow.
     main()
-

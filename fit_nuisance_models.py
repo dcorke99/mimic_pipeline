@@ -1,4 +1,4 @@
-"""Fit propensity and outcome nuisance models for policy evaluation."""
+# Fit propensity and outcome nuisance models for policy evaluation.
 from pathlib import Path
 import json
 import re
@@ -46,6 +46,7 @@ Y_DEATH = "death_in_period"
 Y_ICU_EXIT = "icu_end_in_period"
 OBSERVED_ACTION_COL = "observed_action"
 ACTION_REMOVE_COL = "action_remove"
+DECISION_ROW_COL = "is_decision_row"
 END_REASON_COL = "episode_end_reason"
 AT_RISK_CAUTI = "at_risk_cauti"
 AT_RISK_REINS = "at_risk_reinsertion"
@@ -56,8 +57,8 @@ Y_NO_EVENT_OUT = "_target_no_event_out"
 
 NO_EVENT_DEFINITION = {
     "in": (
-        "No CAUTI, death, or ICU exit in the next outcome window; this does not "
-        "imply continued catheter-in state when action_remove=1."
+        "No reinsertion, CAUTI, death, or ICU exit in the next outcome window; "
+        "this does not imply continued catheter-in state when action_remove=1."
     ),
     "out": (
         "No reinsertion, CAUTI, death, or ICU exit in the next outcome window."
@@ -130,22 +131,30 @@ OLD_TRANSITION_SCORE_COLS = [
 # Support functions
 
 def save_df(df, path):
-    """Save a data frame as CSV."""
+    # Save a data frame as CSV.
     df.to_csv(path, index=False, float_format="%.6f")
 
 
+def save_report_df(df, path):
+    # Save a report CSV with rounded numeric columns.
+    out = df.copy()
+    numeric_cols = out.select_dtypes(include=[np.number]).columns
+    out[numeric_cols] = out[numeric_cols].round(3)
+    out.to_csv(path, index=False, float_format="%.3f")
+
+
 def load_feature_spec():
-    """Load feature spec."""
+    # Load feature spec.
     return json.loads(FEATURE_SPEC_FILE.read_text(encoding="utf-8"))
 
 
 def binary_values(series):
-    """Convert values."""
+    # Convert values.
     return pd.to_numeric(series, errors="coerce").fillna(0).astype(int).clip(0, 1)
 
 
 def load_panel():
-    """Load panel."""
+    # Load panel.
     df = pd.read_csv(INFILE, low_memory=False)
     df.columns = df.columns.str.strip()
 
@@ -161,6 +170,10 @@ def load_panel():
     unknown_states = sorted(set(df[STATE_COL].dropna()) - {"in", "out"})
     if unknown_states:
         raise ValueError(f"Unexpected catheter states: {unknown_states}")
+
+    if DECISION_ROW_COL not in df.columns:
+        raise ValueError(f"Modeling panel is missing required column: {DECISION_ROW_COL}")
+    df[DECISION_ROW_COL] = binary_values(df[DECISION_ROW_COL])
 
     # Convert values.
     for col in [
@@ -178,7 +191,7 @@ def load_panel():
 
 
 def add_grouped_crossfit_folds(df, n_splits=N_CROSSFIT_FOLDS):
-    """Add grouped crossfit folds."""
+    # Add grouped crossfit folds.
     n_groups = int(df[ID_COL].nunique())
     if n_groups < n_splits:
         raise ValueError(
@@ -212,7 +225,7 @@ def add_grouped_crossfit_folds(df, n_splits=N_CROSSFIT_FOLDS):
 
 
 def crossfit_fold_summary(df):
-    """Summarise cross-fit folds."""
+    # Summarise cross-fit folds.
     return (
         df.groupby(CROSSFIT_FOLD_COL, observed=False)
         .agg(rows=(ID_COL, "size"), patients=(ID_COL, "nunique"))
@@ -222,7 +235,7 @@ def crossfit_fold_summary(df):
 
 
 def crossfit_row_assignments(df):
-    """Build cross-fit row assignments."""
+    # Build cross-fit row assignments.
     optional_identifiers = [
         col for col in ["stay_id", "inserted"] if col in df.columns
     ]
@@ -237,12 +250,12 @@ def crossfit_row_assignments(df):
 
 
 def dump_joblib(payload, path):
-    """Write joblib."""
+    # Write joblib.
     joblib.dump(payload, path)
 
 
 def insert_score_columns_before_age(df, score_col_names):
-    """Place score columns beside baseline fields."""
+    # Place score columns beside baseline fields.
     ordered_cols = [col for col in df.columns if col not in score_col_names]
     insert_at = ordered_cols.index("age") if "age" in ordered_cols else len(ordered_cols)
     ordered_cols[insert_at:insert_at] = [col for col in score_col_names if col in df.columns]
@@ -250,7 +263,7 @@ def insert_score_columns_before_age(df, score_col_names):
 
 
 def fit_binary_model(features, target, model_name):
-    """Fit binary model."""
+    # Fit binary model.
     # Convert values.
     target = binary_values(target)
     if features.empty:
@@ -290,7 +303,7 @@ def fit_binary_model(features, target, model_name):
 
 
 def predict_binary_proba(pipe, features):
-    """Predict binary probabilities."""
+    # Predict binary probabilities.
     return pipe.predict_proba(features.to_numpy(dtype=float))[:, 1]
 
 
@@ -300,7 +313,7 @@ def fit_crossfit_fold_model(
     model_name,
     fold,
 ):
-    """Fit crossfit fold model."""
+    # Fit crossfit fold model.
     if features.empty:
         raise ValueError(f"Cannot fit {model_name} fold {fold}: training risk set is empty")
     # Convert values.
@@ -361,7 +374,7 @@ def fit_crossfit_fold_model(
 
 
 def predict_crossfit_fold(fold_model, features):
-    """Predict crossfit fold."""
+    # Predict crossfit fold.
     if fold_model["fallback"]:
         return np.full(
             len(features),
@@ -373,7 +386,7 @@ def predict_crossfit_fold(fold_model, features):
 
 
 def feature_importance_series(pipe, feature_cols):
-    """Build importance series."""
+    # Build importance series.
     estimator = pipe.named_steps["xgb"]
     return pd.Series(
         estimator.feature_importances_,
@@ -382,7 +395,7 @@ def feature_importance_series(pipe, feature_cols):
 
 
 def mean_feature_importance_series(fold_models, feature_cols):
-    """Calculate feature importance series."""
+    # Calculate feature importance series.
     # Build importance series.
     importances = [
         feature_importance_series(fold_model["model"], feature_cols)
@@ -395,7 +408,7 @@ def mean_feature_importance_series(fold_models, feature_cols):
 
 
 def outcome_fallback_counts(outcome_models):
-    """Summarise constant-probability fold counts."""
+    # Summarise constant-probability fold counts.
     counts = {}
     for state, models in outcome_models.items():
         for outcome, payload in models.items():
@@ -407,7 +420,7 @@ def outcome_fallback_counts(outcome_models):
 
 
 def top_series_df(model_name, values, top_n):
-    """Build series data frame."""
+    # Build series data frame.
     top_df = values.head(top_n).reset_index()
     top_df.columns = ["feature", "model_importance"]
     top_df.insert(0, "rank", np.arange(1, len(top_df) + 1))
@@ -416,7 +429,7 @@ def top_series_df(model_name, values, top_n):
 
 
 def add_feature_descriptions(feature_df, covariate_dict):
-    """Add feature descriptions."""
+    # Add feature descriptions.
     itemid_to_label = {}
     for row in covariate_dict.itertuples(index=False):
         if hasattr(row, "itemid") and pd.notna(row.itemid):
@@ -425,7 +438,7 @@ def add_feature_descriptions(feature_df, covariate_dict):
     pattern = re.compile(r"^itemid_(\d+)__(.+?)(?:__missing)?$")
 
     def describe_feature(feature):
-        """Describe feature."""
+        # Describe feature.
         match = pattern.match(str(feature))
         if not match:
             return pd.NA
@@ -442,7 +455,7 @@ def add_feature_descriptions(feature_df, covariate_dict):
 
 
 def clean_eval_frame(df, outcome_col, pred_col):
-    """Clean eval frame."""
+    # Clean eval frame.
     eval_df = df[[outcome_col, pred_col]].copy()
     eval_df[outcome_col] = pd.to_numeric(eval_df[outcome_col], errors="coerce")
     eval_df[pred_col] = pd.to_numeric(eval_df[pred_col], errors="coerce")
@@ -452,7 +465,7 @@ def clean_eval_frame(df, outcome_col, pred_col):
 
 
 def scalar_binary_metrics(df, outcome_col, pred_col):
-    """Calculate binary metrics."""
+    # Calculate binary metrics.
     # Clean eval frame.
     eval_df = clean_eval_frame(df, outcome_col, pred_col)
     n = int(len(eval_df))
@@ -485,7 +498,7 @@ def scalar_binary_metrics(df, outcome_col, pred_col):
 
 
 def calibration_table(df, outcome_col, pred_col, bins=10):
-    """Build table."""
+    # Build table.
     # Clean eval frame.
     eval_df = clean_eval_frame(df, outcome_col, pred_col)
     columns = [
@@ -524,16 +537,35 @@ def calibration_table(df, outcome_col, pred_col, bins=10):
 
 
 def prepare_outcome_targets(df):
-    """Prepare outcome targets."""
+    # Prepare outcome targets.
     df = df.copy()
-    df[OBSERVED_ACTION_COL] = np.where(
-        df[STATE_COL].eq("out"),
-        "out",
-        np.where(df[ACTION_COL].eq(1), "remove", "keep"),
+    required_action_cols = [DECISION_ROW_COL, ACTION_REMOVE_COL, OBSERVED_ACTION_COL]
+    missing_action_cols = [col for col in required_action_cols if col not in df.columns]
+    if missing_action_cols:
+        raise ValueError(f"Panel is missing required action columns: {missing_action_cols}")
+
+    try:
+        df[ACTION_REMOVE_COL] = pd.to_numeric(
+            df[ACTION_REMOVE_COL], errors="raise"
+        ).astype("Int64")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("action_remove must contain only integer values or missing values") from exc
+    df[OBSERVED_ACTION_COL] = (
+        df[OBSERVED_ACTION_COL].astype("string").str.strip().str.lower()
     )
-    df[ACTION_REMOVE_COL] = (
-        df[STATE_COL].eq("in") & df[ACTION_COL].eq(1)
-    ).astype(int)
+
+    decision_rows = df[DECISION_ROW_COL].eq(1)
+    nondecision_rows = df[DECISION_ROW_COL].eq(0)
+    if (decision_rows & ~df[ACTION_REMOVE_COL].isin([0, 1])).any():
+        raise ValueError("All is_decision_row == 1 rows must have action_remove equal to 0 or 1")
+    if (nondecision_rows & df[ACTION_REMOVE_COL].notna()).any():
+        raise ValueError("All is_decision_row == 0 rows must have missing action_remove")
+    if (df[ACTION_REMOVE_COL].eq(0) & ~df[OBSERVED_ACTION_COL].eq("keep").fillna(False)).any():
+        raise ValueError("action_remove == 0 must correspond to observed_action == 'keep'")
+    if (df[ACTION_REMOVE_COL].eq(1) & ~df[OBSERVED_ACTION_COL].eq("remove").fillna(False)).any():
+        raise ValueError("action_remove == 1 must correspond to observed_action == 'remove'")
+    if (df[ACTION_REMOVE_COL].isna() & ~df[OBSERVED_ACTION_COL].eq("out").fillna(False)).any():
+        raise ValueError("Missing action_remove must correspond to observed_action == 'out'")
 
     # ICU exit alive excludes deaths occurring in the same interval.
     df[Y_ICU_EXIT_ALIVE] = (
@@ -541,10 +573,11 @@ def prepare_outcome_targets(df):
     ).astype(int)
 
     # These are interval outcomes, not transition-state labels. In particular,
-    # IN no_event under action_remove=1 does not mean the catheter stayed IN.
+    # Decision-row no_event under action_remove=1 does not mean the catheter stayed IN.
     # Removal is deliberately absent because it is the action.
     df[Y_NO_EVENT_IN] = (
-        df[Y_CAUTI].eq(0)
+        df[Y_REINS].eq(0)
+        & df[Y_CAUTI].eq(0)
         & df[Y_DEATH].eq(0)
         & df[Y_ICU_EXIT].eq(0)
     ).astype(int)
@@ -558,14 +591,17 @@ def prepare_outcome_targets(df):
 
 
 def state_feature_lists(feature_spec):
-    """Build feature lists."""
+    # Build feature lists.
     configured = feature_spec.get("x_cols_transition")
     if not configured:
         configured = [TIME_COL, PERIODS_COL, ACTION_REMOVE_COL, *feature_spec["features"]]
 
     excluded = {"state_is_out", ACTION_REMOVE_COL}
     base_cols = [col for col in configured if col not in excluded]
-    in_feature_cols = [*base_cols, ACTION_REMOVE_COL]
+    # periods_in_state resets to 1 on the first OUT removal row; episode_index
+    # remains the consistent decision-time index across keep and remove rows.
+    decision_base_cols = [col for col in base_cols if col != PERIODS_COL]
+    in_feature_cols = [*decision_base_cols, ACTION_REMOVE_COL]
     out_feature_cols = base_cols
 
     leakage_cols = {
@@ -585,8 +621,12 @@ def state_feature_lists(feature_spec):
 
 
 def outcome_risk_mask(df, state, outcome):
-    """Summarise risk mask."""
-    mask = df[STATE_COL].eq(state)
+    # Summarise risk mask.
+    mask = (
+        df[DECISION_ROW_COL].eq(1)
+        if state == "decision"
+        else df[STATE_COL].eq(state)
+    )
     if outcome == "cauti":
         mask &= df[AT_RISK_CAUTI].eq(1)
     elif outcome == "reinsertion":
@@ -595,7 +635,7 @@ def outcome_risk_mask(df, state, outcome):
 
 
 def assert_valid_predictions(df, row_mask, columns, context):
-    """Check valid predictions."""
+    # Check valid predictions.
     values = df.loc[row_mask, columns].apply(pd.to_numeric, errors="coerce")
     if values.isna().any().any():
         missing = values.columns[values.isna().any()].tolist()
@@ -608,7 +648,7 @@ def assert_valid_predictions(df, row_mask, columns, context):
 
 
 def validate_exported_probabilities(df):
-    """Validate exported probabilities."""
+    # Validate exported probabilities.
     numeric_scores = df[ALL_SCORE_COLS].apply(pd.to_numeric, errors="coerce")
     invalid_coercions = df[ALL_SCORE_COLS].notna() & numeric_scores.isna()
     if invalid_coercions.any().any():
@@ -622,14 +662,14 @@ def validate_exported_probabilities(df):
     if ((present_values < 0.0) | (present_values > 1.0)).any():
         raise ValueError("Exported probabilities outside [0, 1] found")
 
-    in_rows = df[STATE_COL].eq("in")
+    decision_rows = df[DECISION_ROW_COL].eq(1)
     out_rows = df[STATE_COL].eq("out")
     # Check valid predictions.
     assert_valid_predictions(
         df,
-        in_rows,
+        decision_rows,
         ["p_cauti_if_keep", "p_cauti_if_remove"],
-        "eligible IN CAUTI rows",
+        "eligible keep/remove CAUTI decision rows",
     )
     # Check valid predictions.
     assert_valid_predictions(
@@ -667,7 +707,7 @@ def model_summary_row(
     pred_col,
     risk_set,
 ):
-    """Build summary row."""
+    # Build summary row.
     # Calculate binary metrics.
     metrics = scalar_binary_metrics(eval_df, target_col, pred_col)
     # Convert values.
@@ -700,7 +740,7 @@ def model_summary_row(
 
 
 def labelled_calibration(eval_df, target_col, pred_col, model_group, outcome, risk_set):
-    """Build calibration."""
+    # Build calibration.
     # Build table.
     table = calibration_table(eval_df, target_col, pred_col, bins=CALIBRATION_BINS)
     table.insert(0, "risk_set", risk_set)
@@ -710,7 +750,7 @@ def labelled_calibration(eval_df, target_col, pred_col, model_group, outcome, ri
 
 
 def propensity_summary_rows(df, eligible_df, feature_list, feature_spec, summary):
-    """Build propensity summary rows."""
+    # Build propensity summary rows.
     return pd.DataFrame([
         {"metric": "model_type", "value": MODEL_TYPE},
         {"metric": "evaluation", "value": "grouped_cross_fit_oof"},
@@ -732,7 +772,7 @@ def propensity_summary_rows(df, eligible_df, feature_list, feature_spec, summary
 
 
 def performance_metrics_rows(propensity_summary, in_summary, out_summary):
-    """Build performance metrics rows."""
+    # Build performance metrics rows.
     rows = []
     for metric, value in propensity_summary.items():
         rows.append({
@@ -768,12 +808,14 @@ def performance_metrics_rows(propensity_summary, in_summary, out_summary):
     return pd.DataFrame(rows)
 
 
-# Propensity model: observed clinician removal behaviour among IN rows
+# Propensity model: observed clinician removal behaviour on decision rows
 
 def fit_propensity_scores(df, feature_spec):
-    """Fit propensity scores."""
+    # Fit propensity scores.
     feature_list = feature_spec["features"]
-    remove_feature_cols = feature_spec["x_cols_remove"]
+    remove_feature_cols = [
+        col for col in feature_spec["x_cols_remove"] if col != PERIODS_COL
+    ]
     forbidden_action_features = {
         ACTION_COL,
         ACTION_REMOVE_COL,
@@ -784,7 +826,7 @@ def fit_propensity_scores(df, feature_spec):
     leaked = sorted(set(remove_feature_cols) & forbidden_action_features)
     if leaked:
         raise ValueError(f"Propensity feature specification contains action columns: {leaked}")
-    print("Propensity model estimates observed clinician removal behaviour among IN rows.")
+    print("Propensity model estimates observed clinician removal behaviour on decision rows.")
     print("Candidate policy actions are not propensity-model inputs.")
     print(f"Loaded propensity features: {len(remove_feature_cols)}")
 
@@ -792,7 +834,7 @@ def fit_propensity_scores(df, feature_spec):
     df[PROPENSITY_SCORE_COL] = np.nan
     df[KEEP_PROPENSITY_SCORE_COL] = np.nan
 
-    eligible_mask = df[STATE_COL].eq("in")
+    eligible_mask = df[DECISION_ROW_COL].eq(1)
     eligible_df = df.loc[eligible_mask].copy()
     fold_models = []
 
@@ -808,7 +850,7 @@ def fit_propensity_scores(df, feature_spec):
         # Fit crossfit fold model.
         fold_model = fit_crossfit_fold_model(
             df.loc[train_mask, remove_feature_cols],
-            df.loc[train_mask, ACTION_COL],
+            df.loc[train_mask, ACTION_REMOVE_COL],
             "propensity_removal",
             fold,
         )
@@ -826,27 +868,27 @@ def fit_propensity_scores(df, feature_spec):
         df,
         eligible_mask,
         [PROPENSITY_SCORE_COL, KEEP_PROPENSITY_SCORE_COL],
-        "IN propensity rows",
+        "decision-row propensity rows",
     )
     propensity_sums = df.loc[
         eligible_mask, [PROPENSITY_SCORE_COL, KEEP_PROPENSITY_SCORE_COL]
     ].sum(axis=1)
     if not np.allclose(propensity_sums.to_numpy(), 1.0, atol=1e-10):
-        raise ValueError("p_remove_obs + p_keep_obs does not equal 1 for all IN rows")
+        raise ValueError("p_remove_obs + p_keep_obs does not equal 1 for all decision rows")
 
     eval_oof = df.loc[eligible_mask].copy()
     # Calculate binary metrics.
-    summary = scalar_binary_metrics(eval_oof, ACTION_COL, PROPENSITY_SCORE_COL)
+    summary = scalar_binary_metrics(eval_oof, ACTION_REMOVE_COL, PROPENSITY_SCORE_COL)
     # Save a data frame as CSV.
-    save_df(
+    save_report_df(
         propensity_summary_rows(df, eligible_df, feature_list, feature_spec, summary),
         OUTDIR / "propensity_summary.csv",
     )
     # Save a data frame as CSV.
-    save_df(
+    save_report_df(
         calibration_table(
             eval_oof,
-            ACTION_COL,
+            ACTION_REMOVE_COL,
             PROPENSITY_SCORE_COL,
             bins=CALIBRATION_BINS,
         ),
@@ -868,8 +910,8 @@ def fit_propensity_scores(df, feature_spec):
             "remove_fold_models": fold_models,
             "features": feature_list,
             "x_cols_remove": remove_feature_cols,
-            "target_col": ACTION_COL,
-            "eligible_state": "in",
+            "target_col": ACTION_REMOVE_COL,
+            "eligible_row_indicator": DECISION_ROW_COL,
             "id_col": ID_COL,
             "time_col": TIME_COL,
             "source_split_col_ignored": SPLIT_COL if SPLIT_COL in df.columns else None,
@@ -889,17 +931,17 @@ def fit_propensity_scores(df, feature_spec):
 # State-specific binary outcome nuisance models
 
 def fit_outcome_scores(df, feature_spec):
-    """Fit outcome scores."""
+    # Fit outcome scores.
     covariate_dict = pd.read_csv(COVARIATE_DICT_FILE)
     # Prepare outcome targets.
     df = prepare_outcome_targets(df)
     # Build feature lists.
     in_feature_cols, out_feature_cols = state_feature_lists(feature_spec)
 
-    print("IN outcome models estimate risks under keep/remove using action_remove.")
+    print("Decision-row outcome models estimate risks under keep/remove using action_remove.")
     print("OUT outcome models estimate post-removal risks, including reinsertion and 48-hour CAUTI attribution.")
     print("Removal is an action, not an outcome class.")
-    print(f"IN outcome features: {len(in_feature_cols)}")
+    print(f"Decision-row outcome features: {len(in_feature_cols)}")
     print(f"OUT outcome features: {len(out_feature_cols)}")
 
     for col in ALL_SCORE_COLS[2:]:
@@ -913,22 +955,22 @@ def fit_outcome_scores(df, feature_spec):
     out_calibration_tables = []
     importance_tables = []
 
-    in_rows = df[STATE_COL].eq("in")
+    decision_rows = df[DECISION_ROW_COL].eq(1)
     out_rows = df[STATE_COL].eq("out")
 
-    # IN models are fitted on observed keep/remove actions, then every eligible
+    # Decision-action models are fitted on observed keep/remove actions, then every eligible
     # held-out row is scored twice with all pre-decision features held fixed.
     for outcome, target_col in IN_OUTCOMES.items():
         # Summarise risk mask.
-        risk_mask = outcome_risk_mask(df, "in", outcome)
+        risk_mask = outcome_risk_mask(df, "decision", outcome)
         modeling_df = df.loc[risk_mask].copy()
 
         model_name = f"in_{outcome}"
         keep_col = f"p_{outcome}_if_keep"
         remove_col = f"p_{outcome}_if_remove"
         if outcome == "cauti":
-            # Any unexpected non-risk IN row contributes zero CAUTI risk.
-            df.loc[in_rows & ~risk_mask, [keep_col, remove_col]] = 0.0
+            # Any unexpected non-risk decision row contributes zero CAUTI risk.
+            df.loc[decision_rows & ~risk_mask, [keep_col, remove_col]] = 0.0
 
         print(f"Cross-fitting {model_name} binary outcome model...", flush=True)
         fold_models = []
@@ -960,13 +1002,17 @@ def fit_outcome_scores(df, feature_spec):
 
         observed_pred_col = f"_p_{outcome}_observed_in"
         df[observed_pred_col] = np.nan
-        df.loc[in_rows, observed_pred_col] = np.where(
-            df.loc[in_rows, ACTION_REMOVE_COL].eq(1),
-            df.loc[in_rows, remove_col],
-            df.loc[in_rows, keep_col],
+        df.loc[decision_rows, observed_pred_col] = np.where(
+            df.loc[decision_rows, ACTION_REMOVE_COL].eq(1),
+            df.loc[decision_rows, remove_col],
+            df.loc[decision_rows, keep_col],
         )
         eval_df = df.loc[risk_mask].copy()
-        risk_set = "IN and at_risk_cauti == 1" if outcome == "cauti" else "all IN rows"
+        risk_set = (
+            "decision rows and at_risk_cauti == 1"
+            if outcome == "cauti"
+            else "all keep/remove decision rows"
+        )
         # Build summary row.
         in_summary_rows.append(
             model_summary_row(
@@ -1096,25 +1142,25 @@ def fit_outcome_scores(df, feature_spec):
     ]
     out_required = [f"p_{outcome}_if_out" for outcome in OUT_OUTCOMES]
     # Check valid predictions.
-    assert_valid_predictions(df, in_rows, in_required, "IN outcome rows")
+    assert_valid_predictions(df, decision_rows, in_required, "keep/remove decision outcome rows")
     # Check valid predictions.
     assert_valid_predictions(df, out_rows, out_required, "OUT outcome rows")
 
     in_summary = pd.DataFrame(in_summary_rows)
     out_summary = pd.DataFrame(out_summary_rows)
     # Save a data frame as CSV.
-    save_df(in_summary, OUTDIR / "in_outcome_summary.csv")
+    save_report_df(in_summary, OUTDIR / "in_outcome_summary.csv")
     # Save a data frame as CSV.
-    save_df(out_summary, OUTDIR / "out_outcome_summary.csv")
+    save_report_df(out_summary, OUTDIR / "out_outcome_summary.csv")
     # Retain the existing combined filename for callers that consume it.
-    save_df(pd.concat([in_summary, out_summary], ignore_index=True), OUTDIR / "outcome_summary.csv")
+    save_report_df(pd.concat([in_summary, out_summary], ignore_index=True), OUTDIR / "outcome_summary.csv")
     # Save a data frame as CSV.
-    save_df(
+    save_report_df(
         pd.concat(in_calibration_tables, ignore_index=True),
         OUTDIR / "in_outcome_calibration.csv",
     )
     # Save a data frame as CSV.
-    save_df(
+    save_report_df(
         pd.concat(out_calibration_tables, ignore_index=True),
         OUTDIR / "out_outcome_calibration.csv",
     )
@@ -1125,12 +1171,12 @@ def fit_outcome_scores(df, feature_spec):
         covariate_dict,
     )
     # Save a data frame as CSV.
-    save_df(importance_df, OUTDIR / "outcome_top_model_features.csv")
+    save_report_df(importance_df, OUTDIR / "outcome_top_model_features.csv")
 
     # Write joblib.
     dump_joblib(
         {
-            "model_type": "state_specific_binary_xgb",
+            "model_type": "decision_action_and_out_state_binary_xgb",
             "evaluation": "grouped_cross_fit_oof",
             "crossfit_folds": N_CROSSFIT_FOLDS,
             "crossfit_group_col": ID_COL,
@@ -1145,6 +1191,8 @@ def fit_outcome_scores(df, feature_spec):
             "x_cols_in": in_feature_cols,
             "x_cols_out": out_feature_cols,
             "action_remove_col": ACTION_REMOVE_COL,
+            "decision_row_col": DECISION_ROW_COL,
+            "decision_model_payload_key": "in_models",
             "features": feature_spec["features"],
             "id_col": ID_COL,
             "time_col": TIME_COL,
@@ -1177,7 +1225,7 @@ def fit_outcome_scores(df, feature_spec):
 # Final panel assembly
 
 def save_scored_panel(df):
-    """Save scored panel."""
+    # Save scored panel.
     drop_cols = [
         col
         for col in [
@@ -1196,7 +1244,7 @@ def save_scored_panel(df):
 
 
 def main():
-    """Run the script workflow."""
+    # Run the script workflow.
     OUTDIR.mkdir(exist_ok=True, parents=True)
     MODEL_DIR.mkdir(exist_ok=True, parents=True)
 
@@ -1207,7 +1255,7 @@ def main():
     # Add grouped crossfit folds.
     df = add_grouped_crossfit_folds(df)
     # Save a data frame as CSV.
-    save_df(crossfit_fold_summary(df), OUTDIR / "crossfit_fold_summary.csv")
+    save_report_df(crossfit_fold_summary(df), OUTDIR / "crossfit_fold_summary.csv")
     # Save a data frame as CSV.
     save_df(crossfit_row_assignments(df), CROSSFIT_ROW_ASSIGNMENTS_FILE)
 
@@ -1218,7 +1266,7 @@ def main():
     # Validate exported probabilities.
     validate_exported_probabilities(df)
     # Save a data frame as CSV.
-    save_df(
+    save_report_df(
         performance_metrics_rows(propensity_summary, in_summary, out_summary),
         PERFORMANCE_METRICS_FILE,
     )
