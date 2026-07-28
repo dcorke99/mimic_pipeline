@@ -6,7 +6,7 @@ $Conda = "C:\ProgramData\miniconda3\Scripts\conda.exe"
 $EnvName = "datascience"
 
 $Scripts = @(
-    "create_data_panel_removal_at_out.py",
+    "create_data_panel.py",
     "fit_nuisance_models.py",
     "build_policy_intervention_panels.py",
     "evaluate_gformula_policies.py",
@@ -19,7 +19,8 @@ $Scripts = @(
 foreach ($Script in $Scripts) {
     Write-Host ""
     Write-Host "Running $Script" -ForegroundColor Cyan
-    & $Conda run -n $EnvName python $Script
+    $ScriptPath = Join-Path $PSScriptRoot $Script
+    & $Conda run -n $EnvName python $ScriptPath
     if ($LASTEXITCODE -ne 0) {
         throw "$Script failed with exit code $LASTEXITCODE"
     }

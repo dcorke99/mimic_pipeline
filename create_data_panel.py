@@ -1,48 +1,46 @@
-#!/usr/bin/env python3
-# Create the modelling data panel for the catheter-removal pipeline.
-
-
-import argparse
+# Standard-library utilities.
 import json
 import re
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 
+# Data-processing libraries.
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 
 # Configuration
 
+# Define pipeline directories.
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_MIMIC_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1")
+MIMIC_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1")
+DATA_DIR = REPO_ROOT / "data"
+CONFIG_DIR = REPO_ROOT / "config"
 
+# Limit memory use per read.
 CHUNK_ROWS = 1_000_000
-SAMPLE_ROWS = 1000
-AUDIT_DECIMAL_PLACES = 3
 
+# Define cohort timing.
 FOLEY_ITEMID = 229351
 MIN_EPISODE_DURATION = pd.Timedelta(hours=24)
 PERIOD_DURATION = pd.Timedelta(hours=24)
 LOOKBACK_DURATION = pd.Timedelta(hours=24)
-LOOKBACK_HOURS = 24
 POST_REMOVE_RISK_PERIODS = 2
 
+# Define temperature normalisation.
 FAHRENHEIT_UNITS = {"F", "DEG F", "DEGREES F", "°F", "° F"}
 CELSIUS_UNIT = "°C"
 TEMP_F_ITEMID = 223761
 TEMP_C_ITEMID = 223762
 
+# Configure value cleaning.
 ITEM_COL = "itemid"
 VALUE_COL = "valuenum"
 MIN_N_FOR_RULES = 100
 ZERO_MAX_FRAC = 0.10
 FAR_OUT_SPREAD_MULT = 3.0
-ALWAYS_ZERO_TO_MISSING = set()
-NEVER_ZERO_TO_MISSING = set()
 
+# Select chart summaries.
 AGG_STATS = [
     "count",
     "mean",
@@ -51,205 +49,44 @@ AGG_STATS = [
     "slope_per_hour",
 ]
 
+# Configure feature retention.
 MIN_ROW_COVERAGE = 0.05
 MIN_STAY_COVERAGE = 0.10
-MEAN_ONLY = False
 ROUND_DP = 3
-SUBJECT_ID_COL = "subject_id"
-TEST_SIZE = 0.20
-SEED = 42
 
-ID_COL = "subject_id"
+# Name modelling columns.
 TIME_COL = "episode_index"
 STATE_COL = "catheter_state"
 PERIODS_COL = "periods_in_state"
-SPLIT_COL = "split"
 ACTION_COL = "removed_in_period"
 Y_CAUTI = "cauti_in_period"
 Y_REINS = "reinsertion_in_period"
 Y_DEATH = "death_in_period"
 Y_ICU_EXIT = "icu_end_in_period"
-TRANSITION_LABEL_COL = "next_state"
 OBSERVED_ACTION_COL = "observed_action"
 ACTION_REMOVE_COL = "action_remove"
-LAST_PERIOD_COL = "is_last_period_of_episode"
-END_REASON_COL = "episode_end_reason"
 
 
-def save_report_df(df, path, **to_csv_kwargs):
-    # Save a report CSV with rounded numeric columns.
-    path.parent.mkdir(exist_ok=True, parents=True)
-    out = df.copy()
-    numeric_cols = out.select_dtypes(include=[np.number]).columns
-    out[numeric_cols] = out[numeric_cols].round(3)
-    out.to_csv(path, index=False, float_format="%.3f", **to_csv_kwargs)
+def load_item_labels():
+    # Load one label per item.
+    d_items_df = pd.read_csv(
+        MIMIC_DIR / "icu" / "d_items.csv",
+        usecols=["itemid", "label"],
+        low_memory=False,
+    ).drop_duplicates("itemid")
 
-
-@dataclass(frozen=True)
-class PanelBuildConfig:
-    # Store paths and options for panel construction.
-    repo_root: Path
-    mimic_dir: Path
-    data_dir: Path
-    config_dir: Path
-
-    @property
-    def d_items_path(self):
-        # Return the D items path.
-        return self.mimic_dir / "icu" / "d_items.csv"
-
-    @property
-    def required_episodes_file(self):
-        # Return the required episodes file path.
-        return self.data_dir / "required_catheter_episodes.csv"
-
-    @property
-    def base_panel_file(self):
-        # Return the base panel file path.
-        return self.data_dir / "base_panel.csv"
-
-    @property
-    def raw_chart_file(self):
-        # Return the raw chart file path.
-        return self.data_dir / "raw_chart_covariates.csv"
-
-    @property
-    def raw_chart_sample_file(self):
-        # Return the raw chart sample file path.
-        return self.data_dir / "raw_chart_covariates__first_1000_rows.csv"
-
-    @property
-    def preprocessed_chart_file(self):
-        # Return the preprocessed chart file path.
-        return self.data_dir / "preprocessed_raw_chart_covariates.csv"
-
-    @property
-    def preprocessed_chart_sample_file(self):
-        # Return the preprocessed chart sample file path.
-        return self.data_dir / "preprocessed_raw_chart_covariates__first_1000_rows.csv"
-
-    @property
-    def kept_preprocessed_chart_file(self):
-        # Return the kept preprocessed chart file path.
-        return self.data_dir / "preprocessed_raw_chart_covariates_kept.csv"
-
-    @property
-    def kept_preprocessed_chart_sample_file(self):
-        # Return the kept preprocessed chart sample file path.
-        return self.data_dir / "preprocessed_raw_chart_covariates_kept__first_1000_rows.csv"
-
-    @property
-    def cleaned_chart_file(self):
-        # Return the cleaned chart file path.
-        return self.data_dir / "cleaned_chart_covariates.csv"
-
-    @property
-    def cleaning_rules_file(self):
-        # Return the cleaning rules file path.
-        return self.data_dir / "chart_covariate_cleaning_rules.csv"
-
-    @property
-    def cleaning_audit_file(self):
-        # Return the cleaning audit file path.
-        return self.data_dir / "chart_covariate_cleaning_audit.csv"
-
-    @property
-    def master_panel_file(self):
-        # Return the master panel file path.
-        return self.data_dir / "master_panel.csv"
-
-    @property
-    def covariate_retention_log_file(self):
-        # Return the covariate retention log file path.
-        return self.data_dir / "covariate_retention_log.csv"
-
-    @property
-    def filtered_panel_file(self):
-        # Return the filtered panel file path.
-        return self.data_dir / "filtered_panel.csv"
-
-    @property
-    def train_test_split_file(self):
-        # Return the train test split file path.
-        return self.data_dir / "train_test_split.csv"
-
-    @property
-    def modeling_panel_file(self):
-        # Return the modelling panel file path.
-        return self.data_dir / "modeling_panel.csv"
-
-    @property
-    def feature_spec_file(self):
-        # Return the feature spec file path.
-        return self.data_dir / "feature_spec.json"
-
-    @property
-    def covariate_dictionary_file(self):
-        # Return the covariate dictionary file path.
-        return self.data_dir / "covariate_dictionary.csv"
-
-    @property
-    def d_items_keep_file(self):
-        # Return the D items keep file path.
-        return self.config_dir / "d_items_keep.csv"
-
-    @property
-    def bounds_file(self):
-        # Return the bounds file path.
-        return self.data_dir / "panel_covariate_bounds.csv"
-
-
-# Generic helpers
-
-def remove_if_exists(path):
-    # Remove if exists.
-    path.unlink(missing_ok=True)
-
-
-def replace_output(tmp_path, final_path):
-    # Replace output.
-    tmp_path.replace(final_path)
-
-
-def writing_path(path):
-    # Return the temporary write path for a final output.
-    return path.with_suffix(path.suffix + ".writing")
-
-
-def load_item_labels(d_items_path):
-    # Load item labels.
-    d_items_df = pd.read_csv(d_items_path, usecols=["itemid", "label"], low_memory=False).drop_duplicates("itemid")
-    d_items_df["itemid"] = pd.to_numeric(d_items_df["itemid"], errors="coerce")
+    # Remove missing item IDs.
+    d_items_df["itemid"] = pd.to_numeric(d_items_df["itemid"])
     d_items_df = d_items_df.dropna(subset=["itemid"]).copy()
     d_items_df["itemid"] = d_items_df["itemid"].astype(int)
     d_items_df["label"] = d_items_df["label"].astype(str)
+
+    # Return an ID lookup.
     return d_items_df.set_index("itemid")["label"].to_dict()
 
 
-def load_bounds(bounds_file):
-    # Load bounds.
-    by_itemid = {}
-
-    if not bounds_file.exists():
-        return by_itemid
-
-    bounds_df = pd.read_csv(bounds_file)
-    bounds_rows = bounds_df[["itemid", "lower_bound", "upper_bound"]].copy()
-    bounds_rows["itemid"] = pd.to_numeric(bounds_rows["itemid"], errors="coerce")
-    bounds_rows["lower_bound"] = pd.to_numeric(bounds_rows["lower_bound"], errors="coerce")
-    bounds_rows["upper_bound"] = pd.to_numeric(bounds_rows["upper_bound"], errors="coerce")
-    bounds_rows = bounds_rows.dropna(subset=["itemid"]).copy()
-    bounds_rows["itemid"] = bounds_rows["itemid"].astype(int)
-    bounds_rows = bounds_rows.drop_duplicates(subset=["itemid"], keep="first")
-
-    for _, row in bounds_rows.iterrows():
-        by_itemid[int(row["itemid"])] = (row["lower_bound"], row["upper_bound"])
-
-    return by_itemid
-
-
 def print_section(title):
-    # Print section.
+    # Print a stage heading.
     print()
     print(f"=== {title} ===")
 
@@ -257,9 +94,11 @@ def print_section(title):
 # Catheter episode cohort and base panel
 
 def map_ethnicity_group(value):
-    # Map ethnicity group.
+    # Collapse raw ethnicity labels.
     if pd.isna(value):
         return "Unknown"
+
+    # Match broad groups.
     ethnicity_text = str(value).upper()
     if "WHITE" in ethnicity_text:
         return "White"
@@ -275,54 +114,61 @@ def map_ethnicity_group(value):
 
 
 def merge_overlapping_foley_events(df):
-    # Merge overlapping foley events.
+    # Merge overlapping Foley records.
     episodes = []
 
+    # Process each ICU stay separately.
     for stay_id, stay_events in df.groupby("stay_id"):
         stay_events = stay_events.sort_values("inserted")
         current_start = None
         current_end = None
 
         for event in stay_events.itertuples():
+            # Start the first interval.
             if current_start is None:
                 current_start = event.inserted
                 current_end = event.removed
                 continue
 
+            # Extend an overlapping interval.
             if event.inserted <= current_end:
-                if pd.isna(current_end):
-                    current_end = event.removed
-                elif pd.notna(event.removed) and event.removed > current_end:
-                    current_end = event.removed
+                current_end = max(current_end, event.removed)
             else:
+                # Close a completed interval.
                 episodes.append((stay_id, current_start, current_end))
                 current_start = event.inserted
                 current_end = event.removed
 
+        # Close the final interval.
         if current_start is not None:
             episodes.append((stay_id, current_start, current_end))
 
+    # Return one row per episode.
     return pd.DataFrame(episodes, columns=["stay_id", "inserted", "removed"])
 
 
-def build_required_catheter_episodes(mimic_dir):
-    # Build required catheter episodes.
+def build_required_catheter_episodes():
+    # Load ICU stay boundaries.
     icu = pd.read_csv(
-        mimic_dir / "icu" / "icustays.csv",
+        MIMIC_DIR / "icu" / "icustays.csv",
         usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime"],
     )
-    icu["intime"] = pd.to_datetime(icu["intime"], errors="coerce")
-    icu["outtime"] = pd.to_datetime(icu["outtime"], errors="coerce")
+
+    # Parse and validate stay times.
+    icu["intime"] = pd.to_datetime(icu["intime"])
+    icu["outtime"] = pd.to_datetime(icu["outtime"])
     icu = icu.dropna(subset=["stay_id", "intime", "outtime"]).copy()
 
+    # Load patient demographics.
     patients = pd.read_csv(
-        mimic_dir / "hosp" / "patients.csv",
+        MIMIC_DIR / "hosp" / "patients.csv",
         usecols=["subject_id", "gender", "anchor_age", "anchor_year"],
         low_memory=False,
     )
-    patients["anchor_age"] = pd.to_numeric(patients["anchor_age"], errors="coerce")
-    patients["anchor_year"] = pd.to_numeric(patients["anchor_year"], errors="coerce")
+    patients["anchor_age"] = pd.to_numeric(patients["anchor_age"])
+    patients["anchor_year"] = pd.to_numeric(patients["anchor_year"])
 
+    # Estimate age at admission.
     icu["icu_year"] = icu["intime"].dt.year
     icu = icu.merge(
         patients[["subject_id", "gender", "anchor_age", "anchor_year"]],
@@ -332,13 +178,15 @@ def build_required_catheter_episodes(mimic_dir):
     icu["age"] = icu["anchor_age"] + (icu["icu_year"] - icu["anchor_year"])
     icu = icu.drop(columns=["icu_year", "anchor_age", "anchor_year"])
 
+    # Load admission details.
     admissions = pd.read_csv(
-        mimic_dir / "hosp" / "admissions.csv",
+        MIMIC_DIR / "hosp" / "admissions.csv",
         usecols=["subject_id", "hadm_id", "race", "deathtime"],
         low_memory=False,
     ).rename(columns={"race": "ethnicity"})
-    admissions["deathtime"] = pd.to_datetime(admissions["deathtime"], errors="coerce")
+    admissions["deathtime"] = pd.to_datetime(admissions["deathtime"])
 
+    # Attach admission attributes.
     icu = icu.merge(
         admissions[["subject_id", "hadm_id", "ethnicity", "deathtime"]],
         on=["subject_id", "hadm_id"],
@@ -346,28 +194,49 @@ def build_required_catheter_episodes(mimic_dir):
     )
     icu["ethnicity_group"] = icu["ethnicity"].apply(map_ethnicity_group)
 
+    # Load Foley procedures.
     procedure_events = pd.read_csv(
-        mimic_dir / "icu" / "procedureevents.csv",
-        usecols=["subject_id", "hadm_id", "stay_id", "itemid", "starttime", "endtime"],
+        MIMIC_DIR / "icu" / "procedureevents.csv",
+        usecols=["stay_id", "itemid", "starttime", "endtime"],
     )
-    procedure_events = procedure_events[procedure_events["itemid"] == FOLEY_ITEMID].copy()
-    procedure_events["starttime"] = pd.to_datetime(procedure_events["starttime"], errors="coerce")
-    procedure_events["endtime"] = pd.to_datetime(procedure_events["endtime"], errors="coerce")
 
+    # Keep Foley records only.
+    procedure_events = procedure_events[procedure_events["itemid"] == FOLEY_ITEMID].copy()
+    procedure_events["starttime"] = pd.to_datetime(procedure_events["starttime"])
+    procedure_events["endtime"] = pd.to_datetime(procedure_events["endtime"])
+
+    # Attach ICU boundaries.
     procedure_events = procedure_events.merge(
-        icu[["stay_id", "subject_id", "hadm_id", "intime", "outtime"]],
+        icu[["stay_id", "intime", "outtime"]],
         on="stay_id",
         how="left",
     )
-    procedure_events = procedure_events.rename(columns={"intime": "ICU_in", "outtime": "ICU_out"})
-    procedure_events["inserted"] = procedure_events["starttime"]
-    procedure_events["removed"] = procedure_events["endtime"]
-    procedure_events.loc[procedure_events["removed"].isna(), "removed"] = procedure_events["ICU_out"]
-    procedure_events = procedure_events.dropna(subset=["inserted", "removed", "ICU_in", "ICU_out"]).copy()
-    procedure_events = procedure_events.sort_values(["stay_id", "inserted"])
 
-    # Merge overlapping foley events.
+    # Standardise time names.
+    procedure_events = procedure_events.rename(columns={
+        "starttime": "inserted",
+        "endtime": "removed",
+        "intime": "ICU_in",
+        "outtime": "ICU_out",
+    })
+
+    # Reject missing removal times.
+    missing_removed = procedure_events["removed"].isna()
+    if missing_removed.any():
+        raise ValueError(
+            f"{int(missing_removed.sum())} Foley procedure rows have no endtime. "
+            "These must not be treated as removals at ICU exit."
+        )
+
+    # Drop unusable procedure rows.
+    procedure_events = procedure_events.dropna(
+        subset=["inserted", "removed", "ICU_in", "ICU_out"]
+    ).copy()
+
+    # Collapse duplicate episode spans.
     collapsed = merge_overlapping_foley_events(procedure_events)
+
+    # Attach stay-level attributes.
     catheterised = collapsed.merge(
         icu[[
             "stay_id", "subject_id", "hadm_id", "intime", "outtime",
@@ -377,37 +246,48 @@ def build_required_catheter_episodes(mimic_dir):
         how="inner",
     ).rename(columns={"intime": "ICU_in", "outtime": "ICU_out"})
 
+    # Keep deaths inside the ICU stay.
     catheterised["death_time"] = catheterised["deathtime"].where(
         (catheterised["deathtime"] >= catheterised["ICU_in"]) &
         (catheterised["deathtime"] <= catheterised["ICU_out"])
     )
     catheterised = catheterised.drop(columns=["deathtime"])
 
+    # Find the next insertion.
     catheterised = catheterised.sort_values(["stay_id", "inserted"]).reset_index(drop=True)
     catheterised["reinsertion_time"] = catheterised.groupby("stay_id")["inserted"].shift(-1)
 
+    # Keep sufficiently long episodes.
     episode_duration = catheterised["removed"] - catheterised["inserted"]
     catheterised = catheterised[episode_duration >= MIN_EPISODE_DURATION].copy()
 
+    # Load microbiology results.
     micro = pd.read_csv(
-        mimic_dir / "hosp" / "microbiologyevents.csv",
+        MIMIC_DIR / "hosp" / "microbiologyevents.csv",
         usecols=["subject_id", "hadm_id", "charttime", "spec_type_desc", "org_name"],
     )
-    micro["charttime"] = pd.to_datetime(micro["charttime"], errors="coerce")
+    micro["charttime"] = pd.to_datetime(micro["charttime"])
+
+    # Keep positive urine cultures.
     micro = micro[
         micro["spec_type_desc"].str.contains("urine", case=False, na=False) &
         micro["org_name"].notna()
     ].copy()
 
+    # Match cultures to episodes.
     micro_matched = micro.merge(
         catheterised[["subject_id", "hadm_id", "stay_id", "inserted", "removed"]],
         on=["subject_id", "hadm_id"],
         how="inner",
     )
+
+    # Limit the CAUTI window.
     micro_matched = micro_matched[
         (micro_matched["charttime"] >= micro_matched["inserted"]) &
         (micro_matched["charttime"] <= micro_matched["removed"] + pd.Timedelta(hours=48))
     ].copy()
+
+    # Keep the first culture.
     micro_matched = (
         micro_matched.sort_values("charttime")
         .drop_duplicates(["stay_id", "inserted"])
@@ -415,37 +295,42 @@ def build_required_catheter_episodes(mimic_dir):
         .rename(columns={"charttime": "cauti_time"})
     )
 
+    # Attach episode outcomes.
     catheterised = catheterised.merge(micro_matched, on=["stay_id", "inserted"], how="left")
+
+    # Return episodes in time order.
     return catheterised.sort_values(["stay_id", "inserted"]).reset_index(drop=True)
 
 
 def make_state_windows(state_start, state_end):
-    # Make state windows.
+    # Reject empty state spans.
     if pd.isna(state_start) or pd.isna(state_end) or state_end <= state_start:
         return []
 
+    # Initialise the first period.
     rows = []
     window_start = state_start
     state_idx = 0
 
+    # Split the state into periods.
     while window_start < state_end:
         window_end = min(window_start + PERIOD_DURATION, state_end)
-        interval_hours = round((window_end - window_start).total_seconds() / 3600.0, 2)
-        rows.append((state_idx, window_start, window_end, interval_hours))
+        rows.append((state_idx, window_start, window_end))
         window_start = window_end
         state_idx += 1
 
+    # Return period boundaries.
     return rows
 
 
 def build_base_panel(catheterised):
-    # Build base panel.
+    # Collect panel rows.
     rows = []
 
-    # Make state windows.
+    # Expand each catheter episode.
     for episode in catheterised.itertuples():
-        # Make state windows.
-        for state_idx, period_start, period_end, interval_hours in make_state_windows(episode.inserted, episode.removed):
+        # Create catheter-in periods.
+        for state_idx, period_start, period_end in make_state_windows(episode.inserted, episode.removed):
             rows.append({
                 "subject_id": episode.subject_id,
                 "hadm_id": episode.hadm_id,
@@ -457,7 +342,6 @@ def build_base_panel(catheterised):
                 "state_index": state_idx,
                 "period_start": period_start,
                 "period_end": period_end,
-                "interval_hours": interval_hours,
                 "cauti_time": episode.cauti_time,
                 "death_time": episode.death_time,
                 "ICU_out": episode.ICU_out,
@@ -467,9 +351,11 @@ def build_base_panel(catheterised):
                 "ethnicity_group": episode.ethnicity_group,
             })
 
+        # End at reinsertion or ICU exit.
         out_state_end = episode.reinsertion_time if pd.notna(episode.reinsertion_time) else episode.ICU_out
-        # Make state windows.
-        for state_idx, period_start, period_end, interval_hours in make_state_windows(episode.removed, out_state_end):
+
+        # Create catheter-out periods.
+        for state_idx, period_start, period_end in make_state_windows(episode.removed, out_state_end):
             rows.append({
                 "subject_id": episode.subject_id,
                 "hadm_id": episode.hadm_id,
@@ -481,7 +367,6 @@ def build_base_panel(catheterised):
                 "state_index": state_idx,
                 "period_start": period_start,
                 "period_end": period_end,
-                "interval_hours": interval_hours,
                 "cauti_time": episode.cauti_time,
                 "death_time": episode.death_time,
                 "ICU_out": episode.ICU_out,
@@ -491,21 +376,25 @@ def build_base_panel(catheterised):
                 "ethnicity_group": episode.ethnicity_group,
             })
 
+    # Build and order the panel.
     panel = pd.DataFrame(rows)
     panel = panel.sort_values(
         ["stay_id", "inserted", "period_start", "period_end", "catheter_state"]
     ).reset_index(drop=True)
 
+    # Number periods within episodes.
     panel["episode_index"] = panel.groupby(["stay_id", "inserted"]).cumcount()
     panel["periods_in_state"] = panel["state_index"] + 1
     panel = panel.drop(columns=["state_index"])
 
+    # Flag removal periods.
     panel["removed_in_period"] = (
         (panel["catheter_state"] == "in") &
         (panel["removed"] > panel["period_start"]) &
         (panel["removed"] <= panel["period_end"])
     ).astype(int)
 
+    # Flag reinsertion periods.
     panel["reinsertion_in_period"] = (
         (panel["catheter_state"] == "out") &
         panel["reinsertion_time"].notna() &
@@ -513,66 +402,70 @@ def build_base_panel(catheterised):
         (panel["reinsertion_time"] <= panel["period_end"])
     ).astype(int)
 
+    # Flag ICU exit periods.
     panel["icu_end_in_period"] = (
         panel["ICU_out"].notna() &
         (panel["ICU_out"] > panel["period_start"]) &
         (panel["ICU_out"] <= panel["period_end"])
     ).astype(int)
 
+    # Flag CAUTI periods.
     panel["cauti_in_period"] = (
         panel["cauti_time"].notna() &
         (panel["cauti_time"] > panel["period_start"]) &
         (panel["cauti_time"] <= panel["period_end"])
     ).astype(int)
 
+    # Flag death periods.
     panel["death_in_period"] = (
         panel["death_time"].notna() &
         (panel["death_time"] > panel["period_start"]) &
         (panel["death_time"] <= panel["period_end"])
     ).astype(int)
 
-    panel["next_state"] = "NO_EVENT_CONTINUE"
-    panel.loc[(panel["icu_end_in_period"] == 1) & (panel["death_in_period"] == 0), "next_state"] = "ICU_EXIT_ALIVE"
-    panel.loc[panel["death_in_period"] == 1, "next_state"] = "DEATH"
-    panel.loc[panel["removed_in_period"] == 1, "next_state"] = "REMOVAL"
-    panel.loc[panel["reinsertion_in_period"] == 1, "next_state"] = "REINSERTION"
-    panel.loc[panel["cauti_in_period"] == 1, "next_state"] = "CAUTI"
-
+    # Mark CAUTI risk periods.
     panel["at_risk_cauti"] = (
         (panel["catheter_state"] == "in") |
         ((panel["catheter_state"] == "out") & (panel["periods_in_state"] <= POST_REMOVE_RISK_PERIODS))
     ).astype(int)
+
+    # Mark reinsertion risk periods.
     panel["at_risk_reinsertion"] = (panel["catheter_state"] == "out").astype(int)
 
+    # Find each final period.
     episode_keys = ["stay_id", "inserted"]
-    panel["is_last_period_of_episode"] = 0
     last_row_index = panel.groupby(episode_keys)["period_end"].idxmax()
-    panel.loc[last_row_index, "is_last_period_of_episode"] = 1
+    is_last_period = panel.index.isin(last_row_index)
 
+    # Record observed episode endings.
     panel["episode_end_reason"] = pd.NA
     panel.loc[
-        (panel["is_last_period_of_episode"] == 1) & (panel["reinsertion_in_period"] == 1),
+        is_last_period & (panel["reinsertion_in_period"] == 1),
         "episode_end_reason",
     ] = "reinsertion"
     panel.loc[
-        (panel["is_last_period_of_episode"] == 1) &
+        is_last_period &
         (panel["episode_end_reason"].isna()) &
         (panel["icu_end_in_period"] == 1),
         "episode_end_reason",
     ] = "icu_end"
 
+    # Encode demographic categories.
     panel["sex_M"] = (panel["gender"] == "M").astype(int)
     panel["sex_missing"] = panel["gender"].isna().astype(int)
     eth_dummies = pd.get_dummies(panel["ethnicity_group"], prefix="ethnicity")
     panel = pd.concat([panel, eth_dummies], axis=1)
 
+    # Define covariate lookbacks.
     panel["cov_start"] = panel["period_start"] - LOOKBACK_DURATION
     panel["cov_end"] = panel["period_start"]
-    panel["cov_start"] = panel[["cov_start", "intime"]].max(axis=1)
+    panel["cov_start"] = panel["cov_start"].clip(lower=panel["intime"])
     panel["row_id"] = np.arange(1, len(panel) + 1)
 
+    # Drop temporary source fields.
     panel = panel.drop(columns=["cauti_time", "death_time", "gender", "ethnicity_group", "intime", "ICU_out"])
-    non_ethnicity_cols = [c for c in panel.columns if not c.startswith("ethnicity_")]
+
+    # Place columns consistently.
     ethnicity_cols = sorted([c for c in panel.columns if c.startswith("ethnicity_")])
     ordered_cols = [
         "subject_id",
@@ -585,15 +478,12 @@ def build_base_panel(catheterised):
         "episode_index",
         "period_start",
         "period_end",
-        "interval_hours",
         "periods_in_state",
         "removed_in_period",
         "reinsertion_in_period",
         "cauti_in_period",
         "death_in_period",
         "icu_end_in_period",
-        "next_state",
-        "is_last_period_of_episode",
         "episode_end_reason",
         "at_risk_cauti",
         "at_risk_reinsertion",
@@ -605,17 +495,21 @@ def build_base_panel(catheterised):
         "cov_end",
         "row_id",
     ]
-    return panel[[c for c in ordered_cols if c in non_ethnicity_cols or c in ethnicity_cols]]
+
+    # Return the ordered panel.
+    return panel[ordered_cols]
 
 
-def create_episode_cohort_and_base_panel(config):
-    # Create episode cohort and base panel.
-    config.data_dir.mkdir(exist_ok=True, parents=True)
-    # Build required catheter episodes.
-    episodes = build_required_catheter_episodes(config.mimic_dir)
-    # Build base panel.
+def create_episode_cohort_and_base_panel():
+    # Define stage outputs.
+    required_episodes_file = DATA_DIR / "required_catheter_episodes.csv"
+    base_panel_file = DATA_DIR / "base_panel.csv"
+
+    # Build the cohort and panel.
+    episodes = build_required_catheter_episodes()
     base_panel = build_base_panel(episodes)
 
+    # Select exported episode fields.
     episode_export = episodes[
         [
             "subject_id",
@@ -630,11 +524,13 @@ def create_episode_cohort_and_base_panel(config):
         ]
     ].copy()
 
-    episode_export.to_csv(config.required_episodes_file, index=False)
-    base_panel.to_csv(config.base_panel_file, index=False)
+    # Save both datasets.
+    episode_export.to_csv(required_episodes_file, index=False)
+    base_panel.to_csv(base_panel_file, index=False)
 
-    print("[SAVE]", config.required_episodes_file)
-    print("[SAVE]", config.base_panel_file)
+    # Report cohort sizes.
+    print("[SAVE]", required_episodes_file)
+    print("[SAVE]", base_panel_file)
     print("Episodes:", len(episodes))
     print("Stays:", episodes["stay_id"].nunique())
     print("Base panel rows:", len(base_panel))
@@ -642,17 +538,23 @@ def create_episode_cohort_and_base_panel(config):
 
 # Raw chart-event extraction
 
-def build_chart_extraction_windows(episodes, lookback_hours=LOOKBACK_HOURS):
-    # Build chart extraction windows.
-    windows = episodes.copy()
-    window_end = windows["reinsertion_time"].where(windows["reinsertion_time"].notna(), windows["ICU_out"])
-    window_start = windows["inserted"] - pd.Timedelta(hours=lookback_hours)
-    window_start = windows[["ICU_in"]].assign(window_start=window_start).max(axis=1)
+def build_chart_extraction_windows(episodes):
+    # Select episode boundaries.
+    windows = episodes[
+        ["stay_id", "inserted", "reinsertion_time", "ICU_in", "ICU_out"]
+    ].copy()
 
-    windows = windows.assign(window_start=window_start, window_end=window_end)
+    # Define extraction bounds.
+    windows["window_start"] = (windows["inserted"] - LOOKBACK_DURATION).clip(
+        lower=windows["ICU_in"]
+    )
+    windows["window_end"] = windows["reinsertion_time"].fillna(windows["ICU_out"])
+
+    # Remove invalid windows.
     windows = windows.dropna(subset=["window_start", "window_end"]).copy()
     windows = windows[windows["window_end"] > windows["window_start"]].copy()
 
+    # Merge windows within stays.
     merged_windows = []
     for stay_id, stay_windows in windows.groupby("stay_id"):
         stay_windows = stay_windows.sort_values("window_start")
@@ -660,617 +562,212 @@ def build_chart_extraction_windows(episodes, lookback_hours=LOOKBACK_HOURS):
         current_end = None
 
         for row in stay_windows.itertuples():
+            # Start the first window.
             if current_start is None:
                 current_start = row.window_start
                 current_end = row.window_end
                 continue
 
+            # Extend an overlapping window.
             if row.window_start <= current_end:
                 current_end = max(current_end, row.window_end)
             else:
+                # Close a completed window.
                 merged_windows.append((stay_id, current_start, current_end))
                 current_start = row.window_start
                 current_end = row.window_end
 
+        # Close the final window.
         if current_start is not None:
             merged_windows.append((stay_id, current_start, current_end))
 
+    # Return merged windows.
     return pd.DataFrame(merged_windows, columns=["stay_id", "window_start", "window_end"])
 
 
-def extract_raw_chart_covariates(config):
-    # Extract raw chart covariates.
-    episodes = pd.read_csv(config.required_episodes_file, low_memory=False)
-    for col in ["inserted", "removed", "reinsertion_time", "ICU_in", "ICU_out"]:
-        episodes[col] = pd.to_datetime(episodes[col], errors="coerce")
+def extract_chart_covariates():
+    # Define stage files.
+    required_episodes_file = DATA_DIR / "required_catheter_episodes.csv"
+    kept_preprocessed_chart_file = DATA_DIR / "preprocessed_raw_chart_covariates_kept.csv"
+    d_items_keep_file = CONFIG_DIR / "d_items_keep.csv"
 
-    # Build chart extraction windows.
+    # Load episode timing.
+    episode_cols = ["stay_id", "inserted", "reinsertion_time", "ICU_in", "ICU_out"]
+    episodes = pd.read_csv(
+        required_episodes_file,
+        usecols=episode_cols,
+        low_memory=False,
+    )
+
+    # Parse episode timestamps.
+    for col in ["inserted", "reinsertion_time", "ICU_in", "ICU_out"]:
+        episodes[col] = pd.to_datetime(episodes[col])
+
+    # Build target stays and windows.
     windows = build_chart_extraction_windows(episodes)
+    stay_ids = set(windows["stay_id"].dropna().astype(int).unique())
 
-    print("[CONFIG]", config.mimic_dir)
-    print("[Catheter episodes]", len(episodes))
-    print("[Chart windows]", len(windows))
-    print("[EHR] Extracting raw chartevents covariates...")
+    # Load the item allowlist.
+    keep_df = pd.read_csv(d_items_keep_file, usecols=["itemid"], low_memory=False)
+    keep_df["itemid"] = pd.to_numeric(keep_df["itemid"])
+    keep_itemids = set(keep_df["itemid"].dropna().astype(int))
 
-    chart_cols = [
+    # Include Fahrenheit source rows.
+    source_itemids = keep_itemids - {TEMP_F_ITEMID}
+    if TEMP_C_ITEMID in keep_itemids:
+        source_itemids.add(TEMP_F_ITEMID)
+
+    # Define input and output schemas.
+    source_cols = [
         "subject_id", "hadm_id", "stay_id", "itemid", "charttime",
         "storetime", "valuenum", "value", "valueuom",
     ]
+    output_cols = ["stay_id", "itemid", "charttime", "valuenum", "valueuom"]
+    chartevents_file = MIMIC_DIR / "icu" / "chartevents.csv"
 
-    config.data_dir.mkdir(exist_ok=True)
-    tmp_raw_chart_file = writing_path(config.raw_chart_file)
-    # Remove if exists.
-    remove_if_exists(tmp_raw_chart_file)
-    # Remove if exists.
-    remove_if_exists(config.raw_chart_file)
-    # Remove if exists.
-    remove_if_exists(config.raw_chart_sample_file)
+    # Use an atomic output file.
+    tmp_outfile = kept_preprocessed_chart_file.with_suffix(
+        kept_preprocessed_chart_file.suffix + ".writing"
+    )
 
-    stay_ids = set(windows["stay_id"].dropna().astype(int).unique())
-    chartevents_file = config.mimic_dir / "icu" / "chartevents.csv"
+    # Initialise the output file.
+    pd.DataFrame(columns=output_cols).to_csv(tmp_outfile, index=False)
+
+    # Track extraction totals.
     kept_rows_total = 0
-    sample_rows_written = 0
-    first_write = True
+    converted_rows_total = 0
 
+    # Report extraction settings.
+    print("[CONFIG]", MIMIC_DIR)
+    print("[Catheter episodes]", len(episodes))
+    print("[Chart windows]", len(windows))
+    print(f"[Chart item allowlist] {len(keep_itemids):,}")
+    print("[EHR] Extracting chart covariates...")
+
+    # Stream the chart table.
     for chunk_idx, chunk in enumerate(
-        pd.read_csv(chartevents_file, usecols=chart_cols, chunksize=CHUNK_ROWS, low_memory=False),
+        pd.read_csv(chartevents_file, usecols=source_cols, chunksize=CHUNK_ROWS, low_memory=False),
         start=1,
     ):
-        chunk_filtered = chunk[chunk["stay_id"].isin(stay_ids)].copy()
+        # Keep cohort stays.
+        selected = chunk.loc[chunk["stay_id"].isin(stay_ids)].copy()
 
-        if len(chunk_filtered) == 0:
-            kept = 0
-        else:
-            chunk_filtered["charttime"] = pd.to_datetime(chunk_filtered["charttime"], errors="coerce")
-            chunk_filtered["storetime"] = pd.to_datetime(chunk_filtered["storetime"], errors="coerce")
-            chunk_filtered = chunk_filtered.dropna(subset=["stay_id", "charttime"]).copy()
+        # Keep allowed items and temperatures.
+        selected_itemids = pd.to_numeric(selected["itemid"])
+        selected_units = selected["valueuom"].fillna("").astype(str).str.strip().str.upper()
+        selected = selected.loc[
+            selected_itemids.isin(source_itemids)
+            | selected_units.isin(FAHRENHEIT_UNITS)
+        ].copy()
 
-            if len(chunk_filtered) == 0:
-                kept = 0
-            else:
-                matched = chunk_filtered.merge(windows, on="stay_id", how="inner")
-                matched = matched[
-                    (matched["charttime"] >= matched["window_start"]) &
-                    (matched["charttime"] < matched["window_end"])
-                ].copy()
-                chunk_filtered = matched[chart_cols].drop_duplicates()
-                kept = len(chunk_filtered)
+        # Normalise event timestamps.
+        selected["charttime"] = pd.to_datetime(selected["charttime"])
+        selected["storetime"] = pd.to_datetime(selected["storetime"])
+        selected = selected.dropna(subset=["stay_id", "charttime"])
 
+        # Match events to extraction windows.
+        matched = selected.merge(windows, on="stay_id", how="inner")
+        matched = matched.loc[
+            matched["charttime"].ge(matched["window_start"])
+            & matched["charttime"].lt(matched["window_end"])
+        ]
+
+        # Remove exact source duplicates.
+        matched = matched.drop_duplicates(subset=source_cols)
+        output_chunk = matched[output_cols].copy()
+
+        # Convert Fahrenheit values.
+        unit_clean = output_chunk["valueuom"].fillna("").astype(str).str.strip().str.upper()
+        output_itemids = pd.to_numeric(output_chunk["itemid"])
+        fahrenheit_mask = unit_clean.isin(FAHRENHEIT_UNITS) | output_itemids.eq(TEMP_F_ITEMID)
+        fahrenheit_values = pd.to_numeric(
+            output_chunk.loc[fahrenheit_mask, "valuenum"],
+        )
+        output_chunk.loc[fahrenheit_mask, "valuenum"] = (
+            fahrenheit_values - 32.0
+        ) * (5.0 / 9.0)
+        output_chunk.loc[fahrenheit_mask, "itemid"] = TEMP_C_ITEMID
+        output_chunk.loc[fahrenheit_mask, "valueuom"] = CELSIUS_UNIT
+        converted_rows_total += int(fahrenheit_mask.sum())
+
+        # Reapply the final allowlist.
+        output_itemids = pd.to_numeric(output_chunk["itemid"])
+        output_chunk = output_chunk.loc[output_itemids.isin(keep_itemids)]
+        kept = len(output_chunk)
         kept_rows_total += kept
 
-        if kept > 0:
-            chunk_filtered.to_csv(
-                tmp_raw_chart_file,
-                mode="w" if first_write else "a",
-                header=first_write,
-                index=False,
-            )
-            first_write = False
+        # Append retained rows.
+        output_chunk.to_csv(tmp_outfile, mode="a", header=False, index=False)
 
-            if sample_rows_written < SAMPLE_ROWS:
-                sample_chunk = chunk_filtered.head(SAMPLE_ROWS - sample_rows_written).copy()
-                save_report_df(
-                    sample_chunk,
-                    config.raw_chart_sample_file,
-                    mode="w" if sample_rows_written == 0 else "a",
-                    header=sample_rows_written == 0,
-                )
-                sample_rows_written += len(sample_chunk)
-
+        # Report chunk progress.
         print(
             f"[EHR][{chunk_idx}] read={len(chunk):,} keep={kept:,} "
             f"cum_keep={kept_rows_total:,}"
         )
 
-    # Replace output.
-    replace_output(tmp_raw_chart_file, config.raw_chart_file)
+    # Publish the completed file.
+    tmp_outfile.replace(kept_preprocessed_chart_file)
 
-    print("[EHR] Raw chart covariates extracted.")
-    print("[SAVE]", config.raw_chart_file)
-    print("[SAVE SAMPLE]", config.raw_chart_sample_file)
-    print("Rows:", kept_rows_total)
-
-
-# Chart covariate preprocessing and allowlist filtering
-
-def fahrenheit_to_celsius(values):
-    # Convert to celsius.
-    return (values - 32.0) * (5.0 / 9.0)
-
-
-def preprocess_raw_chart_covariates(config):
-    # Preprocess raw chart covariates.
-    config.data_dir.mkdir(exist_ok=True, parents=True)
-    tmp_preprocessed_chart_file = writing_path(config.preprocessed_chart_file)
-    # Remove if exists.
-    remove_if_exists(tmp_preprocessed_chart_file)
-    # Remove if exists.
-    remove_if_exists(config.preprocessed_chart_file)
-    # Remove if exists.
-    remove_if_exists(config.preprocessed_chart_sample_file)
-
-    first_write = True
-    converted_rows_total = 0
-    sample_rows_written = 0
-
-    # Convert to celsius.
-    for chunk_idx, chunk in enumerate(
-        pd.read_csv(config.raw_chart_file, chunksize=CHUNK_ROWS, low_memory=False),
-        start=1,
-    ):
-        unit_clean = chunk["valueuom"].fillna("").astype(str).str.strip().str.upper()
-        itemids = pd.to_numeric(chunk["itemid"], errors="coerce")
-        fahrenheit_mask = unit_clean.isin(FAHRENHEIT_UNITS) | itemids.eq(TEMP_F_ITEMID)
-
-        # Convert to celsius.
-        if fahrenheit_mask.any():
-            chunk.loc[fahrenheit_mask, "valuenum"] = pd.to_numeric(
-                chunk.loc[fahrenheit_mask, "valuenum"],
-                errors="coerce",
-            )
-            # Convert to celsius.
-            chunk.loc[fahrenheit_mask, "valuenum"] = fahrenheit_to_celsius(chunk.loc[fahrenheit_mask, "valuenum"])
-
-            numeric_value = pd.to_numeric(chunk.loc[fahrenheit_mask, "value"], errors="coerce")
-            numeric_mask = numeric_value.notna()
-            # Convert to celsius.
-            if numeric_mask.any():
-                # Convert to celsius.
-                converted_value = fahrenheit_to_celsius(numeric_value.loc[numeric_mask]).round(3)
-                chunk.loc[numeric_value.loc[numeric_mask].index, "value"] = converted_value.astype(str)
-
-            chunk.loc[fahrenheit_mask, "itemid"] = TEMP_C_ITEMID
-            chunk.loc[fahrenheit_mask, "valueuom"] = CELSIUS_UNIT
-            converted_rows_total += int(fahrenheit_mask.sum())
-
-        chunk.to_csv(
-            tmp_preprocessed_chart_file,
-            mode="w" if first_write else "a",
-            header=first_write,
-            index=False,
-        )
-
-        if sample_rows_written < SAMPLE_ROWS:
-            sample_chunk = chunk.head(SAMPLE_ROWS - sample_rows_written).copy()
-            save_report_df(
-                sample_chunk,
-                config.preprocessed_chart_sample_file,
-                mode="w" if sample_rows_written == 0 else "a",
-                header=sample_rows_written == 0,
-            )
-            sample_rows_written += len(sample_chunk)
-
-        first_write = False
-        print(
-            f"[CHUNK {chunk_idx}] rows={len(chunk):,} "
-            f"converted={int(fahrenheit_mask.sum()):,} "
-            f"cum_converted={converted_rows_total:,}"
-        )
-
-    # Replace output.
-    replace_output(tmp_preprocessed_chart_file, config.preprocessed_chart_file)
-
-    print("[SAVE]", config.preprocessed_chart_file)
-    print("[SAVE SAMPLE]", config.preprocessed_chart_sample_file)
-    print("Converted rows:", converted_rows_total)
-
-
-def load_keep_itemids(config):
-    # Load keep item IDs.
-    keep_df = pd.read_csv(config.d_items_keep_file, usecols=["itemid"], low_memory=False)
-    keep_df["itemid"] = pd.to_numeric(keep_df["itemid"], errors="coerce")
-    keep_df = keep_df.dropna(subset=["itemid"]).copy()
-    return set(keep_df["itemid"].astype(int))
-
-
-def filter_preprocessed_chart_covariates(config):
-    # Filter preprocessed chart covariates.
-    config.data_dir.mkdir(exist_ok=True, parents=True)
-
-    # Load keep item IDs.
-    keep_itemids = load_keep_itemids(config)
-    tmp_outfile = config.kept_preprocessed_chart_file.with_suffix(config.kept_preprocessed_chart_file.suffix + ".writing")
-    tmp_sample_outfile = config.kept_preprocessed_chart_sample_file.with_suffix(
-        config.kept_preprocessed_chart_sample_file.suffix + ".writing"
-    )
-    # Remove if exists.
-    remove_if_exists(tmp_outfile)
-    # Remove if exists.
-    remove_if_exists(tmp_sample_outfile)
-
-    first_write = True
-    sample_rows_written = 0
-    read_rows_total = 0
-    kept_rows_total = 0
-
-    print(f"[LOAD] keep itemids={len(keep_itemids):,} from {config.d_items_keep_file}")
-
-    for chunk_idx, chunk in enumerate(
-        pd.read_csv(config.preprocessed_chart_file, chunksize=CHUNK_ROWS, low_memory=False),
-        start=1,
-    ):
-        read_rows_total += len(chunk)
-        itemids = pd.to_numeric(chunk["itemid"], errors="coerce")
-        kept = chunk.loc[itemids.isin(keep_itemids)].copy()
-        kept_rows_total += len(kept)
-
-        if len(kept) > 0:
-            kept.to_csv(tmp_outfile, mode="w" if first_write else "a", header=first_write, index=False)
-            first_write = False
-
-            if sample_rows_written < SAMPLE_ROWS:
-                sample_chunk = kept.head(SAMPLE_ROWS - sample_rows_written).copy()
-                save_report_df(
-                    sample_chunk,
-                    tmp_sample_outfile,
-                    mode="w" if sample_rows_written == 0 else "a",
-                    header=sample_rows_written == 0,
-                )
-                sample_rows_written += len(sample_chunk)
-
-        print(f"[CHUNK {chunk_idx}] rows={len(chunk):,} keep={len(kept):,} cum_keep={kept_rows_total:,}")
-
-    if first_write:
-        header = pd.read_csv(config.preprocessed_chart_file, nrows=0)
-        header.to_csv(tmp_outfile, index=False)
-        print(f"[WARN] no rows matched d_items_keep.csv; wrote empty file with headers: {config.kept_preprocessed_chart_file}")
-
-    # Replace output.
-    replace_output(tmp_outfile, config.kept_preprocessed_chart_file)
-    print(f"[SAVE] {config.kept_preprocessed_chart_file}")
-    # Replace output.
-    if tmp_sample_outfile.exists():
-        # Replace output.
-        replace_output(tmp_sample_outfile, config.kept_preprocessed_chart_sample_file)
-        print(f"[SAVE SAMPLE] {config.kept_preprocessed_chart_sample_file}")
-    print(f"[INFO] rows read: {read_rows_total:,}")
+    # Report extraction totals.
+    print(f"[SAVE] {kept_preprocessed_chart_file}")
     print(f"[INFO] rows kept: {kept_rows_total:,}")
-    print(f"[INFO] rows dropped: {read_rows_total - kept_rows_total:,}")
-
-
-# Chart covariate validation
-
-def build_chart_value_audit_from_parts(
-    value_parts,
-    row_counts,
-    unit_counts_by_itemid,
-    itemid_to_label,
-    bounds_by_itemid,
-):
-    # Build chart value audit from parts.
-    rows = []
-
-    for itemid in sorted(row_counts):
-        non_missing = (
-            pd.concat(value_parts[itemid], ignore_index=True)
-            if value_parts[itemid]
-            else pd.Series(dtype=float)
-        )
-
-        rows_for_itemid = int(row_counts[itemid])
-        non_missing_n = int(non_missing.shape[0])
-        pct_missing = float((1.0 - (non_missing_n / rows_for_itemid)) * 100.0) if rows_for_itemid > 0 else np.nan
-        lower_bound, upper_bound = bounds_by_itemid.get(itemid, (np.nan, np.nan))
-
-        if non_missing_n > 0:
-            min_val = float(non_missing.min())
-            p01 = float(non_missing.quantile(0.01))
-            median_val = float(non_missing.median())
-            p99 = float(non_missing.quantile(0.99))
-            max_val = float(non_missing.max())
-        else:
-            min_val = p01 = median_val = p99 = max_val = np.nan
-
-        n_below = int((non_missing < lower_bound).sum()) if pd.notna(lower_bound) else np.nan
-        n_above = int((non_missing > upper_bound).sum()) if pd.notna(upper_bound) else np.nan
-
-        if pd.notna(n_below) and pd.notna(n_above) and non_missing_n > 0:
-            n_out_of_range = int(n_below + n_above)
-            pct_out_of_range_non_missing = float((n_out_of_range / non_missing_n) * 100.0)
-        else:
-            n_out_of_range = np.nan
-            pct_out_of_range_non_missing = np.nan
-
-        unit_counts = pd.Series(unit_counts_by_itemid[itemid]).sort_values(ascending=False)
-        if len(unit_counts) > 0:
-            n_unique_units = int(unit_counts.shape[0])
-            top_unit = str(unit_counts.index[0])
-            top_unit_n = int(unit_counts.iloc[0])
-            units_seen = " | ".join([f"{u} ({n})" for u, n in unit_counts.items()])
-        else:
-            n_unique_units = 0
-            top_unit = ""
-            top_unit_n = 0
-            units_seen = ""
-
-        rows.append({
-            "itemid": itemid,
-            "label": itemid_to_label.get(itemid, "UNKNOWN ITEMID"),
-            "rows_for_itemid": rows_for_itemid,
-            "non_missing_n": non_missing_n,
-            "pct_missing": pct_missing,
-            "min": min_val,
-            "p01": p01,
-            "median": median_val,
-            "p99": p99,
-            "max": max_val,
-            "lower_bound": lower_bound,
-            "upper_bound": upper_bound,
-            "n_below_lower_bound": n_below,
-            "n_above_upper_bound": n_above,
-            "n_out_of_range": n_out_of_range,
-            "pct_out_of_range_non_missing": pct_out_of_range_non_missing,
-            "n_unique_units": n_unique_units,
-            "top_unit": top_unit,
-            "top_unit_n": top_unit_n,
-            "units_seen": units_seen,
-        })
-
-    out = pd.DataFrame(rows)
-    if not out.empty:
-        numeric_cols = out.select_dtypes(include=[np.number]).columns
-        out[numeric_cols] = out[numeric_cols].round(AUDIT_DECIMAL_PLACES)
-    return out
-
-
-def build_unit_audit_from_parts(
-    unit_counts_by_itemid,
-    itemid_to_label,
-):
-    # Build unit audit from parts.
-    rows = []
-    for itemid in sorted(unit_counts_by_itemid):
-        for unit, n_rows in unit_counts_by_itemid[itemid].items():
-            rows.append({
-                "itemid": itemid,
-                "label": itemid_to_label.get(itemid, "UNKNOWN ITEMID"),
-                "valueuom": unit,
-                "n_rows": n_rows,
-            })
-
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out.reindex(columns=["itemid", "label", "valueuom", "n_rows"])
-
-    return out.sort_values(
-        ["itemid", "n_rows", "valueuom"],
-        ascending=[True, False, True],
-    ).reset_index(drop=True)
-
-
-def validate_chart_covariates(
-    data_file,
-    outdir,
-    d_items_path,
-    bounds_file,
-    output_prefix,
-):
-    # Validate chart covariates.
-    outdir.mkdir(exist_ok=True, parents=True)
-
-    header = pd.read_csv(data_file, nrows=0)
-    header.columns = header.columns.str.strip()
-    available_cols = set(header.columns)
-    desired_cols = ["stay_id", "itemid", "charttime", "valuenum", "value", "valueuom"]
-    usecols = [c for c in desired_cols if c in available_cols]
-
-    print(f"[RAW FILE] {data_file}")
-    print(f"[AVAILABLE COLS] {sorted(available_cols)}")
-    print(f"[READING COLS] {usecols}")
-
-    if "valuenum" not in available_cols and "value" not in available_cols:
-        raise ValueError("Chart file must contain at least one of 'valuenum' or 'value'.")
-
-    # Load item labels.
-    itemid_to_label = load_item_labels(d_items_path)
-    # Load bounds.
-    bounds_by_itemid = load_bounds(bounds_file)
-    row_counts = defaultdict(int)
-    value_parts = defaultdict(list)
-    unit_counts_by_itemid = defaultdict(lambda: defaultdict(int))
-
-    for chunk in pd.read_csv(data_file, usecols=usecols, chunksize=CHUNK_ROWS, low_memory=False):
-        chunk.columns = chunk.columns.str.strip()
-        chunk["itemid"] = pd.to_numeric(chunk["itemid"], errors="coerce")
-        if "valuenum" in chunk.columns:
-            chunk["valuenum"] = pd.to_numeric(chunk["valuenum"], errors="coerce")
-        else:
-            chunk["valuenum"] = np.nan
-        if "valueuom" in chunk.columns:
-            chunk["valueuom"] = chunk["valueuom"].fillna("").astype(str).str.strip()
-        else:
-            chunk["valueuom"] = ""
-
-        chunk = chunk.dropna(subset=["itemid"]).copy()
-        chunk["itemid"] = chunk["itemid"].astype(int)
-
-        row_count_chunk = chunk.groupby("itemid").size()
-        for itemid, count in row_count_chunk.items():
-            row_counts[int(itemid)] += int(count)
-
-        numeric_chunk = chunk.dropna(subset=["valuenum"])
-        for itemid, group in numeric_chunk.groupby("itemid", sort=False):
-            value_parts[int(itemid)].append(group["valuenum"].reset_index(drop=True))
-
-        unit_chunk = chunk.loc[chunk["valueuom"] != "", ["itemid", "valueuom"]].copy()
-        if len(unit_chunk) > 0:
-            unit_count_chunk = unit_chunk.groupby(["itemid", "valueuom"]).size()
-            for (itemid, unit), count in unit_count_chunk.items():
-                unit_counts_by_itemid[int(itemid)][str(unit)] += int(count)
-
-    # Build chart value audit from parts.
-    audit = build_chart_value_audit_from_parts(
-        value_parts=value_parts,
-        row_counts=row_counts,
-        unit_counts_by_itemid=unit_counts_by_itemid,
-        itemid_to_label=itemid_to_label,
-        bounds_by_itemid=bounds_by_itemid,
-    )
-
-    audit_file = outdir / f"{output_prefix}_chart_integrity_audit.csv"
-    audit_problem_file = outdir / f"{output_prefix}_chart_integrity_audit__sorted_problem_first.csv"
-    units_file = outdir / f"{output_prefix}_chart_units_by_itemid.csv"
-
-    save_report_df(audit, audit_file)
-
-    audit_problem = audit.copy()
-    audit_problem["abs_max_minus_p99"] = (
-        pd.to_numeric(audit_problem["max"], errors="coerce") -
-        pd.to_numeric(audit_problem["p99"], errors="coerce")
-    ).abs()
-    audit_problem["abs_p01_minus_min"] = (
-        pd.to_numeric(audit_problem["p01"], errors="coerce") -
-        pd.to_numeric(audit_problem["min"], errors="coerce")
-    ).abs()
-
-    sort_cols = [
-        "n_out_of_range",
-        "pct_out_of_range_non_missing",
-        "n_unique_units",
-        "abs_max_minus_p99",
-        "abs_p01_minus_min",
-        "pct_missing",
-    ]
-    audit_problem = audit_problem.sort_values(sort_cols, ascending=[False, False, False, False, False, False])
-    save_report_df(audit_problem, audit_problem_file)
-
-    # Build unit audit from parts.
-    unit_audit = build_unit_audit_from_parts(unit_counts_by_itemid, itemid_to_label)
-    save_report_df(unit_audit, units_file)
-
-    print(f"Saved: {audit_file}")
-    print(f"Saved: {audit_problem_file}")
-    print(f"Saved: {units_file}")
-
-
-def validate_raw_chart_covariates(config):
-    # Validate raw chart covariates.
-    # Validate chart covariates.
-    validate_chart_covariates(
-        data_file=config.kept_preprocessed_chart_file,
-        outdir=config.data_dir,
-        d_items_path=config.d_items_path,
-        bounds_file=config.bounds_file,
-        output_prefix="raw",
-    )
-
-
-def validate_cleaned_chart_covariates(config):
-    # Validate cleaned chart covariates.
-    # Validate chart covariates.
-    validate_chart_covariates(
-        data_file=config.cleaned_chart_file,
-        outdir=config.data_dir,
-        d_items_path=config.d_items_path,
-        bounds_file=config.bounds_file,
-        output_prefix="cleaned",
-    )
+    print(f"[INFO] Fahrenheit rows converted: {converted_rows_total:,}")
 
 
 # Chart covariate cleaning
 
-def _load_numeric_values_by_itemid(infile):
-    # Load numeric values by item ID.
+def _load_numeric_values_by_itemid():
+    # Collect values across chunks.
     value_parts = defaultdict(list)
 
-    for chunk in pd.read_csv(infile, usecols=[ITEM_COL, VALUE_COL], chunksize=CHUNK_ROWS, low_memory=False):
-        chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL], errors="coerce")
-        chunk[VALUE_COL] = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
+    # Stream item-value pairs.
+    chart_file = DATA_DIR / "preprocessed_raw_chart_covariates_kept.csv"
+    for chunk in pd.read_csv(chart_file, usecols=[ITEM_COL, VALUE_COL], chunksize=CHUNK_ROWS, low_memory=False):
+        # Keep valid numeric values.
+        chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL])
+        chunk[VALUE_COL] = pd.to_numeric(chunk[VALUE_COL])
         chunk = chunk.dropna(subset=[ITEM_COL, VALUE_COL]).copy()
-        if chunk.empty:
-            continue
-
         chunk[ITEM_COL] = chunk[ITEM_COL].astype(int)
+
+        # Store values by item.
         for itemid, item_rows in chunk.groupby(ITEM_COL, sort=False):
             value_parts[int(itemid)].append(item_rows[VALUE_COL].reset_index(drop=True))
 
+    # Join each item's chunks.
     return {
         itemid: pd.concat(parts, ignore_index=True)
         for itemid, parts in value_parts.items()
-        if parts
     }
 
 
-def _count_numeric_values_by_itemid(infile):
-    # Count numeric chart values by item ID.
-    count_parts = []
-
-    for chunk in pd.read_csv(infile, usecols=[ITEM_COL, VALUE_COL], chunksize=CHUNK_ROWS, low_memory=False):
-        chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL], errors="coerce")
-        chunk[VALUE_COL] = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
-        chunk = chunk.dropna(subset=[ITEM_COL]).copy()
-        if chunk.empty:
-            continue
-
-        count_parts.append(
-            chunk.groupby(ITEM_COL, sort=False).agg(
-                n_rows_total=(VALUE_COL, "size"),
-                n_non_missing=(VALUE_COL, lambda values: values.notna().sum()),
-            )
-        )
-
-    if not count_parts:
-        return pd.DataFrame(columns=[ITEM_COL, "n_rows_total", "n_non_missing"])
-
-    counts = pd.concat(count_parts).groupby(level=0, sort=False).sum().reset_index()
-    counts[ITEM_COL] = counts[ITEM_COL].astype(int)
-    return counts
-
-
-def fit_cleaning_rules(infile):
-    # Fit cleaning rules.
-    # Load numeric values by item ID.
-    values_by_itemid = _load_numeric_values_by_itemid(infile)
-    if not values_by_itemid:
-        raise ValueError("No numeric valuenum rows found in input file.")
-
+def fit_cleaning_rules():
+    # Load values by item.
+    values_by_itemid = _load_numeric_values_by_itemid()
     rule_rows = []
+
+    # Fit one rule per item.
     for itemid, values in values_by_itemid.items():
+        # Summarise zero values.
         nonzero_values = values[values != 0]
-        rule_rows.append(
-            {
-                ITEM_COL: itemid,
-                "n_non_missing": int(values.shape[0]),
-                "zero_fraction": float(values.eq(0).mean()),
-                "p5_nonzero": float(nonzero_values.quantile(0.05)) if not nonzero_values.empty else np.nan,
-            }
+        n_non_missing = int(values.shape[0])
+        zero_fraction = float(values.eq(0).mean())
+        p5_nonzero = float(nonzero_values.quantile(0.05))
+
+        # Detect likely missing zeros.
+        zero_to_missing = (
+            n_non_missing >= MIN_N_FOR_RULES
+            and p5_nonzero > 0
+            and 0 < zero_fraction <= ZERO_MAX_FRAC
         )
+        filtered_values = nonzero_values if zero_to_missing else values
 
-    rules = pd.DataFrame(rule_rows).set_index(ITEM_COL)
-    rules["zero_to_missing"] = False
-
-    auto_zero_mask = (
-        (rules["n_non_missing"] >= MIN_N_FOR_RULES) &
-        (rules["p5_nonzero"] > 0) &
-        (rules["zero_fraction"] > 0) &
-        (rules["zero_fraction"] <= ZERO_MAX_FRAC)
-    )
-    rules.loc[auto_zero_mask, "zero_to_missing"] = True
-
-    if ALWAYS_ZERO_TO_MISSING:
-        rules.loc[rules.index.isin(ALWAYS_ZERO_TO_MISSING), "zero_to_missing"] = True
-    if NEVER_ZERO_TO_MISSING:
-        rules.loc[rules.index.isin(NEVER_ZERO_TO_MISSING), "zero_to_missing"] = False
-
-    threshold_rows = []
-    for itemid, values in values_by_itemid.items():
-        filtered_values = values.copy()
-        if bool(rules.loc[itemid, "zero_to_missing"]):
-            filtered_values = filtered_values[filtered_values != 0]
-
-        if filtered_values.empty:
-            threshold_rows.append({
-                ITEM_COL: itemid,
-                "n_for_thresholds": 0,
-                "p1": np.nan,
-                "q1": np.nan,
-                "q3": np.nan,
-                "p99": np.nan,
-            })
-            continue
-
-        threshold_rows.append({
+        # Record robust quantiles.
+        rule_rows.append({
             ITEM_COL: itemid,
+            "n_non_missing": n_non_missing,
+            "zero_fraction": zero_fraction,
+            "p5_nonzero": p5_nonzero,
+            "zero_to_missing": zero_to_missing,
             "n_for_thresholds": int(filtered_values.shape[0]),
             "p1": float(filtered_values.quantile(0.01)),
             "q1": float(filtered_values.quantile(0.25)),
@@ -1278,32 +775,34 @@ def fit_cleaning_rules(infile):
             "p99": float(filtered_values.quantile(0.99)),
         })
 
-    threshold_df = pd.DataFrame(threshold_rows).set_index(ITEM_COL)
-    rules = rules.join(threshold_df, how="left")
+    # Flag underpowered rules.
+    rules = pd.DataFrame(rule_rows)
     rules["status"] = "ok"
-    rules.loc[rules["n_for_thresholds"].fillna(0) < MIN_N_FOR_RULES, "status"] = "too_few_values_for_thresholds"
+    rules.loc[rules["n_for_thresholds"] < MIN_N_FOR_RULES, "status"] = "too_few_values_for_thresholds"
 
+    # Estimate each item's spread.
     iqr = rules["q3"] - rules["q1"]
     tail_span = rules["p99"] - rules["p1"]
     spread = pd.concat([iqr, tail_span], axis=1).max(axis=1)
     spread = spread.fillna(0.0).clip(lower=1e-8)
 
+    # Define cleaning bounds.
     rules["lower_clip"] = rules["p1"]
     rules["upper_clip"] = rules["p99"]
     rules["lower_delete"] = rules["p1"] - FAR_OUT_SPREAD_MULT * spread
     rules["upper_delete"] = rules["p99"] + FAR_OUT_SPREAD_MULT * spread
 
-    return rules.reset_index()
+    # Return all fitted rules.
+    return rules
 
 
-def apply_cleaning_rules(infile, outfile, rules):
-    # Apply cleaning rules.
-    tmp_outfile = writing_path(outfile)
-    # Remove if exists.
-    remove_if_exists(tmp_outfile)
-    # Remove if exists.
-    remove_if_exists(outfile)
+def apply_cleaning_rules(rules):
+    # Prepare an atomic output.
+    infile = DATA_DIR / "preprocessed_raw_chart_covariates_kept.csv"
+    outfile = DATA_DIR / "cleaned_chart_covariates.csv"
+    tmp_outfile = outfile.with_suffix(outfile.suffix + ".writing")
 
+    # Keep required rule columns.
     rules_small = rules[
         [
             ITEM_COL,
@@ -1316,175 +815,210 @@ def apply_cleaning_rules(infile, outfile, rules):
         ]
     ].copy()
 
-    audit_parts = []
+    # Write the header once.
     first_write = True
 
+    # Clean the file in chunks.
     for chunk in pd.read_csv(infile, chunksize=CHUNK_ROWS, low_memory=False):
+        # Preserve the source schema.
         original_columns = list(chunk.columns)
-        chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL], errors="coerce")
-        chunk[VALUE_COL] = pd.to_numeric(chunk[VALUE_COL], errors="coerce")
 
+        # Normalise numeric fields.
+        chunk[ITEM_COL] = pd.to_numeric(chunk[ITEM_COL])
+        chunk[VALUE_COL] = pd.to_numeric(chunk[VALUE_COL])
+
+        # Attach item-specific rules.
         chunk = chunk.merge(rules_small, on=ITEM_COL, how="left")
 
-        action = pd.Series("unchanged", index=chunk.index, dtype="object")
-        action.loc[chunk[VALUE_COL].isna()] = "original_missing_or_non_numeric"
-        action.loc[chunk["status"].isna() & chunk[VALUE_COL].notna()] = "no_rule"
-
-        bad_rule_mask = chunk["status"].notna() & chunk["status"].ne("ok") & chunk[VALUE_COL].notna()
-        action.loc[bad_rule_mask] = "rule_not_applied"
-
+        # Replace likely missing zeros.
         zero_mask = (
             chunk["status"].eq("ok") &
             chunk["zero_to_missing"].fillna(False) &
             chunk[VALUE_COL].eq(0)
         )
         chunk.loc[zero_mask, VALUE_COL] = np.nan
-        action.loc[zero_mask] = "zero_to_missing"
 
-        far_low_mask = chunk["status"].eq("ok") & chunk[VALUE_COL].notna() & (chunk[VALUE_COL] < chunk["lower_delete"])
-        far_high_mask = chunk["status"].eq("ok") & chunk[VALUE_COL].notna() & (chunk[VALUE_COL] > chunk["upper_delete"])
+        # Remove extreme outliers.
+        far_low_mask = (
+            chunk["status"].eq("ok")
+            & chunk[VALUE_COL].notna()
+            & (chunk[VALUE_COL] < chunk["lower_delete"])
+        )
+        far_high_mask = (
+            chunk["status"].eq("ok")
+            & chunk[VALUE_COL].notna()
+            & (chunk[VALUE_COL] > chunk["upper_delete"])
+        )
         far_mask = far_low_mask | far_high_mask
         chunk.loc[far_mask, VALUE_COL] = np.nan
-        action.loc[far_mask] = "far_out_to_missing"
 
-        clip_low_mask = chunk["status"].eq("ok") & chunk[VALUE_COL].notna() & (chunk[VALUE_COL] < chunk["lower_clip"])
-        clip_high_mask = chunk["status"].eq("ok") & chunk[VALUE_COL].notna() & (chunk[VALUE_COL] > chunk["upper_clip"])
+        # Identify moderate outliers.
+        clip_low_mask = (
+            chunk["status"].eq("ok")
+            & chunk[VALUE_COL].notna()
+            & (chunk[VALUE_COL] < chunk["lower_clip"])
+        )
+        clip_high_mask = (
+            chunk["status"].eq("ok")
+            & chunk[VALUE_COL].notna()
+            & (chunk[VALUE_COL] > chunk["upper_clip"])
+        )
 
+        # Clip moderate outliers.
         chunk.loc[clip_low_mask, VALUE_COL] = chunk.loc[clip_low_mask, "lower_clip"]
         chunk.loc[clip_high_mask, VALUE_COL] = chunk.loc[clip_high_mask, "upper_clip"]
-        clip_mask = (clip_low_mask | clip_high_mask) & action.eq("unchanged")
-        action.loc[clip_mask] = "tail_clipped"
 
-        audit_chunk = (
-            pd.DataFrame({ITEM_COL: chunk[ITEM_COL], "action": action})
-            .groupby([ITEM_COL, "action"], dropna=False)
-            .size()
-            .rename("n_rows")
-            .reset_index()
-        )
-        audit_parts.append(audit_chunk)
-
+        # Write cleaned source columns.
         chunk = chunk[original_columns]
         chunk.to_csv(tmp_outfile, mode="w" if first_write else "a", header=first_write, index=False)
         first_write = False
 
-    audit_long = pd.concat(audit_parts, ignore_index=True)
-    audit_long = audit_long.groupby([ITEM_COL, "action"], dropna=False)["n_rows"].sum().reset_index()
-
-    audit_wide = audit_long.pivot(index=ITEM_COL, columns="action", values="n_rows").fillna(0)
-    audit_wide.columns.name = None
-    audit_wide = audit_wide.reset_index()
-
-    # Count numeric chart values by item ID.
-    before_counts = _count_numeric_values_by_itemid(infile).rename(columns={"n_non_missing": "n_non_missing_before"})
-    # Replace output.
-    replace_output(tmp_outfile, outfile)
-    # Count numeric chart values by item ID.
-    after_counts = _count_numeric_values_by_itemid(outfile).rename(columns={"n_non_missing": "n_non_missing_after"})[
-        [ITEM_COL, "n_non_missing_after"]
-    ]
-
-    audit = (
-        rules.merge(audit_wide, on=ITEM_COL, how="left")
-        .merge(before_counts, on=ITEM_COL, how="left")
-        .merge(after_counts, on=ITEM_COL, how="left")
-    )
-
-    rule_cols = {
-        ITEM_COL,
-        "n_non_missing",
-        "zero_fraction",
-        "p5_nonzero",
-        "zero_to_missing",
-        "n_for_thresholds",
-        "p1",
-        "q1",
-        "q3",
-        "p99",
-        "status",
-        "lower_clip",
-        "upper_clip",
-        "lower_delete",
-        "upper_delete",
-    }
-    for col in audit.columns:
-        if col not in rule_cols:
-            audit[col] = audit[col].fillna(0)
-
-    return audit
+    # Publish the cleaned file.
+    tmp_outfile.replace(outfile)
 
 
-def clean_chart_covariates(config):
-    # Clean chart covariates.
-    print("[FIT RULES]", config.kept_preprocessed_chart_file)
-    # Fit cleaning rules.
-    rules = fit_cleaning_rules(config.kept_preprocessed_chart_file)
-    rules.to_csv(config.cleaning_rules_file, index=False)
-    print("[SAVE RULES]", config.cleaning_rules_file)
+def clean_chart_covariates():
+    # Define stage files.
+    kept_preprocessed_chart_file = DATA_DIR / "preprocessed_raw_chart_covariates_kept.csv"
+    cleaned_chart_file = DATA_DIR / "cleaned_chart_covariates.csv"
+    cleaning_rules_file = DATA_DIR / "chart_covariate_cleaning_rules.csv"
 
-    print("[APPLY RULES]", config.kept_preprocessed_chart_file)
-    # Apply cleaning rules.
-    audit = apply_cleaning_rules(config.kept_preprocessed_chart_file, config.cleaned_chart_file, rules)
-    save_report_df(audit, config.cleaning_audit_file)
+    # Fit and save rules.
+    print("[FIT RULES]", kept_preprocessed_chart_file)
+    rules = fit_cleaning_rules()
+    rules.to_csv(cleaning_rules_file, index=False)
+    print("[SAVE RULES]", cleaning_rules_file)
 
-    print("[SAVE CLEANED]", config.cleaned_chart_file)
-    print("[SAVE AUDIT]", config.cleaning_audit_file)
+    # Apply the fitted rules.
+    print("[APPLY RULES]", kept_preprocessed_chart_file)
+    apply_cleaning_rules(rules)
+
+    print("[SAVE CLEANED]", cleaned_chart_file)
 
 
 # Master panel aggregation
 
-def aggregate_itemid_covariates(panel, cleaned_chart_file):
-    # Aggregate item ID covariates onto panel rows.
-    windows = panel[["row_id", "stay_id", "cov_start", "cov_end"]].copy()
-    stay_ids = set(windows["stay_id"].dropna().astype(int).unique())
 
+def build_retention_log(aggregated, panel, itemid_to_label):
+    # Calculate coverage denominators.
+    total_rows = len(panel)
+    total_stays = panel["stay_id"].nunique()
+
+    # Attach stays to aggregates.
+    aggregated = aggregated.merge(
+        panel[["row_id", "stay_id"]],
+        on="row_id",
+        how="left",
+    )
+    summaries = []
+
+    # Summarise each statistic.
+    for stat in AGG_STATS:
+        # Keep observed values.
+        observed = aggregated.loc[
+            aggregated[stat].notna(), ["row_id", "itemid", "stay_id"]
+        ]
+
+        # Count covered rows and stays.
+        stat_summary = (
+            observed.groupby("itemid", sort=False)
+            .agg(n_rows=("row_id", "size"), n_stays=("stay_id", "nunique"))
+            .reset_index()
+        )
+        stat_summary["itemid"] = stat_summary["itemid"].astype(int)
+        stat_summary["stat"] = stat
+        summaries.append(stat_summary)
+
+    # Define report columns.
+    columns = [
+        "itemid", "label", "stat", "column_name", "n_rows",
+        "row_coverage", "n_stays", "stay_coverage", "decision",
+    ]
+
+    # Combine statistic summaries.
+    summary = pd.concat(summaries, ignore_index=True)
+
+    # Add readable feature names.
+    summary["label"] = summary["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
+    summary["column_name"] = (
+        "itemid_" + summary["itemid"].astype(str) + "__" + summary["stat"]
+    )
+
+    # Calculate coverage rates.
+    summary["row_coverage"] = summary["n_rows"] / total_rows
+    summary["stay_coverage"] = summary["n_stays"] / total_stays
+
+    # Apply retention thresholds.
+    retain = (
+        summary["row_coverage"].ge(MIN_ROW_COVERAGE)
+        & summary["stay_coverage"].ge(MIN_STAY_COVERAGE)
+    )
+    summary["decision"] = np.where(retain, "retain", "drop")
+
+    # Round displayed coverage.
+    summary[["row_coverage", "stay_coverage"]] = summary[
+        ["row_coverage", "stay_coverage"]
+    ].round(4)
+
+    # Return an ordered report.
+    return summary[columns].sort_values(
+        ["decision", "row_coverage", "stay_coverage", "n_rows", "itemid", "stat"],
+        ascending=[True, False, False, False, True, True],
+    ).reset_index(drop=True)
+
+
+def aggregate_itemid_covariates(panel, itemid_to_label):
+    # Select panel lookback windows.
+    windows = panel[["row_id", "stay_id", "cov_start", "cov_end"]].copy()
+
+    # Initialise chunk accumulators.
+    cleaned_chart_file = DATA_DIR / "cleaned_chart_covariates.csv"
     chart_cols = ["stay_id", "itemid", "charttime", "valuenum"]
     partial_stats = []
-    first_obs_parts = []
     last_obs_parts = []
 
     kept_rows_total = 0
 
+    # Report aggregation settings.
     print("[Base panel rows]", len(panel))
     print("[EHR] Aggregating chartevents covariates...")
 
+    # Process chart rows in chunks.
     for chunk_idx, chunk in enumerate(
         pd.read_csv(cleaned_chart_file, usecols=chart_cols, chunksize=CHUNK_ROWS, low_memory=False),
         start=1,
     ):
-        chunk_filtered = chunk[chunk["stay_id"].isin(stay_ids)].copy()
-        if len(chunk_filtered) == 0:
-            print(f"[EHR][{chunk_idx}] read={len(chunk):,} keep=0")
-            continue
+        rows_read = len(chunk)
 
-        chunk_filtered["charttime"] = pd.to_datetime(chunk_filtered["charttime"], errors="coerce")
-        chunk_filtered["valuenum"] = pd.to_numeric(chunk_filtered["valuenum"], errors="coerce")
-        chunk_filtered = chunk_filtered.dropna(subset=["stay_id", "itemid", "charttime", "valuenum"]).copy()
+        # Keep valid numeric observations.
+        chunk["charttime"] = pd.to_datetime(chunk["charttime"])
+        chunk["valuenum"] = pd.to_numeric(chunk["valuenum"])
+        chunk = chunk.dropna(subset=["stay_id", "itemid", "charttime", "valuenum"]).copy()
 
-        if len(chunk_filtered) == 0:
-            print(f"[EHR][{chunk_idx}] read={len(chunk):,} numeric_keep=0")
-            continue
-
-        merged = chunk_filtered.merge(windows, on="stay_id", how="inner")
-        merged = merged[(merged["charttime"] >= merged["cov_start"]) & (merged["charttime"] < merged["cov_end"])].copy()
+        # Match observations to lookbacks.
+        merged = chunk.merge(windows, on="stay_id", how="inner")
+        merged = merged[
+            (merged["charttime"] >= merged["cov_start"])
+            & (merged["charttime"] < merged["cov_end"])
+        ].copy()
 
         kept = len(merged)
         kept_rows_total += kept
 
         if kept > 0:
+            # Build regression components.
             merged["charttime_seconds"] = merged["charttime"].astype("int64") / 1_000_000_000.0
             merged["valuenum_sq"] = merged["valuenum"] * merged["valuenum"]
             merged["charttime_sq"] = merged["charttime_seconds"] * merged["charttime_seconds"]
             merged["charttime_value"] = merged["charttime_seconds"] * merged["valuenum"]
 
+            # Aggregate chunk-level components.
             item_summary = (
                 merged.groupby(["row_id", "itemid"])
                 .agg(
                     count=("valuenum", "count"),
                     total=("valuenum", "sum"),
                     sum_sq=("valuenum_sq", "sum"),
-                    min=("valuenum", "min"),
-                    max=("valuenum", "max"),
                     sum_t=("charttime_seconds", "sum"),
                     sum_tt=("charttime_sq", "sum"),
                     sum_ty=("charttime_value", "sum"),
@@ -1493,12 +1027,7 @@ def aggregate_itemid_covariates(panel, cleaned_chart_file):
             )
             partial_stats.append(item_summary)
 
-            first_obs_parts.append(
-                merged.sort_values(["row_id", "itemid", "charttime"])
-                .drop_duplicates(["row_id", "itemid"], keep="first")
-                [["row_id", "itemid", "charttime", "valuenum"]]
-                .rename(columns={"charttime": "first_time", "valuenum": "first"})
-            )
+            # Keep each chunk's last value.
             last_obs_parts.append(
                 merged.sort_values(["row_id", "itemid", "charttime"])
                 .drop_duplicates(["row_id", "itemid"], keep="last")
@@ -1506,15 +1035,13 @@ def aggregate_itemid_covariates(panel, cleaned_chart_file):
                 .rename(columns={"charttime": "last_time", "valuenum": "last"})
             )
 
+        # Report chunk progress.
         print(
-            f"[EHR][{chunk_idx}] read={len(chunk):,} stay_filtered={len(chunk_filtered):,} "
+            f"[EHR][{chunk_idx}] read={rows_read:,} numeric={len(chunk):,} "
             f"matched={kept:,} cum_matched={kept_rows_total:,}"
         )
 
-    if not partial_stats:
-        print("[EHR] No chartevents matched windows.")
-        return panel
-
+    # Combine chunk-level components.
     agg = pd.concat(partial_stats, ignore_index=True)
     agg = (
         agg.groupby(["row_id", "itemid"])
@@ -1522,8 +1049,6 @@ def aggregate_itemid_covariates(panel, cleaned_chart_file):
             count=("count", "sum"),
             total=("total", "sum"),
             sum_sq=("sum_sq", "sum"),
-            min=("min", "min"),
-            max=("max", "max"),
             sum_t=("sum_t", "sum"),
             sum_tt=("sum_tt", "sum"),
             sum_ty=("sum_ty", "sum"),
@@ -1531,9 +1056,10 @@ def aggregate_itemid_covariates(panel, cleaned_chart_file):
         .reset_index()
     )
 
+    # Calculate means.
     agg["mean"] = agg["total"] / agg["count"]
-    agg["range"] = agg["max"] - agg["min"]
 
+    # Calculate sample deviations.
     variance_num = agg["sum_sq"] - (agg["total"] * agg["total"] / agg["count"])
     agg["std"] = np.where(
         agg["count"] > 1,
@@ -1541,24 +1067,15 @@ def aggregate_itemid_covariates(panel, cleaned_chart_file):
         np.nan,
     )
 
-    if first_obs_parts:
-        first_obs = (
-            pd.concat(first_obs_parts, ignore_index=True)
-            .sort_values(["row_id", "itemid", "first_time"])
-            .drop_duplicates(["row_id", "itemid"], keep="first")
-        )
-        agg = agg.merge(first_obs[["row_id", "itemid", "first"]], on=["row_id", "itemid"], how="left")
+    # Select overall last values.
+    last_obs = (
+        pd.concat(last_obs_parts, ignore_index=True)
+        .sort_values(["row_id", "itemid", "last_time"])
+        .drop_duplicates(["row_id", "itemid"], keep="last")
+    )
+    agg = agg.merge(last_obs[["row_id", "itemid", "last"]], on=["row_id", "itemid"], how="left")
 
-    if last_obs_parts:
-        last_obs = (
-            pd.concat(last_obs_parts, ignore_index=True)
-            .sort_values(["row_id", "itemid", "last_time"])
-            .drop_duplicates(["row_id", "itemid"], keep="last")
-        )
-        agg = agg.merge(last_obs[["row_id", "itemid", "last"]], on=["row_id", "itemid"], how="left")
-
-    agg["delta"] = agg["last"] - agg["first"]
-
+    # Calculate hourly slopes.
     slope_denom = agg["count"] * agg["sum_tt"] - agg["sum_t"] * agg["sum_t"]
     slope_num = agg["count"] * agg["sum_ty"] - agg["sum_t"] * agg["total"]
     agg["slope_per_hour"] = np.where(
@@ -1567,455 +1084,220 @@ def aggregate_itemid_covariates(panel, cleaned_chart_file):
         np.nan,
     )
 
-    value_cols = [c for c in AGG_STATS if c in agg.columns]
-    wide = agg.pivot_table(index="row_id", columns="itemid", values=value_cols, aggfunc="first")
+    # Identify retained features.
+    retention_log = build_retention_log(agg, panel, itemid_to_label)
+
+    # Clear sparse statistic values.
+    for stat in AGG_STATS:
+        retained_itemids = set(
+            retention_log.loc[
+                retention_log["decision"].eq("retain") & retention_log["stat"].eq(stat),
+                "itemid",
+            ]
+        )
+        agg.loc[~agg["itemid"].isin(retained_itemids), stat] = np.nan
+
+    # Pivot features into columns.
+    wide = agg.pivot_table(
+        index="row_id",
+        columns="itemid",
+        values=AGG_STATS,
+        aggfunc="first",
+    )
     wide.columns = [f"itemid_{itemid}__{stat}" for stat, itemid in wide.columns]
     wide = wide.reset_index()
 
+    # Attach features to the panel.
     panel = panel.merge(wide, on="row_id", how="left")
     print("[EHR] Covariates aggregated.")
-    return panel
+    return panel, retention_log
 
 
-def build_master_panel(config):
-    # Build master panel.
-    panel = pd.read_csv(config.base_panel_file, low_memory=False)
+def build_master_panel():
+    # Define stage files.
+    base_panel_file = DATA_DIR / "base_panel.csv"
+    master_panel_file = DATA_DIR / "master_panel.csv"
+    covariate_retention_log_file = DATA_DIR / "covariate_retention_log.csv"
+
+    # Load the base panel.
+    panel = pd.read_csv(base_panel_file, low_memory=False)
+
+    # Parse panel timestamps.
     for col in ["inserted", "removed", "reinsertion_time", "period_start", "period_end", "cov_start", "cov_end"]:
-        panel[col] = pd.to_datetime(panel[col], errors="coerce")
+        panel[col] = pd.to_datetime(panel[col])
 
-    # Aggregate item ID covariates onto panel rows.
-    panel = aggregate_itemid_covariates(panel, config.cleaned_chart_file)
+    # Add retained chart features.
+    panel, retention_log = aggregate_itemid_covariates(
+        panel,
+        load_item_labels(),
+    )
+
+    # Remove aggregation helpers.
     panel = panel.drop(columns=["cov_start", "cov_end", "row_id"])
 
+    # Place chart features last.
     covariate_cols = sorted([c for c in panel.columns if c.startswith("itemid_")])
     base_cols = [c for c in panel.columns if not c.startswith("itemid_")]
     panel = panel[base_cols + covariate_cols]
-    panel.to_csv(config.master_panel_file, index=False)
 
-    print("[SAVE]", config.master_panel_file)
+    # Save panel and audit report.
+    panel.to_csv(master_panel_file, index=False)
+    retention_log.round(3).to_csv(
+        covariate_retention_log_file,
+        index=False,
+        float_format="%.3f",
+    )
+
+    # Report panel outcomes.
+    print("[SAVE]", master_panel_file)
     print("Removals:", panel["removed_in_period"].sum())
     print("Reinsertions:", panel["reinsertion_in_period"].sum())
     print("CAUTI:", panel["cauti_in_period"].sum())
     print("ICU end rows:", panel["icu_end_in_period"].sum())
-    print("Last episode periods:", panel["is_last_period_of_episode"].sum())
     print("Rows:", len(panel))
-
-
-# Covariate retention
-
-def detect_covariate_cols(columns):
-    # Detect covariate columns.
-    if MEAN_ONLY:
-        col_pattern = re.compile(r"^itemid_(\d+)__mean$")
-    else:
-        col_pattern = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
-
-    covariates = []
-    for column_name in columns:
-        match = col_pattern.match(column_name)
-        if match:
-            covariates.append({
-                "column_name": column_name,
-                "itemid": int(match.group(1)),
-                "stat": "mean" if MEAN_ONLY else match.group(2),
-            })
-    return covariates
-
-
-def decide_retention(row_cov, stay_cov):
-    # Decide retention.
-    keep_col = row_cov >= MIN_ROW_COVERAGE and stay_cov >= MIN_STAY_COVERAGE
-    return ("retain" if keep_col else "drop", "coverage")
-
-
-def build_retention_log(
-    panel,
-    covariates,
-    itemid_to_label,
-):
-    # Build retention log.
-    total_rows = len(panel)
-    total_stays = panel["stay_id"].nunique()
-    stay_ids = panel["stay_id"]
-
-    rows = []
-    # Decide retention.
-    for covariate in covariates:
-        column_name = str(covariate["column_name"])
-        itemid = int(covariate["itemid"])
-        stat = str(covariate["stat"])
-        values = panel[column_name]
-
-        n_rows = int(values.notna().sum())
-        row_cov = n_rows / total_rows if total_rows else 0.0
-        has_value_by_stay = values.notna().groupby(stay_ids, sort=False).any()
-        n_stays = int(has_value_by_stay.sum())
-        stay_cov = n_stays / total_stays if total_stays else 0.0
-
-        # Decide retention.
-        decision, reason = decide_retention(row_cov, stay_cov)
-        rows.append({
-            "itemid": itemid,
-            "label": itemid_to_label.get(itemid, "UNKNOWN ITEMID"),
-            "stat": stat,
-            "column_name": column_name,
-            "n_rows": n_rows,
-            "row_coverage": round(row_cov, 4),
-            "n_stays": n_stays,
-            "stay_coverage": round(stay_cov, 4),
-            "decision": decision,
-            "selection_reason": reason,
-        })
-
-    summary_df = pd.DataFrame(rows)
-    return summary_df.sort_values(
-        ["decision", "row_coverage", "stay_coverage", "n_rows", "itemid", "stat"],
-        ascending=[True, False, False, False, True, True],
-    ).reset_index(drop=True)
-
-
-def select_retained_covariates(config):
-    # Select retained covariates.
-    all_columns = pd.read_csv(config.master_panel_file, nrows=0).columns.tolist()
-    # Detect covariate columns.
-    covariates = detect_covariate_cols(all_columns)
-    usecols = ["stay_id"] + [str(covariate["column_name"]) for covariate in covariates]
-
-    print(f"[LOAD] {config.master_panel_file}")
-    print(f"[INFO] loading stay_id + {len(covariates):,} covariate columns")
-
-    panel = pd.read_csv(config.master_panel_file, usecols=usecols, low_memory=False)
-    # Build retention log.
-    summary_df = build_retention_log(panel, covariates, load_item_labels(config.d_items_path))
-    save_report_df(summary_df, config.covariate_retention_log_file)
-
-    retained_total = int((summary_df["decision"] == "retain").sum())
-    dropped_total = int((summary_df["decision"] == "drop").sum())
-
-    print(f"[INFO] panel rows: {len(panel):,}")
-    print(f"[INFO] catheterised stays: {panel['stay_id'].nunique():,}")
-    print(f"[INFO] thresholds: row_coverage >= {MIN_ROW_COVERAGE}, stay_coverage >= {MIN_STAY_COVERAGE}")
-    print(f"[WRITE] {config.covariate_retention_log_file}")
-    print(f"[INFO] retained columns: {retained_total:,}")
-    print(f"[INFO] dropped columns: {dropped_total:,}")
-
-
-# Filtered panel and train/test split
-
-def create_patient_split(panel):
-    # Create patient split.
-    subject_ids = panel[SUBJECT_ID_COL].dropna().astype(str).unique()
-    train_ids, test_ids = train_test_split(subject_ids, test_size=TEST_SIZE, random_state=SEED)
-
-    return pd.DataFrame({
-        SUBJECT_ID_COL: list(train_ids) + list(test_ids),
-        "split": ["train"] * len(train_ids) + ["test"] * len(test_ids),
-    })
-
-
-def build_filtered_panel(config):
-    # Build filtered panel.
-    summary_df = pd.read_csv(config.covariate_retention_log_file, low_memory=False)
-    retained_cov_cols = summary_df.loc[
-        summary_df["decision"].astype(str).str.lower() == "retain",
-        "column_name",
-    ].astype(str).tolist()
-
-    panel = pd.read_csv(config.master_panel_file, low_memory=False)
-    panel[SUBJECT_ID_COL] = panel[SUBJECT_ID_COL].astype(str)
-
-    covariate_cols = [c for c in panel.columns if c.startswith("itemid_") and "__" in c]
-    base_cols = [c for c in panel.columns if c not in covariate_cols]
-    retained_cov_set = set(retained_cov_cols)
-    kept_cov_cols = [c for c in covariate_cols if c in retained_cov_set]
-    filtered_panel = panel[base_cols + kept_cov_cols].copy()
-
-    for column_name in kept_cov_cols:
-        filtered_panel[column_name] = pd.to_numeric(filtered_panel[column_name], errors="coerce")
-    filtered_panel[kept_cov_cols] = filtered_panel[kept_cov_cols].round(ROUND_DP)
-
-    # Create patient split.
-    split_df = create_patient_split(filtered_panel)
-    split_df[SUBJECT_ID_COL] = split_df[SUBJECT_ID_COL].astype(str)
-    filtered_panel = filtered_panel.merge(split_df, on=SUBJECT_ID_COL, how="left")
-
-    filtered_panel.to_csv(config.filtered_panel_file, index=False)
-    split_df.to_csv(config.train_test_split_file, index=False)
-
-    patient_total = split_df[SUBJECT_ID_COL].nunique()
-    train_patients = split_df.loc[split_df["split"] == "train", SUBJECT_ID_COL].nunique()
-    test_patients = split_df.loc[split_df["split"] == "test", SUBJECT_ID_COL].nunique()
-    train_rows = int((filtered_panel["split"] == "train").sum())
-    test_rows = int((filtered_panel["split"] == "test").sum())
-
-    print(f"[READ]  {config.master_panel_file} rows={len(panel):,} cols={len(panel.columns):,}")
-    print(f"[KEEP]  retained covariate columns={len(kept_cov_cols):,}")
-    print(f"[SPLIT] patients total={patient_total:,} train={train_patients:,} test={test_patients:,}")
-    print(f"[SPLIT] rows train={train_rows:,} test={test_rows:,}")
-    print(f"[WRITE] {config.filtered_panel_file} rows={len(filtered_panel):,} cols={len(filtered_panel.columns):,}")
-    print(f"[WRITE] {config.train_test_split_file} rows={len(split_df):,} cols={len(split_df.columns):,}")
+    print("Retained chart columns:", int(retention_log["decision"].eq("retain").sum()))
+    print("Dropped chart columns:", int(retention_log["decision"].eq("drop").sum()))
 
 
 # Modelling panel and feature metadata
 
-def validate_split(df):
-    # Validate split.
-    df[SPLIT_COL] = df[SPLIT_COL].astype(str).str.strip().str.lower()
-    valid_splits = {"train", "test"}
-    found_splits = set(df[SPLIT_COL].dropna().unique())
-    invalid_splits = sorted(found_splits - valid_splits)
-    if invalid_splits:
-        raise ValueError(f"Unexpected split values in {SPLIT_COL}: {invalid_splits}")
-
-
-def base_feature_cols(df):
-    # Select baseline feature columns.
-    cols = [
-        c for c in df.columns
-        if c.startswith("itemid_") or c.startswith("sex_") or c.startswith("ethnicity_")
-    ]
-    cols.append("age")
-
-    seen = set()
-    out = []
-    for col in cols:
-        if col in df.columns and col not in seen:
-            out.append(col)
-            seen.add(col)
-    return out
-
-
-def coerce_numeric(df, cols, fill_missing_with_zero):
-    # Coerce numeric.
-    for col in cols:
-        if df[col].dtype == object:
-            df[col] = df[col].replace({
-                "TRUE": 1,
-                "FALSE": 0,
-                "True": 1,
-                "False": 0,
-                "true": 1,
-                "false": 0,
-            })
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-        if fill_missing_with_zero:
-            df[col] = df[col].fillna(0).astype(int)
-
-
-def json_ready(obj):
-    # Prepare ready.
-    # Prepare ready.
-    if isinstance(obj, dict):
-        # Prepare ready.
-        return {k: json_ready(v) for k, v in obj.items()}
-    # Prepare ready.
-    if isinstance(obj, list):
-        # Prepare ready.
-        return [json_ready(v) for v in obj]
-    return obj
-
 
 def detect_covariate_itemids(columns):
-    # Detect covariate item IDs.
-    pattern = re.compile(r"^itemid_(\d+)__([a-z0-9_]+)$", flags=re.IGNORECASE)
+    # Match chart feature names.
+    pattern = re.compile(r"^itemid_(\d+)__", flags=re.IGNORECASE)
     itemids = set()
+
+    # Collect unique item IDs.
     for col in columns:
         match = pattern.match(str(col))
         if match:
             itemids.add(int(match.group(1)))
+
+    # Return sorted IDs.
     return pd.DataFrame({"itemid": sorted(itemids)})
 
 
-def add_transition_columns(df):
-    # Add transition columns.
+def build_modelling_panel():
+    # Define stage files.
+    master_panel_file = DATA_DIR / "master_panel.csv"
+    modelling_panel_file = DATA_DIR / "modelling_panel.csv"
+    feature_spec_file = DATA_DIR / "feature_spec.json"
+    covariate_dictionary_file = DATA_DIR / "covariate_dictionary.csv"
+
+    # Load the master panel.
+    df = pd.read_csv(master_panel_file, low_memory=False)
+
+    # Find chart feature columns.
+    chart_feature_cols = [
+        col for col in df.columns
+        if col.startswith("itemid_") and "__" in col
+    ]
+
+    # Normalise chart feature values.
+    for col in chart_feature_cols:
+        df[col] = pd.to_numeric(df[col])
+    df[chart_feature_cols] = df[chart_feature_cols].round(ROUND_DP)
+
+    # Normalise event indicators.
     for col in [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        df[col] = pd.to_numeric(df[col]).fillna(0).astype(int)
 
-    df[TRANSITION_LABEL_COL] = "no_event_continue"
-    df.loc[df[ACTION_COL] == 1, TRANSITION_LABEL_COL] = "removal"
-    df.loc[df[Y_REINS] == 1, TRANSITION_LABEL_COL] = "reinsertion"
-    df.loc[df[Y_CAUTI] == 1, TRANSITION_LABEL_COL] = "cauti"
-    df.loc[(df[Y_ICU_EXIT] == 1) & (df[Y_DEATH] == 0), TRANSITION_LABEL_COL] = "icu_exit_alive"
-    df.loc[df[Y_DEATH] == 1, TRANSITION_LABEL_COL] = "death"
-
+    # Label observed actions.
     df[OBSERVED_ACTION_COL] = "keep"
-    df.loc[(df[STATE_COL] == "in") & (df[ACTION_COL] == 1), OBSERVED_ACTION_COL] = "remove"
+    df.loc[
+        (df[STATE_COL] == "in") & (df[ACTION_COL] == 1),
+        OBSERVED_ACTION_COL,
+    ] = "remove"
     df.loc[df[STATE_COL] == "out", OBSERVED_ACTION_COL] = "out"
-    df[ACTION_REMOVE_COL] = (df[OBSERVED_ACTION_COL] == "remove").astype(int)
+    df[ACTION_REMOVE_COL] = df[ACTION_COL]
 
+    # Select model features.
+    feature_cols = [
+        col for col in df.columns
+        if (
+            col.startswith("itemid_")
+            or col.startswith("sex_")
+            or col.startswith("ethnicity_")
+        )
+    ]
+    feature_cols.append("age")
 
-def build_modeling_panel(config):
-    # Build modelling panel.
-    config.data_dir.mkdir(exist_ok=True, parents=True)
+    # Coerce model inputs.
+    for col in [*feature_cols, TIME_COL, PERIODS_COL, ACTION_REMOVE_COL]:
+        df[col] = pd.to_numeric(df[col])
 
-    df = pd.read_csv(config.filtered_panel_file, low_memory=False)
-    df.columns = df.columns.str.strip()
-    df = df.copy()
-    df[ID_COL] = df[ID_COL].astype(str).str.strip()
-    df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
-    df[END_REASON_COL] = df[END_REASON_COL].astype(str).str.strip().str.lower()
+    # Define model input sets.
+    x_cols_remove = [TIME_COL, PERIODS_COL, *feature_cols]
+    x_cols_transition = [TIME_COL, PERIODS_COL, ACTION_REMOVE_COL, *feature_cols]
 
-    # Validate split.
-    validate_split(df)
-    df["state_is_out"] = (df[STATE_COL] == "out").astype(int)
-    # Add transition columns.
-    add_transition_columns(df)
+    # Save the modelling panel.
+    df.to_csv(modelling_panel_file, index=False)
 
-    # Select baseline feature columns.
-    base_cols_for_features = base_feature_cols(df)
-    # Coerce numeric.
-    coerce_numeric(
-        df,
-        base_cols_for_features + [TIME_COL, PERIODS_COL, "state_is_out", ACTION_REMOVE_COL],
-        fill_missing_with_zero=False,
+    # Record the period length.
+    period_hours = int(PERIOD_DURATION / pd.Timedelta(hours=1))
+
+    # Build the item dictionary.
+    covariate_dict = detect_covariate_itemids(df.columns)
+    itemid_to_label = load_item_labels()
+    covariate_dict["label"] = covariate_dict["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
+    covariate_dict.sort_values(["label", "itemid"]).round(3).to_csv(
+        covariate_dictionary_file,
+        index=False,
+        float_format="%.3f",
     )
 
-    target_flag_cols = [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT, LAST_PERIOD_COL]
-    # Coerce numeric.
-    coerce_numeric(df, target_flag_cols, fill_missing_with_zero=True)
-
-    feature_cols = list(base_cols_for_features)
-    x_cols_remove = [TIME_COL, PERIODS_COL, *feature_cols]
-    x_cols_cauti = [TIME_COL, PERIODS_COL, "state_is_out", *feature_cols]
-    x_cols_reins = [PERIODS_COL, *feature_cols]
-    x_cols_transition = [TIME_COL, PERIODS_COL, "state_is_out", ACTION_REMOVE_COL, *feature_cols]
-
-    df.to_csv(config.modeling_panel_file, index=False)
-
-    period_hours = int(pd.to_numeric(df["interval_hours"], errors="coerce").dropna().mode().iloc[0])
-
-    # Detect covariate item IDs.
-    covariate_dict = detect_covariate_itemids(df.columns.tolist())
-    # Load item labels.
-    itemid_to_label = load_item_labels(config.d_items_path)
-    covariate_dict["label"] = covariate_dict["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
-    save_report_df(covariate_dict.sort_values(["label", "itemid"]), config.covariate_dictionary_file)
-
+    # Build the feature specification.
     spec = {
-        "id_col": ID_COL,
-        "time_col": TIME_COL,
-        "state_col": STATE_COL,
-        "periods_col": PERIODS_COL,
-        "split_col": SPLIT_COL,
-        "action_col": ACTION_COL,
-        "y_cauti": Y_CAUTI,
-        "y_reins": Y_REINS,
-        "y_death": Y_DEATH,
-        "y_icu_exit": Y_ICU_EXIT,
-        "transition_label_col": TRANSITION_LABEL_COL,
-        "observed_action_col": OBSERVED_ACTION_COL,
-        "action_remove_col": ACTION_REMOVE_COL,
-        "last_period_col": LAST_PERIOD_COL,
-        "end_reason_col": END_REASON_COL,
         "period_hours": period_hours,
-        "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
-        "base_feature_cols": base_cols_for_features,
         "features": feature_cols,
         "x_cols_remove": x_cols_remove,
-        "x_cols_cauti": x_cols_cauti,
-        "x_cols_reins": x_cols_reins,
         "x_cols_transition": x_cols_transition,
-        "n_rows": int(len(df)),
-        "n_features": int(len(feature_cols)),
     }
-    # Prepare ready.
-    config.feature_spec_file.write_text(json.dumps(json_ready(spec), indent=2), encoding="utf-8")
 
-    print(f"[SAVE] modeling panel: {config.modeling_panel_file}")
-    print(f"[SAVE] feature spec: {config.feature_spec_file}")
-    print(f"[SAVE] covariate dictionary: {config.covariate_dictionary_file}")
+    # Save feature metadata.
+    feature_spec_file.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+    # Report modelling outputs.
+    print(f"[SAVE] modelling panel: {modelling_panel_file}")
+    print(f"[SAVE] feature spec: {feature_spec_file}")
+    print(f"[SAVE] covariate dictionary: {covariate_dictionary_file}")
     print(f"Rows: {len(df)}")
-    print(f"Base features: {len(base_cols_for_features)}")
-    print(f"Total features: {len(feature_cols)}")
-
-
-# Entrypoint
-
-def parse_args():
-    # Parse command-line arguments.
-    parser = argparse.ArgumentParser(description="Create the full CAUTI modeling data panel.")
-    parser.add_argument("--mimic-dir", type=Path, default=DEFAULT_MIMIC_DIR, help="Path to the MIMIC-IV root directory.")
-    parser.add_argument("--data-dir", type=Path, default=REPO_ROOT / "data", help="Pipeline data directory.")
-    parser.add_argument("--config-dir", type=Path, default=REPO_ROOT / "config", help="Pipeline config directory.")
-    return parser.parse_args()
-
+    print(f"Features: {len(feature_cols)}")
 
 def main():
-    # Run the script workflow.
-    # Parse command-line arguments.
-    args = parse_args()
-    config = PanelBuildConfig(
-        repo_root=REPO_ROOT,
-        mimic_dir=args.mimic_dir,
-        data_dir=args.data_dir,
-        config_dir=args.config_dir,
-    )
+    # Report active directories.
+    print("[CONFIG] repo root:", REPO_ROOT)
+    print("[CONFIG] mimic dir:", MIMIC_DIR)
+    print("[CONFIG] data dir:", DATA_DIR)
+    print("[CONFIG] config dir:", CONFIG_DIR)
 
-    print("[CONFIG] repo root:", config.repo_root)
-    print("[CONFIG] mimic dir:", config.mimic_dir)
-    print("[CONFIG] data dir:", config.data_dir)
-    print("[CONFIG] config dir:", config.config_dir)
-
-    # Print section.
+    # Build the episode panel.
     print_section("Define catheter episode cohort and base panel")
-    # Create episode cohort and base panel.
-    create_episode_cohort_and_base_panel(config)
+    create_episode_cohort_and_base_panel()
 
-    # Print section.
-    print_section("Extract raw chart-event covariates")
-    # Extract raw chart covariates.
-    extract_raw_chart_covariates(config)
+    # Extract chart covariates.
+    print_section("Extract and preprocess chart-event covariates")
+    extract_chart_covariates()
 
-    # Print section.
-    print_section("Preprocess raw chart-event covariates")
-    # Preprocess raw chart covariates.
-    preprocess_raw_chart_covariates(config)
-
-    # Print section.
-    print_section("Filter chart covariates to the item allowlist")
-    # Filter preprocessed chart covariates.
-    filter_preprocessed_chart_covariates(config)
-
-    # Print section.
-    print_section("Validate raw kept chart covariates")
-    # Validate raw chart covariates.
-    validate_raw_chart_covariates(config)
-
-    # Print section.
-    print_section("Clean chart covariates")
     # Clean chart covariates.
-    clean_chart_covariates(config)
+    print_section("Clean chart covariates")
+    clean_chart_covariates()
+    (DATA_DIR / "preprocessed_raw_chart_covariates_kept.csv").unlink()
 
-    # Print section.
-    print_section("Validate cleaned chart covariates")
-    # Validate cleaned chart covariates.
-    validate_cleaned_chart_covariates(config)
-
-    # Print section.
+    # Build the master panel.
     print_section("Aggregate cleaned covariates onto the base panel")
-    # Build master panel.
-    build_master_panel(config)
+    build_master_panel()
+    (DATA_DIR / "cleaned_chart_covariates.csv").unlink()
 
-    # Print section.
-    print_section("Select retained covariates")
-    # Select retained covariates.
-    select_retained_covariates(config)
+    # Build modelling outputs.
+    print_section("Build modelling panel and feature metadata")
+    build_modelling_panel()
 
-    # Print section.
-    print_section("Build filtered panel and train/test split")
-    # Build filtered panel.
-    build_filtered_panel(config)
-
-    # Print section.
-    print_section("Build modeling panel and feature metadata")
-    # Build modelling panel.
-    build_modeling_panel(config)
-
+    # Report completion.
     print()
     print("Data panel creation completed.")
 
 
-# Run the script workflow.
 if __name__ == "__main__":
-    # Run the script workflow.
+    # Run the full pipeline.
     main()

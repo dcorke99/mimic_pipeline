@@ -9,7 +9,7 @@ import pandas as pd
 import policy_eval_common as pec
 
 
-DEFAULT_INPUT = Path("data/modeling_panel.csv")
+DEFAULT_INPUT = Path("data/modelling_panel.csv")
 DEFAULT_OUTDIR = Path("artifacts/diagnostics/duplicate_episode_days")
 
 

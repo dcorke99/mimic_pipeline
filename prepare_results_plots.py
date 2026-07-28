@@ -284,11 +284,8 @@ def format_baseline_audit_table(audit):
 
 
 def render_qa_table(qa, outdir):
-    # Save the baseline audit checks as CSV and PNG.
+    # Save the baseline audit checks as a PNG.
     outdir.mkdir(parents=True, exist_ok=True)
-    csv_path = outdir / "05_baseline_ope_qa_checks.csv"
-    pec.save_report_df(qa, csv_path)
-    print(f"Saved: {csv_path}")
 
     fig_height = max(4, 0.45 * len(qa) + 1.5)
     fig, ax = plt.subplots(figsize=(11, fig_height))

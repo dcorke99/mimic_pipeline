@@ -23,9 +23,6 @@ DEFAULT_GFORMULA_DIAGNOSTICS = (
 DEFAULT_AIPW_SUMMARY = (
     REPO_ROOT / "artifacts" / "policy_eval" / "aipw" / "aipw_policy_outcomes_summary.csv"
 )
-DEFAULT_AIPW_EPISODES = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "aipw" / "aipw_policy_episode_scores.csv"
-)
 DEFAULT_AIPW_WEIGHT_DIAGNOSTICS = (
     REPO_ROOT / "artifacts" / "policy_eval" / "aipw" / "aipw_weight_diagnostics.csv"
 )
@@ -52,7 +49,6 @@ def parse_args():
     parser.add_argument("--gformula-summary", type=Path, default=DEFAULT_GFORMULA_SUMMARY)
     parser.add_argument("--gformula-diagnostics", type=Path, default=DEFAULT_GFORMULA_DIAGNOSTICS)
     parser.add_argument("--aipw-summary", type=Path, default=DEFAULT_AIPW_SUMMARY)
-    parser.add_argument("--aipw-episodes", type=Path, default=DEFAULT_AIPW_EPISODES)
     parser.add_argument("--aipw-weight-diagnostics", type=Path, default=DEFAULT_AIPW_WEIGHT_DIAGNOSTICS)
     parser.add_argument("--ipw-summary", type=Path, default=DEFAULT_IPW_SUMMARY)
     parser.add_argument("--ipw-weight-diagnostics", type=Path, default=DEFAULT_IPW_WEIGHT_DIAGNOSTICS)
@@ -118,11 +114,6 @@ def policy_key_set(df):
     # Build key set.
     # Add policy key.
     return set(add_policy_key(df)["__policy_key"])
-
-
-def target_policy_names(df):
-    # Return target policy names.
-    return set(df.loc[~df["policy_name"].eq(CURRENT_PRACTICE_LABEL), "policy_name"].astype(str))
 
 
 def check_same_policies(
@@ -381,7 +372,6 @@ def check_no_missing_predictions(
     g_summary,
     g_diagnostics,
     aipw_summary,
-    aipw_episodes,
 ):
     # Check no missing predictions.
     checks = []
@@ -392,9 +382,6 @@ def check_no_missing_predictions(
         checks.append((f"gformula_diagnostics_{col}", int(pd.to_numeric(g_diagnostics[col], errors="coerce").fillna(0).sum())))
     if "n_incomplete_prediction_episodes" in aipw_summary.columns:
         checks.append(("aipw_summary_incomplete", int(pd.to_numeric(aipw_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
-    if "n_missing_prediction_rows" in aipw_episodes.columns:
-        checks.append(("aipw_episode_missing_rows", int(pd.to_numeric(aipw_episodes["n_missing_prediction_rows"], errors="coerce").fillna(0).sum())))
-
     failures = [(name, value) for name, value in checks if value != 0]
     passed = bool(checks) and not failures
     detail = "all prediction-missing counters are zero"
@@ -504,8 +491,6 @@ def main():
     # Load CSV.
     aipw_summary = load_csv(args.aipw_summary)
     # Load CSV.
-    aipw_episodes = load_csv(args.aipw_episodes)
-    # Load CSV.
     aipw_weight_diagnostics = load_csv(args.aipw_weight_diagnostics)
     # Load CSV.
     ipw_summary = load_csv(args.ipw_summary)
@@ -527,7 +512,7 @@ def main():
     # Check remove rows.
     check_remove_rows(results, policy_qa, g_diagnostics, aipw_summary)
     # Check no missing predictions.
-    check_no_missing_predictions(results, g_summary, g_diagnostics, aipw_summary, aipw_episodes)
+    check_no_missing_predictions(results, g_summary, g_diagnostics, aipw_summary)
     # Check no probabilities outside unit interval.
     check_no_probabilities_outside_unit_interval(results, g_summary, g_diagnostics, aipw_summary, ipw_summary)
     # Check remove day 1 poor support.

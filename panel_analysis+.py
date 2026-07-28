@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # Config
-DATA_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\modeling_panel.csv")
+DATA_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\modelling_panel.csv")
 RESULTS_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\panel_analysis")
 COVARIATE_DICT_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\covariate_dictionary.csv")
 
@@ -32,7 +32,6 @@ INTERVAL_COL = "interval_hours"
 ACTION_COL = "removed_in_period"
 DECISION_ROW_COL = "is_decision_row"
 DECISION_PERIOD_COL = "catheter_period_at_decision"
-SPLIT_COL = "split"
 Y_CAUTI = "cauti_in_period"
 Y_REINS = "reinsertion_in_period"
 LAST_PERIOD_COL = "is_last_period_of_episode"
@@ -179,30 +178,18 @@ def build_risk_sets(df):
 def build_overview_tables(df):
     # Count rows and episodes at cohort level.
     # Build overview tables.
-    cohort_rows = [
-        {
-            "subset": "overall",
-            "rows": int(len(df)),
-            "unique_subject_id": int(df[ID_COL].nunique()),
-            "unique_hadm_id": int(df["hadm_id"].nunique()),
-            "unique_stay_id": int(df["stay_id"].nunique()),
-            "unique_episodes": int(df[EPISODE_KEYS].drop_duplicates().shape[0]),
-        }
-    ]
-    for split, g in df.groupby(SPLIT_COL, dropna=False):
-        cohort_rows.append({
-            "subset": f"split={split}",
-            "rows": int(len(g)),
-            "unique_subject_id": int(g[ID_COL].nunique()),
-            "unique_hadm_id": int(g["hadm_id"].nunique()),
-            "unique_stay_id": int(g["stay_id"].nunique()),
-            "unique_episodes": int(g[EPISODE_KEYS].drop_duplicates().shape[0]),
-        })
-    cohort_overview = pd.DataFrame(cohort_rows)
+    cohort_overview = pd.DataFrame([{
+        "subset": "overall",
+        "rows": int(len(df)),
+        "unique_subject_id": int(df[ID_COL].nunique()),
+        "unique_hadm_id": int(df["hadm_id"].nunique()),
+        "unique_stay_id": int(df["stay_id"].nunique()),
+        "unique_episodes": int(df[EPISODE_KEYS].drop_duplicates().shape[0]),
+    }])
 
-    # Summarise rows by split and state.
+    # Summarise rows by catheter state.
     state_overview = (
-        df.groupby([SPLIT_COL, STATE_COL], dropna=False)
+        df.groupby(STATE_COL, dropna=False)
         .agg(
             rows=(STATE_COL, "size"),
             unique_subject_id=(ID_COL, "nunique"),
@@ -615,7 +602,6 @@ def main():
     df[ID_COL] = df[ID_COL].astype(str).str.strip()
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
     df[END_REASON_COL] = df[END_REASON_COL].astype(str).str.strip().str.lower()
-    df[SPLIT_COL] = df[SPLIT_COL].astype(str).str.strip().str.lower()
 
     # Detect the itemid covariates used in the analysis and load their saved labels.
     cov_cols, _ = detect_covariate_cols(df.columns.tolist(), KEEP_STATS)

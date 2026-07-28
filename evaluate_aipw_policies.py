@@ -3,7 +3,6 @@
 
 
 import argparse
-import json
 from pathlib import Path
 
 import joblib
@@ -33,7 +32,6 @@ DEFAULT_OUTDIR = REPO_ROOT / "artifacts" / "policy_eval" / "aipw"
 
 DEFAULT_OUTPUT_SUMMARY = "aipw_policy_outcomes_summary.csv"
 DEFAULT_OUTPUT_EPISODES = "aipw_policy_episode_scores.csv"
-DEFAULT_OUTPUT_ROWS = "aipw_row_scores.csv"
 DEFAULT_OUTPUT_SUPPORT_DIAGNOSTICS = "aipw_policy_support_diagnostics.csv"
 DEFAULT_OUTPUT_WEIGHT_DIAGNOSTICS = "aipw_weight_diagnostics.csv"
 DEFAULT_OUTPUT_RESIDUAL_DIAGNOSTICS = "aipw_residual_diagnostics.csv"
@@ -98,7 +96,6 @@ OPTIONAL_SCORED_COLS = [
     "is_last_period_of_episode",
     "episode_end_reason",
     "reinsertion_time",
-    "split",
     "crossfit_fold",
     "_crossfit_fold",
     "fold_id",
@@ -111,16 +108,11 @@ OPTIONAL_FIRST_COLS = [
     "inserted",
     "removed",
     "reinsertion_time",
-    "split",
     "crossfit_fold",
     "_crossfit_fold",
     "fold_id",
     "episode_end_reason",
 ]
-
-DATETIME_KEY_COLS = {"inserted", "removed", "period_start", "period_end"}
-LOWER_TEXT_KEY_COLS = {"catheter_state", "observed_action"}
-NUMERIC_KEY_COLS = {"subject_id", "hadm_id", "stay_id", "periods_in_state", "action_remove"}
 
 MU_COLUMNS = [
     "mu_cauti_under_policy",
@@ -215,7 +207,6 @@ def parse_args():
     )
     parser.add_argument("--output-summary", default=DEFAULT_OUTPUT_SUMMARY)
     parser.add_argument("--output-episodes", default=DEFAULT_OUTPUT_EPISODES)
-    parser.add_argument("--output-rows", default=DEFAULT_OUTPUT_ROWS)
     parser.add_argument("--output-support-diagnostics", default=DEFAULT_OUTPUT_SUPPORT_DIAGNOSTICS)
     parser.add_argument("--output-weight-diagnostics", default=DEFAULT_OUTPUT_WEIGHT_DIAGNOSTICS)
     parser.add_argument("--output-residual-diagnostics", default=DEFAULT_OUTPUT_RESIDUAL_DIAGNOSTICS)
@@ -235,7 +226,6 @@ def parse_args():
         action="store_true",
         help="Continue with incomplete estimates if some counterfactual predictions are unavailable.",
     )
-    pec.add_bootstrap_args(parser)
     return parser.parse_args()
 
 
@@ -249,12 +239,6 @@ def save_df(df, path):
     # Save a data frame as CSV.
     path.parent.mkdir(exist_ok=True, parents=True)
     df.to_csv(path, index=False)
-
-
-def save_json(payload, path):
-    # Save a dictionary as JSON.
-    path.parent.mkdir(exist_ok=True, parents=True)
-    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
 def first_non_null(series):
@@ -297,13 +281,6 @@ def effective_sample_size(weights):
     return float((sum_weights ** 2) / sum_squared_weights) if sum_squared_weights > 0 else np.nan
 
 
-def safe_ratio(numerator, denominator):
-    # Calculate a ratio with missing-value protection.
-    if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
-        return np.nan
-    return float(numerator / denominator)
-
-
 def bound_probability_estimate(value):
     # Bound a final probability-scale estimate while retaining missing values.
     if pd.isna(value):
@@ -311,125 +288,10 @@ def bound_probability_estimate(value):
     return float(np.clip(float(value), 0.0, 1.0))
 
 
-def coerce_bool(series):
-    # Convert common text values to booleans.
-    if pd.api.types.is_bool_dtype(series):
-        return series.fillna(False).astype(bool)
-    text = series.astype("string").str.strip().str.lower()
-    mapped = text.map(
-        {
-            "true": True,
-            "false": False,
-            "1": True,
-            "0": False,
-            "yes": True,
-            "no": False,
-            "y": True,
-            "n": False,
-        }
-    )
-    return mapped.fillna(False).astype(bool)
-
-
-def canonical_numeric_value(value):
-    # Format a numeric join value consistently.
-    if pd.isna(value):
-        return "<NA>"
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return str(value).strip()
-    if not np.isfinite(numeric):
-        return "<NA>"
-    if np.isclose(numeric, round(numeric), atol=1e-9):
-        return str(int(round(numeric)))
-    return f"{numeric:.12g}"
-
-
-def canonical_key_series(series, column):
-    # Create a stable join-key series.
-    if column in DATETIME_KEY_COLS:
-        raw = series.astype("string").str.strip()
-        parsed = pd.to_datetime(series, errors="coerce")
-        out = raw.fillna("<NA>").astype("object")
-        parsed_mask = parsed.notna()
-        out.loc[parsed_mask] = parsed.loc[parsed_mask].dt.strftime("%Y-%m-%d %H:%M:%S")
-        out.loc[out.astype("string").str.lower().isin(["", "nan", "nat", "none", "<na>"])] = "<NA>"
-        return out.astype("string")
-    if column in LOWER_TEXT_KEY_COLS:
-        return series.astype("string").str.strip().str.lower().fillna("<NA>")
-    if column in NUMERIC_KEY_COLS:
-        return series.map(canonical_numeric_value).astype("string")
-    return series.astype("string").str.strip().fillna("<NA>")
-
-
-def add_join_key_columns(df, key_cols):
-    # Add stable join-key columns.
-    out = df.copy()
-    join_cols = []
-    # Create a stable join-key series.
-    for idx, col in enumerate(key_cols):
-        join_col = f"__join_key_{idx}"
-        # Create a stable join-key series.
-        out[join_col] = canonical_key_series(out[col], col)
-        join_cols.append(join_col)
-    return out, join_cols
-
-
-def duplicate_key_examples(df, join_cols, display_cols):
-    # Return examples of duplicate join keys.
-    duplicated = df.duplicated(join_cols, keep=False)
-    if not duplicated.any():
-        return pd.DataFrame()
-    return df.loc[duplicated, display_cols].head(10)
-
-
-# Loading and robust joining
-
-def normalise_row_key_types(df):
-    # Normalise row-key columns for joining.
-    df = df.copy()
-    if "catheter_state" in df.columns:
-        df["catheter_state"] = df["catheter_state"].astype("string").str.strip().str.lower()
-    if "observed_action" in df.columns:
-        df["observed_action"] = df["observed_action"].astype("string").str.strip().str.lower()
-    if "periods_in_state" in df.columns:
-        df["periods_in_state"] = pd.to_numeric(df["periods_in_state"], errors="coerce")
-    if "action_remove" in df.columns:
-        df["action_remove"] = pd.to_numeric(df["action_remove"], errors="coerce")
-    return df
-
-
 def load_policy_panel(path):
     # Load and validate the policy panel.
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
-    # Normalise row-key columns for joining.
-    df = normalise_row_key_types(df)
-    # Convert common text values to booleans.
-    df["is_decision_row"] = coerce_bool(df["is_decision_row"])
-    # Convert common text values to booleans.
-    df["policy_applicable"] = coerce_bool(df["policy_applicable"])
-    df["policy_name"] = df["policy_name"].astype("string").str.strip()
-    df[POLICY_TYPE_COL] = df[POLICY_TYPE_COL].astype("string").str.strip().str.lower()
-    df["policy_action"] = df["policy_action"].astype("string").str.strip().str.lower()
-    df["policy_reason"] = df["policy_reason"].astype("string").str.strip().str.lower()
-    df["policy_remove_day"] = pd.to_numeric(df["policy_remove_day"], errors="coerce").astype("Int64")
-    df["policy_action_remove"] = pd.to_numeric(df["policy_action_remove"], errors="coerce")
-    df["policy_matches_observed_action_today"] = pd.to_numeric(
-        df["policy_matches_observed_action_today"],
-        errors="coerce",
-    )
-    df["policy_action_resolved"] = df["policy_action_resolved"].astype("string").str.strip().str.lower()
-    df["policy_action_remove_resolved"] = pd.to_numeric(
-        df["policy_action_remove_resolved"],
-        errors="coerce",
-    )
-    df["policy_catheter_state"] = df["policy_catheter_state"].astype("string").str.strip().str.lower()
-    df["episode_day_since_insertion"] = pd.to_numeric(
-        df["episode_day_since_insertion"],
-        errors="coerce",
-    )
     if df["policy_name"].dropna().empty:
         raise ValueError("Policy panel contains no policy_name values.")
     if df["policy_remove_day"].isna().any():
@@ -447,8 +309,6 @@ def load_scored_panel(path):
     # Load and validate the scored nuisance panel.
     df = pd.read_csv(path, low_memory=False)
     df.columns = df.columns.str.strip()
-    # Normalise row-key columns for joining.
-    df = normalise_row_key_types(df)
     df["p_remove_obs"] = pd.to_numeric(df["p_remove_obs"], errors="coerce")
     if "p_keep_obs" not in df.columns:
         df["p_keep_obs"] = 1.0 - df["p_remove_obs"]
@@ -458,45 +318,27 @@ def load_scored_panel(path):
 
 
 def join_scored_panel(policy_df, scored_df):
-    # Join nuisance scores to policy rows.
-    # Add stable join-key columns.
-    policy_keyed, join_cols = add_join_key_columns(policy_df, ROW_JOIN_KEY_COLS)
-    # Add stable join-key columns.
-    scored_keyed, _ = add_join_key_columns(scored_df, ROW_JOIN_KEY_COLS)
-
     scored_add_cols = [
         col
-        for col in OPTIONAL_SCORED_COLS
-        if col in scored_keyed.columns and col not in ROW_JOIN_KEY_COLS and col not in policy_df.columns
+        for col in [
+            *OPTIONAL_SCORED_COLS,
+            *[f"__rescored_{col}" for col in PREDICTION_COLUMNS],
+        ]
+        if col in scored_df.columns
+        and col not in ROW_JOIN_KEY_COLS
+        and col not in policy_df.columns
     ]
     for col in ["p_remove_obs", "p_keep_obs"]:
         if col not in scored_add_cols:
             scored_add_cols.insert(0, col)
 
-    duplicates = scored_keyed.duplicated(join_cols, keep=False)
-    # Return examples of duplicate join keys.
-    if duplicates.any():
-        # Return examples of duplicate join keys.
-        examples = duplicate_key_examples(scored_keyed, join_cols, ROW_JOIN_KEY_COLS)
-        raise ValueError(
-            "Scored panel is not unique on the natural patient-day join keys. "
-            "The policy-to-scored join must be many-to-one. Examples:\n"
-            f"{examples}"
-        )
-
-    before_rows = len(policy_keyed)
-    merged = policy_keyed.merge(
-        scored_keyed[[*join_cols, *scored_add_cols]],
-        on=join_cols,
+    merged = policy_df.merge(
+        scored_df[[*ROW_JOIN_KEY_COLS, *scored_add_cols]],
+        on=ROW_JOIN_KEY_COLS,
         how="left",
         validate="many_to_one",
         indicator=True,
     )
-    if len(merged) != before_rows:
-        raise ValueError(
-            "Joining scored panel changed the number of policy-panel rows: "
-            f"{before_rows} -> {len(merged)}"
-        )
     unmatched = merged["_merge"].ne("both")
     if unmatched.any():
         examples = merged.loc[unmatched, ROW_JOIN_KEY_COLS + ["policy_name"]].head(10)
@@ -504,7 +346,7 @@ def join_scored_panel(policy_df, scored_df):
             "Some policy-panel rows did not match the scored nuisance panel. "
             f"Examples:\n{examples}"
         )
-    return merged.drop(columns=[*join_cols, "_merge"])
+    return merged.drop(columns="_merge")
 
 
 # Policy timeline and nuisance prediction selection
@@ -564,8 +406,6 @@ def rescore_state_action_predictions(
     # Find the available cross-fit fold column.
     fold_col = fold_column(df)
 
-    df = df.copy()
-    df[f"__rescored_{output_col}"] = False
     fold_models = payload[models_key][outcome]["fold_models"]
     # Predict probabilities from one fold model.
     for fold_model in fold_models:
@@ -576,7 +416,7 @@ def rescore_state_action_predictions(
         features = df.loc[rows, feature_cols].copy()
         if state == "in":
             if action_remove is None:
-                raise ValueError("Keep/remove decision rescoring requires an action_remove value.")
+                raise ValueError("IN-state rescoring requires an action_remove value.")
             action_col = payload.get("action_remove_col", "action_remove")
             features[action_col] = action_remove
         # Predict probabilities from one fold model.
@@ -587,14 +427,19 @@ def rescore_state_action_predictions(
 
 def ensure_prediction_columns(df):
     # Ensure all prediction columns exist.
-    df = df.copy()
+    additions = {}
     for col in PREDICTION_COLUMNS:
         if col not in df.columns:
-            df[col] = np.nan
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+            additions[col] = np.nan
         rescored_col = f"__rescored_{col}"
         if rescored_col not in df.columns:
-            df[rescored_col] = False
+            additions[rescored_col] = False
+    if additions:
+        df = pd.concat([df, pd.DataFrame(additions, index=df.index)], axis=1)
+    df[PREDICTION_COLUMNS] = df[PREDICTION_COLUMNS].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
     return df
 
 
@@ -606,32 +451,21 @@ def fill_missing_counterfactual_predictions(
     # Ensure all prediction columns exist.
     df = ensure_prediction_columns(df)
     needed_specs = [
-        ("in", "cauti", "p_cauti_if_keep", "keep", 0),
-        ("in", "cauti", "p_cauti_if_remove", "remove", 1),
-        ("out", "cauti", "p_cauti_if_out", "out", None),
-        ("out", "reinsertion", "p_reinsertion_if_out", "out", None),
-        ("in", "death", "p_death_if_keep", "keep", 0),
-        ("in", "death", "p_death_if_remove", "remove", 1),
-        ("out", "death", "p_death_if_out", "out", None),
-        ("in", "icu_exit_alive", "p_icu_exit_alive_if_keep", "keep", 0),
-        ("in", "icu_exit_alive", "p_icu_exit_alive_if_remove", "remove", 1),
-        ("out", "icu_exit_alive", "p_icu_exit_alive_if_out", "out", None),
-        ("in", "no_event", "p_no_event_if_keep", "keep", 0),
-        ("in", "no_event", "p_no_event_if_remove", "remove", 1),
-        ("out", "no_event", "p_no_event_if_out", "out", None),
+        ("in", "cauti", "p_cauti_if_keep", 0),
+        ("in", "cauti", "p_cauti_if_remove", 1),
+        ("out", "cauti", "p_cauti_if_out", None),
+        ("out", "reinsertion", "p_reinsertion_if_out", None),
+        ("in", "death", "p_death_if_keep", 0),
+        ("in", "death", "p_death_if_remove", 1),
+        ("out", "death", "p_death_if_out", None),
+        ("in", "icu_exit_alive", "p_icu_exit_alive_if_keep", 0),
+        ("in", "icu_exit_alive", "p_icu_exit_alive_if_remove", 1),
+        ("out", "icu_exit_alive", "p_icu_exit_alive_if_out", None),
+        ("in", "no_event", "p_no_event_if_keep", 0),
+        ("in", "no_event", "p_no_event_if_remove", 1),
+        ("out", "no_event", "p_no_event_if_out", None),
     ]
-    masks = {
-        "keep": df["policy_action_remove_aipw"].eq(0),
-        "remove": df["policy_action_remove_aipw"].eq(1),
-        "out": df["policy_catheter_state"].eq("out"),
-    }
-    out_cauti_needed = masks["out"] & pd.to_numeric(df["policy_periods_out"], errors="coerce").le(
-        POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
-    )
-    missing_before = {}
-    for _, _, col, action, _ in needed_specs:
-        needed_mask = out_cauti_needed if col == "p_cauti_if_out" else masks[action]
-        missing_before[col] = int((needed_mask & df[col].isna()).sum())
+    missing_before = {col: int(df[col].isna().sum()) for _, _, col, _ in needed_specs}
     if not any(missing_before.values()):
         return df, {
             "outcome_models_used_for_rescoring": False,
@@ -650,9 +484,8 @@ def fill_missing_counterfactual_predictions(
         }
 
     # Rescore missing state-action predictions.
-    for state, outcome, col, action, action_remove in needed_specs:
-        needed_mask = out_cauti_needed if col == "p_cauti_if_out" else masks[action]
-        missing_mask = needed_mask & df[col].isna()
+    for state, outcome, col, action_remove in needed_specs:
+        missing_mask = df[col].isna()
         if int(missing_mask.sum()) == 0:
             continue
         # Rescore missing state-action predictions.
@@ -718,14 +551,13 @@ def assign_mu_from_source(df, target_col, source_col, mask):
 
 def select_policy_predictions(df):
     # Select predictions implied by the target policy.
-    df = df.copy()
     for col in MU_COLUMNS:
         df[col] = np.nan
     df["__used_rescored_prediction"] = False
 
-    keep_rows = df["policy_action_remove_aipw"].eq(0)
-    remove_rows = df["policy_action_remove_aipw"].eq(1)
-    out_rows = df["policy_catheter_state"].eq("out") & df["policy_action_remove_aipw"].isna()
+    keep_rows = df["policy_catheter_state"].eq("in") & df["policy_action_remove_aipw"].eq(0)
+    remove_rows = df["policy_catheter_state"].eq("in") & df["policy_action_remove_aipw"].eq(1)
+    out_rows = df["policy_catheter_state"].eq("out")
     out_cauti_rows = out_rows & pd.to_numeric(df["policy_periods_out"], errors="coerce").le(
         POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
     )
@@ -748,12 +580,7 @@ def select_policy_predictions(df):
     assign_mu_from_source(df, "mu_icu_exit_alive_under_policy", "p_icu_exit_alive_if_remove", remove_rows)
     # Copy selected prediction values into mean columns.
     assign_mu_from_source(df, "mu_no_event_under_policy", "p_no_event_if_remove", remove_rows)
-    assign_mu_from_source(
-        df,
-        "mu_recatheterisation_under_policy",
-        "p_reinsertion_if_out",
-        remove_rows,
-    )
+    df.loc[remove_rows, "mu_recatheterisation_under_policy"] = 0.0
 
     df.loc[out_rows, "mu_cauti_under_policy"] = 0.0
     # Copy selected prediction values into mean columns.
@@ -815,7 +642,6 @@ def add_support_and_adherence(df, clip_lower, clip_upper):
     # Add support probabilities and adherence flags.
     # Validate support clipping bounds.
     validate_clip_bounds(clip_lower, clip_upper)
-    df = df.copy()
     for col in ["p_remove_obs", "p_keep_obs"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -890,7 +716,6 @@ def product_components_by_episode(df, component_col):
 
 def add_observed_outcomes_to_rows(df):
     # Add observed outcomes to rows.
-    df = df.copy()
     if "death_in_period" in df.columns:
         death = pd.to_numeric(df["death_in_period"], errors="coerce").fillna(0).astype(int)
     else:
@@ -905,7 +730,6 @@ def build_policy_episode_scores(df):
     # Collapse row scores to policy-episode scores.
     # Add observed outcomes to rows.
     df = add_observed_outcomes_to_rows(df)
-    df = df.copy()
     df["_applicable_int"] = df["policy_applicable"].astype(int)
     df["_matched_applicable_int"] = (
         df["policy_applicable"] & df["policy_matches_observed_action_today"].eq(1)
@@ -1093,20 +917,12 @@ def map_episode_ids_to_scored_panel(scored_df, policy_df):
     if EPISODE_ID_COL in scored_df.columns:
         return scored_df.copy()
     episode_map = policy_df[[*EPISODE_KEY_COLS, EPISODE_ID_COL]].drop_duplicates()
-    # Add stable join-key columns.
-    scored_keyed, join_cols = add_join_key_columns(scored_df, EPISODE_KEY_COLS)
-    # Add stable join-key columns.
-    map_keyed, _ = add_join_key_columns(episode_map, EPISODE_KEY_COLS)
-    duplicates = map_keyed.duplicated(join_cols, keep=False)
-    if duplicates.any():
-        examples = map_keyed.loc[duplicates, EPISODE_KEY_COLS + [EPISODE_ID_COL]].head(10)
-        raise ValueError(f"Episode key maps to multiple catheter_episode_id values. Examples:\n{examples}")
-    out = scored_keyed.merge(
-        map_keyed[[*join_cols, EPISODE_ID_COL]],
-        on=join_cols,
+    out = scored_df.merge(
+        episode_map,
+        on=EPISODE_KEY_COLS,
         how="left",
         validate="many_to_one",
-    ).drop(columns=join_cols)
+    )
     if out[EPISODE_ID_COL].isna().any():
         examples = out.loc[out[EPISODE_ID_COL].isna(), EPISODE_KEY_COLS].head(10)
         raise ValueError(f"Some scored-panel rows could not be mapped to episodes. Examples:\n{examples}")
@@ -1124,8 +940,20 @@ def build_current_practice_rows(scored_df, policy_df):
     df[POLICY_TYPE_COL] = "observed"
     df["policy_remove_day"] = pd.NA
     df["policy_catheter_state"] = df["catheter_state"].astype("string").str.lower()
-    df["policy_action_aipw"] = df["observed_action"].astype("string").str.strip().str.lower()
-    df["policy_action_remove_aipw"] = pd.to_numeric(df["action_remove"], errors="coerce")
+    df["policy_action_aipw"] = "out"
+    df.loc[
+        df["policy_catheter_state"].eq("in")
+        & pd.to_numeric(df["action_remove"], errors="coerce").eq(0),
+        "policy_action_aipw",
+    ] = "keep"
+    df.loc[
+        df["policy_catheter_state"].eq("in")
+        & pd.to_numeric(df["action_remove"], errors="coerce").eq(1),
+        "policy_action_aipw",
+    ] = "remove"
+    df["policy_action_remove_aipw"] = np.nan
+    df.loc[df["policy_action_aipw"].eq("keep"), "policy_action_remove_aipw"] = 0.0
+    df.loc[df["policy_action_aipw"].eq("remove"), "policy_action_remove_aipw"] = 1.0
     df["policy_periods_in"] = np.where(df["policy_catheter_state"].eq("in"), df["periods_in_state"], np.nan)
     df["policy_periods_out"] = np.where(df["policy_catheter_state"].eq("out"), df["periods_in_state"], np.nan)
     df["policy_applicable"] = False
@@ -1243,6 +1071,7 @@ def policy_summary_row(
     )
     # Return positive finite weights.
     positive_residual_weights = valid_weight_series(residual_weight_all)
+    residual_weight_ess = effective_sample_size(positive_residual_weights)
     n_total = int(len(policy_df))
     n_complete = int(len(complete_df))
     n_adherent = int(policy_df["episode_adherent_to_policy"].fillna(0).sum())
@@ -1302,8 +1131,8 @@ def policy_summary_row(
         "weight_diagnostic_type": "adherent_residual_correction_weight",
         "sum_weights": float(positive_residual_weights.sum()) if len(positive_residual_weights) else np.nan,
         "sum_residual_correction_weights": float(positive_residual_weights.sum()) if len(positive_residual_weights) else np.nan,
-        "effective_sample_size": effective_sample_size(residual_weight_all),
-        "residual_correction_effective_sample_size": effective_sample_size(residual_weight_all),
+        "effective_sample_size": residual_weight_ess,
+        "residual_correction_effective_sample_size": residual_weight_ess,
         "n_positive_residual_correction_weights": int(len(positive_residual_weights)),
     }
 
@@ -1415,16 +1244,16 @@ def build_support_diagnostics(row_df):
             # Build one support diagnostic row.
             rows.append(support_diagnostic_row(group_df, label, policy_name, policy_remove_day))
         # Build one support diagnostic row.
-        for split_col in ["split", "crossfit_fold", "_crossfit_fold", "fold_id"]:
+        for fold_col in ["crossfit_fold", "_crossfit_fold", "fold_id"]:
             # Build one support diagnostic row.
-            if split_col in policy_df.columns:
+            if fold_col in policy_df.columns:
                 # Build one support diagnostic row.
-                for split_value, split_df in policy_df.groupby(split_col, dropna=False, sort=False):
+                for fold_value, fold_df in policy_df.groupby(fold_col, dropna=False, sort=False):
                     # Build one support diagnostic row.
                     rows.append(
                         support_diagnostic_row(
-                            split_df,
-                            f"{split_col}={split_value}",
+                            fold_df,
+                            f"{fold_col}={fold_value}",
                             policy_name,
                             policy_remove_day,
                         )
@@ -1500,7 +1329,7 @@ def build_weight_diagnostics(episode_df):
             "effective_sample_size": ess,
             "residual_correction_effective_sample_size": ess,
             "raw_episode_sum_weights": float(raw_episode_weights.sum()) if len(raw_episode_weights) else np.nan,
-            "raw_episode_effective_sample_size": effective_sample_size(policy_df[WEIGHT_COL]),
+            "raw_episode_effective_sample_size": effective_sample_size(raw_episode_weights),
             "low_adherence_flag": bool(pd.notna(pct_adherent) and pct_adherent < pec.LOW_ADHERENCE_THRESHOLD),
             "low_ess_flag": bool(
                 pd.notna(ess)
@@ -1538,6 +1367,7 @@ def build_residual_diagnostics(
         ).fillna(0.0)
         # Return positive finite weights.
         positive_residual_weights = valid_weight_series(residual_weight_all)
+        residual_weight_ess = effective_sample_size(positive_residual_weights)
         valid_residual_weight = residual_weight.notna() & np.isfinite(residual_weight)
         weight_sum = float(residual_weight.loc[valid_residual_weight].sum())
 
@@ -1584,8 +1414,8 @@ def build_residual_diagnostics(
                 "n_adherent_episodes": int(complete_df["episode_adherent_to_policy"].eq(1).sum()),
                 "weight_diagnostic_type": "adherent_residual_correction_weight",
                 "sum_residual_correction_weights": float(positive_residual_weights.sum()) if len(positive_residual_weights) else np.nan,
-                "effective_sample_size": effective_sample_size(residual_weight_all),
-                "residual_correction_effective_sample_size": effective_sample_size(residual_weight_all),
+                "effective_sample_size": residual_weight_ess,
+                "residual_correction_effective_sample_size": residual_weight_ess,
                 "plugin_mean": mean_plugin,
                 "observed_mean_among_adherent": float(observed.loc[adherent.eq(1)].mean()) if len(observed.loc[adherent.eq(1)].dropna()) else np.nan,
                 "mean_residual": float(residual.mean()) if len(residual.dropna()) else np.nan,
@@ -1652,7 +1482,8 @@ def build_clipping_sensitivity(
                 residual_normalisation,
                 "__sensitivity_weight",
             )
-            # Calculate the effective sample size.
+            valid_weights = valid_weight_series(weights)
+            weight_ess = effective_sample_size(valid_weights)
             rows.append({
                 "policy_name": policy_name,
                 "policy_remove_day": policy_remove_day,
@@ -1663,10 +1494,10 @@ def build_clipping_sensitivity(
                 "clip_upper_weight": upper,
                 "n_episodes": int(len(temp)),
                 "n_adherent_episodes": int(temp["episode_adherent_to_policy"].eq(1).sum()),
-                "sum_weights": float(valid_weight_series(weights).sum()),
-                "sum_residual_correction_weights": float(valid_weight_series(weights).sum()),
-                "effective_sample_size": effective_sample_size(weights),
-                "residual_correction_effective_sample_size": effective_sample_size(weights),
+                "sum_weights": float(valid_weights.sum()),
+                "sum_residual_correction_weights": float(valid_weights.sum()),
+                "effective_sample_size": weight_ess,
+                "residual_correction_effective_sample_size": weight_ess,
                 "aipw_cauti_risk": summary_row.get("aipw_cauti_risk"),
                 "aipw_recatheterisation_risk": summary_row.get("aipw_recatheterisation_risk"),
                 "aipw_death_risk": summary_row.get("aipw_death_risk"),
@@ -1737,58 +1568,12 @@ def order_episode_columns(df):
         "episode_censored_before_policy_removal",
         "episode_observed_removed_before_policy_day",
         "episode_failed_to_remove_on_policy_day",
-        "split",
         "crossfit_fold",
         "_crossfit_fold",
         "fold_id",
     ]
     ordered = [col for col in preferred if col in df.columns]
     remaining = [col for col in df.columns if col not in ordered]
-    return df[[*ordered, *remaining]].copy()
-
-
-def order_row_columns(df):
-    # Order row-level output columns.
-    preferred = [
-        "decision_row_id",
-        EPISODE_ID_COL,
-        "subject_id",
-        "hadm_id",
-        "stay_id",
-        "period_start",
-        "period_end",
-        "period_duration_days",
-        "episode_day_since_insertion",
-        "row_order_within_episode_day",
-        "catheter_state",
-        "observed_action",
-        "action_remove",
-        "policy_name",
-        "policy_remove_day",
-        "policy_catheter_state",
-        "policy_action_resolved",
-        "policy_action_remove_resolved",
-        "policy_action_aipw",
-        "policy_action_remove_aipw",
-        "policy_periods_in",
-        "policy_periods_out",
-        "policy_removal_day_extra_row_treated_as_out",
-        "p_remove_obs",
-        "p_keep_obs",
-        "policy_support",
-        "policy_support_clipped",
-        "policy_matches_observed_action_today",
-        "deviated_from_policy_today",
-        "followed_policy_so_far",
-        *MU_COLUMNS,
-        "prediction_status",
-    ]
-    ordered = [col for col in preferred if col in df.columns]
-    remaining = [
-        col
-        for col in df.columns
-        if col not in ordered and not col.startswith("__join_key_") and not col.startswith("__rescored_")
-    ]
     return df[[*ordered, *remaining]].copy()
 
 
@@ -1869,7 +1654,6 @@ def metadata_payload(
             "extreme_weight_p99_threshold": pec.EXTREME_WEIGHT_P99_THRESHOLD,
             "extreme_weight_max_threshold": pec.EXTREME_WEIGHT_MAX_THRESHOLD,
         },
-        "bootstrap": pec.bootstrap_metadata(args, row_df.columns),
         "rescoring": rescore_metadata,
         "methodological_limitations": [
             "AIPW estimates depend on cross-fitted propensity and outcome nuisance predictions.",
@@ -1920,7 +1704,6 @@ def main():
     output_paths = {
         "summary": resolve_output_path(args.outdir, args.output_summary),
         "episodes": resolve_output_path(args.outdir, args.output_episodes),
-        "rows": resolve_output_path(args.outdir, args.output_rows),
         "support_diagnostics": resolve_output_path(args.outdir, args.output_support_diagnostics),
         "weight_diagnostics": resolve_output_path(args.outdir, args.output_weight_diagnostics),
         "residual_diagnostics": resolve_output_path(args.outdir, args.output_residual_diagnostics),
@@ -1933,22 +1716,27 @@ def main():
     policy_df = load_policy_panel(args.policy_panel)
     # Load and validate the scored nuisance panel.
     scored_df = load_scored_panel(args.scored_panel)
+    scored_df, rescore_metadata = fill_missing_counterfactual_predictions_safely(
+        scored_df,
+        args.outcome_models,
+        args.allow_missing_counterfactual_state_predictions,
+        "scored_panel",
+    )
+    model_feature_cols = [
+        "episode_index",
+        *pec.baseline_model_feature_columns(scored_df.columns),
+    ]
+    scored_df.drop(
+        columns=[col for col in model_feature_cols if col in scored_df.columns],
+        inplace=True,
+    )
     # Join nuisance scores to policy rows.
     joined_df = join_scored_panel(policy_df, scored_df)
     joined_df = pec.add_period_duration_days(joined_df, context="joined AIPW policy rows")
     joined_df = pec.attach_resolved_timeline_aliases(
         joined_df,
-        episode_id_col=EPISODE_ID_COL,
-        context=str(args.policy_panel),
         action_col="policy_action_aipw",
         action_remove_col="policy_action_remove_aipw",
-    )
-    # Fill predictions and handle allowed failures.
-    joined_df, rescore_metadata = fill_missing_counterfactual_predictions_safely(
-        joined_df,
-        args.outcome_models,
-        args.allow_missing_counterfactual_state_predictions,
-        "target_policy_rows",
     )
     # Select predictions implied by the target policy.
     joined_df = select_policy_predictions(joined_df)
@@ -1964,13 +1752,6 @@ def main():
 
     # Build rows for the observed current-practice regime.
     current_rows = build_current_practice_rows(scored_df, policy_df)
-    # Fill predictions and handle allowed failures.
-    current_rows, current_rescore_metadata = fill_missing_counterfactual_predictions_safely(
-        current_rows,
-        args.outcome_models,
-        args.allow_missing_counterfactual_state_predictions,
-        "current_practice_rows",
-    )
     # Select predictions implied by the target policy.
     current_rows = select_policy_predictions(current_rows)
     # Check prediction completeness and probability bounds.
@@ -1980,7 +1761,6 @@ def main():
     )
     # Build episode scores for current practice.
     current_episode_df = build_current_practice_episode_scores(current_rows)
-    rescore_metadata["current_practice_rescoring"] = current_rescore_metadata
 
     episode_df = pd.concat([policy_episode_df, current_episode_df], ignore_index=True, sort=False)
     # Build policy-level summary estimates.
@@ -2012,8 +1792,6 @@ def main():
     pec.save_report_df(summary_df, output_paths["summary"])
     # Save episode-level scores at full precision for later inference.
     save_df(episode_df, output_paths["episodes"])
-    # Save row-level scores at full precision.
-    save_df(order_row_columns(row_df), output_paths["rows"])
     # Save rounded support diagnostics.
     pec.save_report_df(support_diagnostics_df, output_paths["support_diagnostics"])
     # Save rounded weight diagnostics.
@@ -2024,8 +1802,7 @@ def main():
     pec.save_report_df(clipping_sensitivity_df, output_paths["clipping_sensitivity"])
     # Save current-practice episode scores at full precision.
     save_df(current_episode_df, output_paths["current_practice"])
-    # Save a dictionary as JSON.
-    save_json(
+    pec.save_json(
         metadata_payload(args, output_paths, row_df, episode_df, rescore_metadata),
         output_paths["metadata"],
     )
