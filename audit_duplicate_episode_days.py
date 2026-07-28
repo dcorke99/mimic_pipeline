@@ -84,7 +84,7 @@ def main():
         "period_end",
     ]
 
-    for optional_col in ["catheter_state", "observed_action", "action_remove", "periods_in_state"]:
+    for optional_col in ["catheter_state", "observed_action", "removed_in_period", "periods_in_state"]:
         if optional_col in df.columns:
             exact_key.append(optional_col)
 

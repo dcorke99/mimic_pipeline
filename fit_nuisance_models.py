@@ -1,6 +1,5 @@
 # Fit propensity and outcome nuisance models for policy evaluation.
 from pathlib import Path
-import json
 import re
 
 import joblib
@@ -27,7 +26,6 @@ INDIR = REPO_ROOT / "data"
 OUTDIR = REPO_ROOT / "artifacts" / "nuisance_models"
 
 INFILE = INDIR / "modelling_panel.csv"
-FEATURE_SPEC_FILE = INDIR / "feature_spec.json"
 COVARIATE_DICT_FILE = INDIR / "covariate_dictionary.csv"
 FINAL_PANEL = OUTDIR / "scored_panel.csv"
 PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
@@ -44,7 +42,6 @@ Y_REINS = "reinsertion_in_period"
 Y_DEATH = "death_in_period"
 Y_ICU_EXIT = "icu_end_in_period"
 OBSERVED_ACTION_COL = "observed_action"
-ACTION_REMOVE_COL = "action_remove"
 END_REASON_COL = "episode_end_reason"
 AT_RISK_CAUTI = "at_risk_cauti"
 AT_RISK_REINS = "at_risk_reinsertion"
@@ -56,7 +53,7 @@ Y_NO_EVENT_OUT = "_target_no_event_out"
 NO_EVENT_DEFINITION = {
     "in": (
         "No CAUTI, death, or ICU exit in the next outcome window; this does not "
-        "imply continued catheter-in state when action_remove=1."
+        "imply continued catheter-in state when removed_in_period=1."
     ),
     "out": (
         "No reinsertion, CAUTI, death, or ICU exit in the next outcome window."
@@ -64,6 +61,7 @@ NO_EVENT_DEFINITION = {
 }
 
 POST_REMOVE_RISK_PERIODS = 2
+PERIOD_HOURS = 24
 TOP_FEATURES_TO_SAVE = 15
 CALIBRATION_BINS = 10
 LOW_COUNT_WARNING_THRESHOLD = 20
@@ -115,11 +113,6 @@ def save_report_df(df, path):
     numeric_cols = out.select_dtypes(include=[np.number]).columns
     out[numeric_cols] = out[numeric_cols].round(3)
     out.to_csv(path, index=False, float_format="%.3f")
-
-
-def load_feature_spec():
-    # Load feature spec.
-    return json.loads(FEATURE_SPEC_FILE.read_text(encoding="utf-8"))
 
 
 def binary_values(series):
@@ -495,17 +488,13 @@ def prepare_outcome_targets(df):
         "out",
         np.where(df[ACTION_COL].eq(1), "remove", "keep"),
     )
-    df[ACTION_REMOVE_COL] = (
-        df[STATE_COL].eq("in") & df[ACTION_COL].eq(1)
-    ).astype(int)
-
     # ICU exit alive excludes deaths occurring in the same interval.
     df[Y_ICU_EXIT_ALIVE] = (
         df[Y_ICU_EXIT].eq(1) & df[Y_DEATH].eq(0)
     ).astype(int)
 
     # These are interval outcomes, not transition-state labels. In particular,
-    # IN no_event under action_remove=1 does not mean the catheter stayed IN.
+    # IN no_event under removed_in_period=1 does not mean the catheter stayed IN.
     # Removal is deliberately absent because it is the action.
     df[Y_NO_EVENT_IN] = (
         df[Y_CAUTI].eq(0)
@@ -525,11 +514,11 @@ def state_feature_lists(feature_spec):
     # Build feature lists.
     configured = feature_spec.get("x_cols_transition")
     if not configured:
-        configured = [TIME_COL, PERIODS_COL, ACTION_REMOVE_COL, *feature_spec["features"]]
+        configured = [TIME_COL, PERIODS_COL, ACTION_COL, *feature_spec["features"]]
 
-    excluded = {"state_is_out", ACTION_REMOVE_COL}
+    excluded = {"state_is_out", ACTION_COL}
     base_cols = [col for col in configured if col not in excluded]
-    in_feature_cols = [*base_cols, ACTION_REMOVE_COL]
+    in_feature_cols = [*base_cols, ACTION_COL]
     out_feature_cols = base_cols
 
     leakage_cols = {
@@ -741,7 +730,6 @@ def fit_propensity_scores(df, feature_spec):
     remove_feature_cols = feature_spec["x_cols_remove"]
     forbidden_action_features = {
         ACTION_COL,
-        ACTION_REMOVE_COL,
         OBSERVED_ACTION_COL,
         "policy_action",
         "policy_action_remove",
@@ -842,7 +830,6 @@ def fit_propensity_scores(df, feature_spec):
             "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
             "risk_set_columns": {"cauti": AT_RISK_CAUTI, "reinsertion": AT_RISK_REINS},
             "modelling_panel_file": str(INFILE),
-            "feature_spec_file": str(FEATURE_SPEC_FILE),
         },
         OUTDIR / "propensity_model.pkl",
     )
@@ -861,7 +848,7 @@ def fit_outcome_scores(df, feature_spec):
     # Build feature lists.
     in_feature_cols, out_feature_cols = state_feature_lists(feature_spec)
 
-    print("IN outcome models estimate risks under keep/remove using action_remove.")
+    print("IN outcome models estimate risks under keep/remove using removed_in_period.")
     print("OUT outcome models estimate post-removal risks, including reinsertion and 48-hour CAUTI attribution.")
     print("Removal is an action, not an outcome class.")
     print(f"IN outcome features: {len(in_feature_cols)}")
@@ -910,12 +897,12 @@ def fit_outcome_scores(df, feature_spec):
             counterfactual_features = df.loc[
                 held_out_mask, in_feature_cols
             ].copy()
-            counterfactual_features[ACTION_REMOVE_COL] = 0
+            counterfactual_features[ACTION_COL] = 0
             # Predict crossfit fold.
             df.loc[held_out_mask, keep_col] = predict_crossfit_fold(
                 fold_model, counterfactual_features
             )
-            counterfactual_features[ACTION_REMOVE_COL] = 1
+            counterfactual_features[ACTION_COL] = 1
             # Predict crossfit fold.
             df.loc[held_out_mask, remove_col] = predict_crossfit_fold(
                 fold_model, counterfactual_features
@@ -925,10 +912,10 @@ def fit_outcome_scores(df, feature_spec):
         observed_pred_col = f"_p_{outcome}_observed_in"
         eval_df = df.loc[
             risk_mask,
-            [target_col, ACTION_REMOVE_COL, keep_col, remove_col],
+            [target_col, ACTION_COL, keep_col, remove_col],
         ].copy()
         eval_df[observed_pred_col] = np.where(
-            eval_df[ACTION_REMOVE_COL].eq(1),
+            eval_df[ACTION_COL].eq(1),
             eval_df[remove_col],
             eval_df[keep_col],
         )
@@ -1113,7 +1100,7 @@ def fit_outcome_scores(df, feature_spec):
             "out_models": out_models,
             "x_cols_in": in_feature_cols,
             "x_cols_out": out_feature_cols,
-            "action_remove_col": ACTION_REMOVE_COL,
+            "action_remove_col": ACTION_COL,
             "features": feature_spec["features"],
             "id_col": ID_COL,
             "time_col": TIME_COL,
@@ -1125,7 +1112,6 @@ def fit_outcome_scores(df, feature_spec):
             "no_event_definition": NO_EVENT_DEFINITION,
             "no_event_is_transition_state": False,
             "modelling_panel_file": str(INFILE),
-            "feature_spec_file": str(FEATURE_SPEC_FILE),
         },
         OUTDIR / "outcome_models.pkl",
     )
@@ -1165,10 +1151,27 @@ def main():
     # Run the script workflow.
     OUTDIR.mkdir(exist_ok=True, parents=True)
 
-    # Load feature spec.
-    feature_spec = load_feature_spec()
     # Load panel.
     df = load_panel()
+
+    # Derive model features
+    feature_cols = [
+        col for col in df.columns
+        if col.startswith(("itemid_", "sex_", "ethnicity_"))
+    ]
+    feature_cols.append("age")
+    feature_spec = {
+        "period_hours": PERIOD_HOURS,
+        "features": feature_cols,
+        "x_cols_remove": [TIME_COL, PERIODS_COL, *feature_cols],
+        "x_cols_transition": [
+            TIME_COL,
+            PERIODS_COL,
+            ACTION_COL,
+            *feature_cols,
+        ],
+    }
+
     # Add grouped crossfit folds.
     df = add_grouped_crossfit_folds(df)
     # Save a data frame as CSV.

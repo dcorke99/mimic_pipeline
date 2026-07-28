@@ -44,7 +44,7 @@ POLICY_INPUT_COLS = [
     "catheter_state",
     "periods_in_state",
     "observed_action",
-    "action_remove",
+    "removed_in_period",
 ]
 
 POLICY_COLS = [
@@ -137,7 +137,7 @@ def add_stable_ids_and_decision_flag(df):
     df["catheter_state"] = df["catheter_state"].astype(str).str.strip().str.lower()
     df["observed_action"] = df["observed_action"].astype(str).str.strip().str.lower()
     df["periods_in_state"] = pd.to_numeric(df["periods_in_state"], errors="coerce")
-    df["action_remove"] = pd.to_numeric(df["action_remove"], errors="coerce")
+    df["removed_in_period"] = pd.to_numeric(df["removed_in_period"], errors="coerce")
 
     unknown_states = sorted(set(df["catheter_state"].dropna()) - {"in", "out"})
     if unknown_states:
@@ -219,7 +219,7 @@ def apply_fixed_day_policy(base_df, policy_remove_day):
     df["policy_matches_observed_action_today"] = np.nan
     applicable_rows = df["policy_applicable"]
     df.loc[applicable_rows, "policy_matches_observed_action_today"] = (
-        df.loc[applicable_rows, "action_remove"]
+        df.loc[applicable_rows, "removed_in_period"]
         .eq(df.loc[applicable_rows, "policy_action_remove"])
         .astype(float)
     )

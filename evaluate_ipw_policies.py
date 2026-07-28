@@ -55,7 +55,7 @@ ROW_JOIN_KEY_COLS = [
     "catheter_state",
     "periods_in_state",
     "observed_action",
-    "action_remove",
+    "removed_in_period",
 ]
 
 OPTIONAL_SCORED_COLS = [
@@ -296,7 +296,7 @@ def validate_policy_panel(df):
     if missing_match.any():
         examples = df.loc[
             missing_match,
-            ["policy_name", "decision_row_id", "policy_action", "action_remove"],
+            ["policy_name", "decision_row_id", "policy_action", "removed_in_period"],
         ].head(10)
         raise ValueError(
             "Applicable policy rows are missing policy_matches_observed_action_today. "

@@ -65,7 +65,7 @@ ROW_JOIN_KEY_COLS = [
     "catheter_state",
     "periods_in_state",
     "observed_action",
-    "action_remove",
+    "removed_in_period",
 ]
 
 PREDICTION_COLUMNS = [
@@ -417,7 +417,7 @@ def rescore_state_action_predictions(
         if state == "in":
             if action_remove is None:
                 raise ValueError("IN-state rescoring requires an action_remove value.")
-            action_col = payload.get("action_remove_col", "action_remove")
+            action_col = payload.get("action_remove_col", "removed_in_period")
             features[action_col] = action_remove
         # Predict probabilities from one fold model.
         df.loc[rows, output_col] = predict_fold_model(fold_model, features[feature_cols])
@@ -762,7 +762,7 @@ def build_policy_episode_scores(df):
     df["_observed_removed_before_policy_day"] = (
         day.lt(remove_day)
         & df["is_decision_row"].astype(bool)
-        & pd.to_numeric(df["action_remove"], errors="coerce").eq(1)
+        & pd.to_numeric(df["removed_in_period"], errors="coerce").eq(1)
     ).astype(int)
     df["_failed_to_remove_on_policy_day"] = (
         day.eq(remove_day)
@@ -943,12 +943,12 @@ def build_current_practice_rows(scored_df, policy_df):
     df["policy_action_aipw"] = "out"
     df.loc[
         df["policy_catheter_state"].eq("in")
-        & pd.to_numeric(df["action_remove"], errors="coerce").eq(0),
+        & pd.to_numeric(df["removed_in_period"], errors="coerce").eq(0),
         "policy_action_aipw",
     ] = "keep"
     df.loc[
         df["policy_catheter_state"].eq("in")
-        & pd.to_numeric(df["action_remove"], errors="coerce").eq(1),
+        & pd.to_numeric(df["removed_in_period"], errors="coerce").eq(1),
         "policy_action_aipw",
     ] = "remove"
     df["policy_action_remove_aipw"] = np.nan
