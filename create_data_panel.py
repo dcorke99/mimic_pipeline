@@ -1224,6 +1224,9 @@ def build_modelling_panel():
     print("Dropped chart columns:", int(retention_log["decision"].eq("drop").sum()))
 
 def main():
+    # Create the output directory
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
     # Report active directories
     print("[CONFIG] repo root:", REPO_ROOT)
     print("[CONFIG] mimic dir:", MIMIC_DIR)

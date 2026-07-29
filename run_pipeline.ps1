@@ -1,9 +1,7 @@
-# Run the catheter-removal pipeline from VS Code.
-
+# Run the catheter-removal pipeline with the local virtual environment
 $ErrorActionPreference = "Stop"
 
-$Conda = "C:\ProgramData\miniconda3\Scripts\conda.exe"
-$EnvName = "datascience"
+$Python = "C:\venvs\datascience\Scripts\python.exe"
 
 $Scripts = @(
     "create_data_panel.py",
@@ -20,7 +18,7 @@ foreach ($Script in $Scripts) {
     Write-Host ""
     Write-Host "Running $Script" -ForegroundColor Cyan
     $ScriptPath = Join-Path $PSScriptRoot $Script
-    & $Conda run -n $EnvName python $ScriptPath
+    & $Python $ScriptPath
     if ($LASTEXITCODE -ne 0) {
         throw "$Script failed with exit code $LASTEXITCODE"
     }

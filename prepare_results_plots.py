@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-# Create baseline OPE progress plots.
+# Create baseline OPE progress plots
 
-import argparse
 from pathlib import Path
 import re
 
@@ -19,22 +18,11 @@ import policy_eval_common as pec
 
 REPO_ROOT = Path(__file__).resolve().parent
 POLICY_EVAL_DIR = REPO_ROOT / "artifacts" / "policy_eval"
-
-
-def parse_args():
-    # Parse the output folder for plot files.
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--outdir",
-        type=Path,
-        default=REPO_ROOT / "artifacts" / "results_plots",
-        help="Folder for plot outputs.",
-    )
-    return parser.parse_args()
+OUTDIR = REPO_ROOT / "artifacts" / "results_plots"
 
 
 def load_outputs():
-    # Load the current policy-evaluation outputs from artefacts.
+    # Load the current policy-evaluation outputs from artefacts
     paths = {
         "g_summary": POLICY_EVAL_DIR / "gformula" / "gformula_policy_outcomes_summary.csv",
         "ipw_summary": POLICY_EVAL_DIR / "ipw" / "ipw_policy_outcomes_summary.csv",
@@ -53,7 +41,7 @@ def load_outputs():
 
 
 def pretty_policy(name):
-    # Convert policy names into short display labels.
+    # Convert policy names into short display labels
     if pd.isna(name):
         return "Missing"
 
@@ -69,7 +57,7 @@ def pretty_policy(name):
 
 
 def policy_sort_key(name):
-    # Sort current practice first, then fixed-day policies by day.
+    # Sort current practice first, then fixed-day policies by day
     if name == "current_practice":
         return (0, 0)
     match = re.search(r"remove_on_day_(\d+)", str(name))
@@ -79,7 +67,7 @@ def policy_sort_key(name):
 
 
 def add_policy_labels(df):
-    # Add readable labels and stable policy ordering.
+    # Add readable labels and stable policy ordering
     out = df.copy()
     out["policy_label"] = out["policy_name"].map(pretty_policy)
     out["_policy_sort"] = out["policy_name"].map(policy_sort_key)
@@ -87,7 +75,7 @@ def add_policy_labels(df):
 
 
 def savefig(path):
-    # Save and close the current figure.
+    # Save and close the current figure
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
     plt.savefig(path, dpi=300, bbox_inches="tight")
@@ -96,7 +84,7 @@ def savefig(path):
 
 
 def plot_observed_exposure_distribution(current, outdir):
-    # Plot observed catheter exposure duration under current practice.
+    # Plot observed catheter exposure duration under current practice
     duration = pd.to_numeric(current["observed_catheter_exposure_days"], errors="coerce").dropna()
     duration = duration[duration >= 0]
 
@@ -133,7 +121,7 @@ def plot_observed_exposure_distribution(current, outdir):
 
 
 def plot_policy_tradeoff(aipw, outdir):
-    # Plot the AIPW CAUTI versus recatheterisation policy trade-off.
+    # Plot the AIPW CAUTI versus recatheterisation policy trade-off
     df = add_policy_labels(aipw)
 
     x = pd.to_numeric(df["aipw_recatheterisation_risk_pct"], errors="coerce")
@@ -175,7 +163,7 @@ def plot_policy_tradeoff(aipw, outdir):
 
 
 def build_estimator_comparison(g, ipw, aipw, outcome):
-    # Build the long table used for estimator comparison plots.
+    # Build the long table used for estimator comparison plots
     if outcome == "cauti":
         cols = {
             "gformula": "predicted_cauti_risk_pct",
@@ -206,7 +194,7 @@ def build_estimator_comparison(g, ipw, aipw, outcome):
 
 
 def plot_estimator_comparison(g, ipw, aipw, outcome, outdir):
-    # Plot estimator comparisons as policy-indexed points.
+    # Plot estimator comparisons as policy-indexed points
     df = build_estimator_comparison(g, ipw, aipw, outcome)
     pivot = df.pivot_table(index="policy_label", columns="method", values="risk_pct", aggfunc="first").reset_index()
 
@@ -234,7 +222,7 @@ def plot_estimator_comparison(g, ipw, aipw, outcome, outdir):
 
 
 def plot_ess_support(ipw_weights, ipw_support, outdir):
-    # Plot IPW support through ESS and low-support proportions.
+    # Plot IPW support through ESS and low-support proportions
     support = ipw_support.loc[ipw_support["group"].eq("all"), ["policy_name", "pct_below_0_05"]]
     df = add_policy_labels(ipw_weights.merge(support, on="policy_name", how="left"))
 
@@ -276,7 +264,7 @@ def plot_ess_support(ipw_weights, ipw_support, outdir):
 
 
 def format_baseline_audit_table(audit):
-    # Format baseline audit checks for the QA table.
+    # Format baseline audit checks for the QA table
     out = audit[["check", "status", "detail"]].copy()
     out = out.rename(columns={"check": "Check", "status": "Result", "detail": "Detail"})
     out["Result"] = out["Result"].map({"PASS": "Passed", "FAIL": "Check"}).fillna(out["Result"])
@@ -284,7 +272,7 @@ def format_baseline_audit_table(audit):
 
 
 def render_qa_table(qa, outdir):
-    # Save the baseline audit checks as a PNG.
+    # Save the baseline audit checks as a PNG
     outdir.mkdir(parents=True, exist_ok=True)
 
     fig_height = max(4, 0.45 * len(qa) + 1.5)
@@ -308,7 +296,7 @@ def render_qa_table(qa, outdir):
 
 
 def build_results_summary(outputs, outdir):
-    # Save a compact policy summary table.
+    # Save a compact policy summary table
     g = outputs["g_summary"][
         [
             "policy_name",
@@ -350,43 +338,49 @@ def build_results_summary(outputs, outdir):
 
 
 def main():
-    # Load outputs and create the plot bundle.
-    args = parse_args()
-    args.outdir.mkdir(parents=True, exist_ok=True)
+    # Create the plot directory
+    OUTDIR.mkdir(parents=True, exist_ok=True)
 
+    # Load all estimator and audit outputs
     outputs = load_outputs()
 
-    # Plot current-practice exposure duration.
-    plot_observed_exposure_distribution(outputs["current_practice"], args.outdir)
+    # Plot current-practice exposure duration
+    plot_observed_exposure_distribution(outputs["current_practice"], OUTDIR)
 
-    # Plot the AIPW trade-off across target policies.
-    plot_policy_tradeoff(outputs["aipw_summary"], args.outdir)
+    # Plot the AIPW trade-off across target policies
+    plot_policy_tradeoff(outputs["aipw_summary"], OUTDIR)
 
-    # Plot estimator agreement for CAUTI.
-    plot_estimator_comparison(outputs["g_summary"], outputs["ipw_summary"], outputs["aipw_summary"], "cauti", args.outdir)
+    # Plot estimator agreement for CAUTI
+    plot_estimator_comparison(
+        outputs["g_summary"],
+        outputs["ipw_summary"],
+        outputs["aipw_summary"],
+        "cauti",
+        OUTDIR,
+    )
 
-    # Plot estimator agreement for recatheterisation.
+    # Plot estimator agreement for recatheterisation
     plot_estimator_comparison(
         outputs["g_summary"],
         outputs["ipw_summary"],
         outputs["aipw_summary"],
         "recatheterisation",
-        args.outdir,
+        OUTDIR,
     )
 
-    # Plot IPW support and adherence diagnostics.
-    plot_ess_support(outputs["ipw_weights"], outputs["ipw_support"], args.outdir)
+    # Plot IPW support and adherence diagnostics
+    plot_ess_support(outputs["ipw_weights"], outputs["ipw_support"], OUTDIR)
 
-    # Render the baseline QA checks.
+    # Render the baseline QA checks
     qa = format_baseline_audit_table(outputs["baseline_audit"])
-    render_qa_table(qa, args.outdir)
+    render_qa_table(qa, OUTDIR)
 
-    # Save the compact summary table.
-    build_results_summary(outputs, args.outdir)
+    # Save the compact summary table
+    build_results_summary(outputs, OUTDIR)
 
     print()
     print("--- DONE ---")
-    print(f"Plots saved to: {args.outdir.resolve()}")
+    print(f"Plots saved to: {OUTDIR.resolve()}")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# Build estimator-agnostic target-policy intervention panels.
+# Build estimator-agnostic target-policy intervention panels
 
 
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -11,20 +10,15 @@ import pandas as pd
 import policy_eval_common as pec
 
 
-# Defaults
+# Paths and policy settings
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-DEFAULT_INPUT_PATH = (
-    REPO_ROOT
-    / "data"
-    / "modelling_panel.csv"
-)
-DEFAULT_OUTDIR = REPO_ROOT / "artifacts" / "policy_interventions"
-DEFAULT_POLICY_DAYS = [1, 2, 3, 4, 5]
-
-DEFAULT_COMBINED_OUTPUT_NAME = "policy_intervention_panel_long.csv"
-DEFAULT_QA_OUTPUT_NAME = "policy_intervention_panel_qa.csv"
+INPUT_PATH = REPO_ROOT / "data" / "modelling_panel.csv"
+OUTDIR = REPO_ROOT / "artifacts" / "policy_interventions"
+POLICY_DAYS = [1, 2, 3, 4, 5]
+LONG_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_long.csv"
+QA_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_qa.csv"
 
 
 # Input and output column definitions
@@ -67,78 +61,14 @@ POLICY_COLS = [
 POLICY_TYPE = "fixed_day_removal"
 
 
-def parse_args():
-    # Parse command-line arguments.
-    parser = argparse.ArgumentParser(
-        description=(
-            "Build estimator-agnostic catheter-removal policy-intervention "
-            "panel in long format."
-        )
-    )
-    parser.add_argument(
-        "--input",
-        type=Path,
-        default=DEFAULT_INPUT_PATH,
-        help=f"Input clean patient-day decision panel. Default: {DEFAULT_INPUT_PATH}",
-    )
-    parser.add_argument(
-        "--outdir",
-        type=Path,
-        default=DEFAULT_OUTDIR,
-        help=f"Output directory. Default: {DEFAULT_OUTDIR}",
-    )
-    parser.add_argument(
-        "--policy-days",
-        nargs="+",
-        type=int,
-        default=DEFAULT_POLICY_DAYS,
-        help="Fixed catheter-removal days to encode. Default: 1 2 3 4 5",
-    )
-    parser.add_argument(
-        "--combined-output-name",
-        default=DEFAULT_COMBINED_OUTPUT_NAME,
-        help=f"Long-format output filename. Default: {DEFAULT_COMBINED_OUTPUT_NAME}",
-    )
-    parser.add_argument(
-        "--qa-output-name",
-        default=DEFAULT_QA_OUTPUT_NAME,
-        help=f"QA report filename. Default: {DEFAULT_QA_OUTPUT_NAME}",
-    )
-    return parser.parse_args()
-
-
-def resolve_output_path(outdir, name_or_path):
-    # Resolve an output file path.
-    path = Path(name_or_path)
-    return path if path.is_absolute() else outdir / path
-
-
-def normalise_policy_days(policy_days):
-    # Normalise policy days.
-    if not policy_days:
-        raise ValueError("At least one policy day must be supplied.")
-
-    invalid = [day for day in policy_days if day < 1]
-    if invalid:
-        raise ValueError(f"Policy days must be positive integers. Invalid: {invalid}")
-
-    duplicates = sorted({day for day in policy_days if policy_days.count(day) > 1})
-    if duplicates:
-        raise ValueError(f"Policy days must be unique. Duplicates: {duplicates}")
-
-    return list(policy_days)
-
-
-def load_patient_day_panel(input_path):
-    return pd.read_csv(input_path, usecols=POLICY_INPUT_COLS, low_memory=False)
-
-
 def add_stable_ids_and_decision_flag(df):
+    # Standardise the state and action fields
     df["catheter_state"] = df["catheter_state"].astype(str).str.strip().str.lower()
     df["observed_action"] = df["observed_action"].astype(str).str.strip().str.lower()
     df["periods_in_state"] = pd.to_numeric(df["periods_in_state"], errors="coerce")
     df["removed_in_period"] = pd.to_numeric(df["removed_in_period"], errors="coerce")
 
+    # Reject values outside the panel schema
     unknown_states = sorted(set(df["catheter_state"].dropna()) - {"in", "out"})
     if unknown_states:
         raise ValueError(f"Unexpected catheter_state values: {unknown_states}")
@@ -149,6 +79,7 @@ def add_stable_ids_and_decision_flag(df):
     if unknown_actions:
         raise ValueError(f"Unexpected observed_action values: {unknown_actions}")
 
+    # Assign one stable number to each catheter episode
     key_frame = df[EPISODE_KEY_COLS].astype("string").fillna("<NA>")
     episode_codes, _ = pd.factorize(
         pd.MultiIndex.from_frame(key_frame),
@@ -156,12 +87,14 @@ def add_stable_ids_and_decision_flag(df):
     )
     df["catheter_episode_id"] = episode_codes + 1
 
+    # Put rows in episode-time order
     df = df.sort_values(
         ["catheter_episode_id", "period_start", "period_end"],
         kind="mergesort",
     ).reset_index(drop=True)
     df["decision_row_id"] = np.arange(1, len(df) + 1, dtype=np.int64)
 
+    # Mark rows on which removal is possible
     df["is_decision_row"] = (
         df["observed_action"].isin(["keep", "remove"])
         & df["catheter_state"].eq("in")
@@ -170,15 +103,17 @@ def add_stable_ids_and_decision_flag(df):
 
 
 def policy_name_for_day(policy_remove_day):
+    # Give each removal day a stable policy name
     return f"remove_on_day_{policy_remove_day}"
 
 
 def add_policy_episode_day(df):
-    # Add policy episode day.
+    # Count whole days since catheter insertion
     df = df.copy()
     inserted = pd.to_datetime(df["inserted"], errors="coerce")
     period_start = pd.to_datetime(df["period_start"], errors="coerce")
 
+    # Treat the insertion date as episode day one
     elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
     df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
     df.loc[df["episode_day_since_insertion"].lt(1), "episode_day_since_insertion"] = 1
@@ -186,9 +121,11 @@ def add_policy_episode_day(df):
 
 
 def apply_fixed_day_policy(base_df, policy_remove_day):
+    # Copy the observed panel for one target policy
     df = base_df.copy()
     policy_name = policy_name_for_day(policy_remove_day)
 
+    # Resolve the policy state and action on every row
     df["policy_name"] = policy_name
     df["policy_type"] = POLICY_TYPE
     df["policy_remove_day"] = policy_remove_day
@@ -198,10 +135,12 @@ def apply_fixed_day_policy(base_df, policy_remove_day):
         episode_day_col="episode_day_since_insertion",
     )
 
+    # Initialise policy decisions
     df["policy_action"] = "not_applicable"
     df["policy_action_remove"] = np.nan
     df["policy_applicable"] = False
 
+    # Encode keep and remove decisions on eligible rows
     decision_rows = df["is_decision_row"]
     keep_rows = decision_rows & df["policy_action_resolved"].eq("keep")
     remove_rows = decision_rows & df["policy_action_resolved"].eq("remove")
@@ -216,6 +155,7 @@ def apply_fixed_day_policy(base_df, policy_remove_day):
 
     df.loc[already_removed_rows, "policy_action"] = "already_removed_under_policy"
 
+    # Compare the target and observed actions
     df["policy_matches_observed_action_today"] = np.nan
     applicable_rows = df["policy_applicable"]
     df.loc[applicable_rows, "policy_matches_observed_action_today"] = (
@@ -228,6 +168,7 @@ def apply_fixed_day_policy(base_df, policy_remove_day):
 
 
 def order_long_columns(df):
+    # Put identifiers and policy fields first
     base_order = [
         "catheter_episode_id",
         "decision_row_id",
@@ -236,6 +177,8 @@ def order_long_columns(df):
         "is_decision_row",
         *POLICY_COLS,
     ]
+
+    # Preserve every remaining source column
     ordered = []
     for col in base_order:
         if col in df.columns and col not in ordered:
@@ -249,11 +192,14 @@ def build_long_policy_panel(
     base_df,
     policy_days,
 ):
+    # Build one full panel copy per policy
     policy_frames = [
         apply_fixed_day_policy(base_df, policy_remove_day)
         for policy_remove_day in policy_days
     ]
     long_df = pd.concat(policy_frames, ignore_index=True)
+
+    # Confirm that each policy has a coherent timeline
     pec.validate_resolved_target_policy_timeline(
         long_df,
         episode_id_col="catheter_episode_id",
@@ -263,7 +209,7 @@ def build_long_policy_panel(
 
 
 def qa_row(policy_df):
-    # Build one QA row.
+    # Count decisions and observed-policy agreement
     applicable = policy_df["policy_applicable"]
     matches = policy_df["policy_matches_observed_action_today"]
     n_applicable = int(applicable.sum())
@@ -315,18 +261,13 @@ def qa_row(policy_df):
 
 
 def build_qa_report(long_df, policy_days):
+    # Summarise each target policy
     rows = []
     for policy_remove_day in policy_days:
         policy_name = policy_name_for_day(policy_remove_day)
         policy_df = long_df.loc[long_df["policy_name"].eq(policy_name)]
         rows.append(qa_row(policy_df))
     return pd.DataFrame(rows)
-
-
-def save_df(df, path):
-    # Save a data frame as CSV.
-    path.parent.mkdir(exist_ok=True, parents=True)
-    df.to_csv(path, index=False)
 
 
 def print_console_summary(
@@ -337,7 +278,7 @@ def print_console_summary(
     long_output_path,
     qa_output_path,
 ):
-    # Print a concise run summary.
+    # Print the main row counts and output paths
     print()
     print("--- POLICY-INTERVENTION PANEL BUILD COMPLETE ---")
     print(f"Input panel: {input_path}")
@@ -363,37 +304,39 @@ def print_console_summary(
 
 
 def main():
-    # Run the script workflow.
-    # Parse command-line arguments.
-    args = parse_args()
-    # Normalise policy days.
-    policy_days = normalise_policy_days(args.policy_days)
-    args.outdir.mkdir(exist_ok=True, parents=True)
+    # Create the output directory
+    OUTDIR.mkdir(exist_ok=True, parents=True)
 
-    long_output_path = resolve_output_path(args.outdir, args.combined_output_name)
-    qa_output_path = resolve_output_path(args.outdir, args.qa_output_name)
+    # Load only the columns used to construct policies
+    input_df = pd.read_csv(
+        INPUT_PATH,
+        usecols=POLICY_INPUT_COLS,
+        low_memory=False,
+    )
 
-    input_df = load_patient_day_panel(args.input)
+    # Add stable episode and decision identifiers
     base_df = add_stable_ids_and_decision_flag(input_df)
     base_df = add_policy_episode_day(base_df)
 
-    long_df = build_long_policy_panel(base_df, policy_days)
-    qa_df = build_qa_report(long_df, policy_days)
+    # Construct the policy panel and its QA report
+    long_df = build_long_policy_panel(base_df, POLICY_DAYS)
+    qa_df = build_qa_report(long_df, POLICY_DAYS)
 
-    save_df(long_df, long_output_path)
-    pec.save_report_df(qa_df, qa_output_path)
+    # Save row-level data at full precision
+    long_df.to_csv(LONG_OUTPUT_PATH, index=False)
+
+    # Save report data rounded to three decimal places
+    pec.save_report_df(qa_df, QA_OUTPUT_PATH)
 
     print_console_summary(
-        args.input,
+        INPUT_PATH,
         base_df,
         long_df,
         qa_df,
-        long_output_path,
-        qa_output_path,
+        LONG_OUTPUT_PATH,
+        QA_OUTPUT_PATH,
     )
 
 
-# Run the script workflow.
 if __name__ == "__main__":
-    # Run the script workflow.
     main()

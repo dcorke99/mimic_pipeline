@@ -1,5 +1,7 @@
-# Share estimator-agnostic helpers for policy-evaluation scripts.
+# Share estimator-agnostic helpers for policy-evaluation scripts
 
+
+import json
 
 import numpy as np
 import pandas as pd
@@ -22,16 +24,12 @@ TARGET_POLICY_TIMELINE_SEMANTICS = (
 
 
 def save_json(payload, path):
-    # Save a dictionary as JSON.
-    path.parent.mkdir(exist_ok=True, parents=True)
-    import json
-
+    # Save structured run metadata
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
 def save_report_df(df, path, decimals=3):
-    # Save a report CSV with rounded numeric columns.
-    path.parent.mkdir(exist_ok=True, parents=True)
+    # Round report values without changing source data
     out = df.copy()
     numeric_cols = out.select_dtypes(include=[np.number]).columns
     out[numeric_cols] = out[numeric_cols].round(decimals)
@@ -39,7 +37,7 @@ def save_report_df(df, path, decimals=3):
 
 
 def baseline_model_feature_columns(columns):
-    # Return baseline and chart covariates in their existing order.
+    # Return baseline and chart covariates in their existing order
     return [
         column
         for column in columns
@@ -54,7 +52,7 @@ def add_period_duration_days(
     context,
     max_reasonable_days=MAX_REASONABLE_PERIOD_DURATION_DAYS,
 ):
-    # Add period duration in days.
+    # Add period duration in days
     out = df.copy()
     start = pd.to_datetime(out["period_start"], errors="coerce")
     end = pd.to_datetime(out["period_end"], errors="coerce")
@@ -81,18 +79,10 @@ def add_period_duration_days(
 
 
 def add_observed_icu_exit_alive_period(df):
-    # Add ICU-exit-alive outcome flags.
+    # Exclude deaths from the ICU-exit-alive outcome
     out = df.copy()
-    death = (
-        pd.to_numeric(out["death_in_period"], errors="coerce").fillna(0)
-        if "death_in_period" in out.columns
-        else pd.Series(0, index=out.index)
-    )
-    icu_exit = (
-        pd.to_numeric(out["icu_end_in_period"], errors="coerce").fillna(0)
-        if "icu_end_in_period" in out.columns
-        else pd.Series(0, index=out.index)
-    )
+    death = pd.to_numeric(out["death_in_period"], errors="coerce").fillna(0)
+    icu_exit = pd.to_numeric(out["icu_end_in_period"], errors="coerce").fillna(0)
     out["death_and_icu_exit_same_period"] = ((death.eq(1)) & (icu_exit.eq(1))).astype(int)
     out["observed_icu_exit_alive_in_period"] = ((icu_exit.eq(1)) & death.ne(1)).astype(int)
     return out
@@ -114,7 +104,7 @@ def add_fixed_day_target_policy_timeline(
     periods_in_col="policy_periods_in",
     periods_out_col="policy_periods_out",
 ):
-    # Add the resolved fixed-day policy timeline.
+    # Add the resolved fixed-day policy timeline
     out = df.copy()
     out = out.sort_values(
         [
@@ -175,7 +165,7 @@ def resolved_timeline_diagnostics(
     policy_remove_day_col="policy_remove_day",
     episode_day_col="episode_day_since_insertion",
 ):
-    # Summarise resolved timeline diagnostics.
+    # Summarise resolved timeline diagnostics
     rows = []
     for policy_name, policy_df in df.groupby(policy_name_col, dropna=False, sort=False):
         remove_day = pd.to_numeric(policy_df[policy_remove_day_col], errors="coerce").dropna()
@@ -224,7 +214,7 @@ def validate_resolved_target_policy_timeline(
     episode_id_col="catheter_episode_id",
     context="policy_intervention_panel_long.csv",
 ):
-    # Validate the resolved policy timeline.
+    # Validate the resolved policy timeline
     state = df["policy_catheter_state"].astype("string").str.strip().str.lower()
     action = df["policy_action_resolved"].astype("string").str.strip().str.lower()
     action_remove = pd.to_numeric(df["policy_action_remove_resolved"], errors="coerce")
@@ -256,7 +246,7 @@ def validate_resolved_target_policy_timeline(
             f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
         )
 
-    # Summarise resolved timeline diagnostics.
+    # Summarise resolved timeline diagnostics
     diagnostics = resolved_timeline_diagnostics(df, episode_id_col=episode_id_col)
     too_many = diagnostics["n_episodes_with_more_than_one_remove_row"].gt(0)
     shortfall = diagnostics["n_policy_remove_row_shortfall_vs_reached_episodes"].ne(0)
@@ -269,24 +259,12 @@ def validate_resolved_target_policy_timeline(
         )
 
 
-def attach_resolved_timeline_aliases(
-    df,
-    *,
-    action_col,
-    action_remove_col,
-):
-    # Attach estimator aliases for resolved timeline columns.
-    df[action_col] = df["policy_action_resolved"]
-    df[action_remove_col] = df["policy_action_remove_resolved"]
-    return df
-
-
 def duplicate_episode_day_count(
     df,
     group_cols,
     day_col="episode_day_since_insertion",
 ):
-    # Count duplicate episode-day rows.
+    # Count duplicate episode-day rows
     duplicated = df.duplicated([*group_cols, day_col], keep=False)
     return int(duplicated.sum())
 
@@ -297,20 +275,17 @@ def add_standard_comparisons(
     baseline_label,
     comparison_map,
 ):
-    # Add standard comparisons against current practice.
-    baseline_rows = summary.loc[summary["policy_name"].eq(baseline_label)]
-    if baseline_rows.empty:
-        return summary
-    baseline = baseline_rows.iloc[0]
+    # Add standard comparisons against current practice
+    baseline = summary.loc[
+        summary["policy_name"].eq(baseline_label)
+    ].iloc[0]
     out = summary.copy()
     for standard_name, value_col in comparison_map.items():
-        if value_col not in out.columns or value_col not in baseline.index:
-            continue
         baseline_value = baseline[value_col]
         diff_col = f"{standard_name}_difference_vs_current_practice"
         out[diff_col] = out[value_col] - baseline_value
         # The pct-points column is meaningful for risk outcomes. For exposure it
-        # is retained for schema consistency and equals the raw day difference.
+        # is retained for schema consistency and equals the raw day difference
         out[f"{standard_name}_difference_pct_points_vs_current_practice"] = (
             out[diff_col] * 100 if standard_name.endswith("_risk") else out[diff_col]
         )
@@ -325,56 +300,50 @@ def add_standard_comparisons(
 def add_overlap_quality_flags(
     summary,
     *,
-    support_diagnostics=None,
-    weight_diagnostics=None,
+    support_diagnostics,
+    weight_diagnostics,
     current_practice_label="current_practice",
 ):
-    # Add overlap quality flags.
+    # Add overlap quality flags
     out = summary.copy()
-    if "pct_adherent_episodes" in out.columns:
-        out["low_adherence_flag"] = out["pct_adherent_episodes"].lt(LOW_ADHERENCE_THRESHOLD)
-    else:
-        out["low_adherence_flag"] = False
+    out["low_adherence_flag"] = out["pct_adherent_episodes"].lt(
+        LOW_ADHERENCE_THRESHOLD
+    )
 
     n_col = "n_total_policy_episodes" if "n_total_policy_episodes" in out.columns else "n_episodes"
-    ess = pd.to_numeric(out.get("effective_sample_size", np.nan), errors="coerce")
-    n_total = pd.to_numeric(out.get(n_col, np.nan), errors="coerce")
+    ess = pd.to_numeric(out["effective_sample_size"], errors="coerce")
+    n_total = pd.to_numeric(out[n_col], errors="coerce")
     out["low_ess_flag"] = ess.lt(LOW_ESS_MIN) | ess.lt(LOW_ESS_FRACTION * n_total)
 
-    out["low_support_flag"] = False
-    if support_diagnostics is not None and not support_diagnostics.empty:
-        support_all = support_diagnostics.loc[
-            support_diagnostics.get("group", "all").eq("all"),
-            ["policy_name", "pct_below_0_05"],
-        ].drop_duplicates("policy_name")
-        support_all["low_support_flag"] = pd.to_numeric(
-            support_all["pct_below_0_05"], errors="coerce"
-        ).gt(LOW_SUPPORT_PCT_BELOW_005_THRESHOLD)
-        out = out.drop(columns=["low_support_flag"], errors="ignore").merge(
-            support_all[["policy_name", "low_support_flag"]],
-            on="policy_name",
-            how="left",
-        )
-        out["low_support_flag"] = out["low_support_flag"].fillna(False)
+    support_all = support_diagnostics.loc[
+        support_diagnostics["group"].eq("all"),
+        ["policy_name", "pct_below_0_05"],
+    ].drop_duplicates("policy_name")
+    support_all["low_support_flag"] = pd.to_numeric(
+        support_all["pct_below_0_05"],
+        errors="coerce",
+    ).gt(LOW_SUPPORT_PCT_BELOW_005_THRESHOLD)
+    out = out.merge(
+        support_all[["policy_name", "low_support_flag"]],
+        on="policy_name",
+        how="left",
+    )
+    out["low_support_flag"] = out["low_support_flag"].fillna(False)
 
-    out["extreme_weight_flag"] = False
-    if weight_diagnostics is not None and not weight_diagnostics.empty:
-        weight_flags = weight_diagnostics[["policy_name"]].copy()
-        weight_flags["extreme_weight_flag"] = (
-            pd.to_numeric(weight_diagnostics.get("p99_weight", np.nan), errors="coerce").gt(
-                EXTREME_WEIGHT_P99_THRESHOLD
-            )
-            | pd.to_numeric(weight_diagnostics.get("max_weight", np.nan), errors="coerce").gt(
-                EXTREME_WEIGHT_MAX_THRESHOLD
-            )
-        )
-        weight_flags = weight_flags.drop_duplicates("policy_name")
-        out = out.drop(columns=["extreme_weight_flag"], errors="ignore").merge(
-            weight_flags,
-            on="policy_name",
-            how="left",
-        )
-        out["extreme_weight_flag"] = out["extreme_weight_flag"].fillna(False)
+    weight_flags = weight_diagnostics[["policy_name"]].copy()
+    weight_flags["extreme_weight_flag"] = (
+        pd.to_numeric(
+            weight_diagnostics["p99_weight"],
+            errors="coerce",
+        ).gt(EXTREME_WEIGHT_P99_THRESHOLD)
+        | pd.to_numeric(
+            weight_diagnostics["max_weight"],
+            errors="coerce",
+        ).gt(EXTREME_WEIGHT_MAX_THRESHOLD)
+    )
+    weight_flags = weight_flags.drop_duplicates("policy_name")
+    out = out.merge(weight_flags, on="policy_name", how="left")
+    out["extreme_weight_flag"] = out["extreme_weight_flag"].fillna(False)
 
     current = out["policy_name"].eq(current_practice_label)
     for col in ["low_adherence_flag", "low_ess_flag", "low_support_flag", "extreme_weight_flag"]:

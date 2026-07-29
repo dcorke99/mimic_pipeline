@@ -1,33 +1,26 @@
 #!/usr/bin/env python3
-# Audit duplicate episode-day rows in the catheter panel.
+# Audit duplicate episode-day rows in the catheter panel
 
 from pathlib import Path
-import argparse
 import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
 
 
-DEFAULT_INPUT = Path("data/modelling_panel.csv")
-DEFAULT_OUTDIR = Path("artifacts/diagnostics/duplicate_episode_days")
-
-
-def parse_args():
-    # Parse command-line arguments.
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input-panel", type=Path, default=DEFAULT_INPUT)
-    parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
-    return parser.parse_args()
+REPO_ROOT = Path(__file__).resolve().parent
+INPUT_PATH = REPO_ROOT / "data" / "modelling_panel.csv"
+OUTDIR = REPO_ROOT / "artifacts" / "diagnostics" / "duplicate_episode_days"
 
 
 def add_episode_day_since_insertion(df):
-    # Add episode day since catheter insertion.
+    # Count whole days since catheter insertion
     df = df.copy()
 
     inserted = pd.to_datetime(df["inserted"], errors="coerce")
     period_start = pd.to_datetime(df["period_start"], errors="coerce")
 
+    # Treat the insertion date as episode day one
     elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
     df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
     df.loc[df["episode_day_since_insertion"] < 1, "episode_day_since_insertion"] = 1
@@ -36,27 +29,25 @@ def add_episode_day_since_insertion(df):
 
 
 def main():
-    # Run the script workflow.
-    # Parse command-line arguments.
-    args = parse_args()
-    args.outdir.mkdir(parents=True, exist_ok=True)
+    # Create the audit directory
+    OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_csv(args.input_panel, low_memory=False)
+    # Load and standardise the modelling panel
+    df = pd.read_csv(INPUT_PATH, low_memory=False)
     df.columns = df.columns.str.strip()
+    df = df.copy()
 
-    if "catheter_episode_id" not in df.columns:
-        episode_key_cols = ["subject_id", "hadm_id", "stay_id", "inserted"]
-        if "removed" in df.columns:
-            episode_key_cols.append("removed")
-        df["catheter_episode_id"] = pd.factorize(
-            df[episode_key_cols].astype(str).agg("|".join, axis=1),
-            sort=True,
-        )[0] + 1
+    # Assign one stable number to each catheter episode
+    episode_key_cols = ["subject_id", "hadm_id", "stay_id", "inserted", "removed"]
+    df["catheter_episode_id"] = pd.factorize(
+        df[episode_key_cols].astype(str).agg("|".join, axis=1),
+        sort=True,
+    )[0] + 1
 
-    # Add episode day since catheter insertion.
+    # Add episode day since catheter insertion
     df = add_episode_day_since_insertion(df)
 
-    # Main duplicate check: more than one row per episode-day
+    # Count rows within each episode-day
     day_key = ["catheter_episode_id", "episode_day_since_insertion"]
 
     counts = (
@@ -66,8 +57,10 @@ def main():
         .sort_values("n_rows_for_episode_day", ascending=False)
     )
 
+    # Retain episode-days with multiple rows
     duplicate_days = counts[counts["n_rows_for_episode_day"] > 1].copy()
 
+    # Recover the full rows behind those counts
     duplicate_rows = df.merge(
         duplicate_days[day_key],
         on=day_key,
@@ -76,18 +69,19 @@ def main():
         ["catheter_episode_id", "episode_day_since_insertion", "period_start", "period_end"]
     )
 
-    # Exact duplicate interval check
+    # Define exact duplicate interval fields
     exact_key = [
         "catheter_episode_id",
         "episode_day_since_insertion",
         "period_start",
         "period_end",
+        "catheter_state",
+        "observed_action",
+        "removed_in_period",
+        "periods_in_state",
     ]
 
-    for optional_col in ["catheter_state", "observed_action", "removed_in_period", "periods_in_state"]:
-        if optional_col in df.columns:
-            exact_key.append(optional_col)
-
+    # Count identical interval rows
     exact_counts = (
         df.groupby(exact_key, dropna=False)
         .size()
@@ -95,21 +89,17 @@ def main():
         .sort_values("n_exact_duplicate_rows", ascending=False)
     )
 
+    # Retain groups with exact duplicates
     exact_duplicates = exact_counts[exact_counts["n_exact_duplicate_rows"] > 1].copy()
 
+    # Recover the full exact duplicate rows
     exact_duplicate_rows = df.merge(
         exact_duplicates[exact_key],
         on=exact_key,
         how="inner",
     ).sort_values(exact_key)
 
-    # Useful compact episode-day summary
-    summary_cols = [
-        "catheter_episode_id",
-        "episode_day_since_insertion",
-        "n_rows_for_episode_day",
-    ]
-
+    # Summarise the time range of each duplicate episode-day
     if not duplicate_rows.empty:
         interval_summary = (
             duplicate_rows.groupby(day_key, dropna=False)
@@ -130,17 +120,27 @@ def main():
     else:
         interval_summary = duplicate_days
 
-    # Save outputs
-    pec.save_report_df(counts, args.outdir / "episode_day_row_counts_all.csv")
-    pec.save_report_df(duplicate_days, args.outdir / "duplicate_episode_day_summary.csv")
-    pec.save_report_df(duplicate_rows, args.outdir / "duplicate_episode_day_rows.csv")
-    pec.save_report_df(exact_duplicates, args.outdir / "exact_duplicate_interval_summary.csv")
-    pec.save_report_df(exact_duplicate_rows, args.outdir / "exact_duplicate_interval_rows.csv")
-    pec.save_report_df(interval_summary, args.outdir / "duplicate_episode_day_trace_summary.csv")
+    # Save each audit table at three decimal places
+    pec.save_report_df(counts, OUTDIR / "episode_day_row_counts_all.csv")
+    pec.save_report_df(duplicate_days, OUTDIR / "duplicate_episode_day_summary.csv")
+    pec.save_report_df(duplicate_rows, OUTDIR / "duplicate_episode_day_rows.csv")
+    pec.save_report_df(
+        exact_duplicates,
+        OUTDIR / "exact_duplicate_interval_summary.csv",
+    )
+    pec.save_report_df(
+        exact_duplicate_rows,
+        OUTDIR / "exact_duplicate_interval_rows.csv",
+    )
+    pec.save_report_df(
+        interval_summary,
+        OUTDIR / "duplicate_episode_day_trace_summary.csv",
+    )
 
+    # Print the main audit counts
     print()
     print("--- DUPLICATE EPISODE-DAY AUDIT COMPLETE ---")
-    print(f"Input panel: {args.input_panel}")
+    print(f"Input panel: {INPUT_PATH}")
     print(f"Rows in input panel: {len(df):,}")
     print(f"Unique catheter episodes: {df['catheter_episode_id'].nunique():,}")
     print(f"Episode-days with more than one row: {len(duplicate_days):,}")
@@ -148,12 +148,10 @@ def main():
     print(f"Exact duplicate interval groups: {len(exact_duplicates):,}")
     print(f"Rows belonging to exact duplicate intervals: {len(exact_duplicate_rows):,}")
     print()
-    print(f"Saved outputs to: {args.outdir}")
+    print(f"Saved outputs to: {OUTDIR}")
     print("Main file to inspect:")
-    print(args.outdir / "duplicate_episode_day_rows.csv")
+    print(OUTDIR / "duplicate_episode_day_rows.csv")
 
 
-# Run the script workflow.
 if __name__ == "__main__":
-    # Run the script workflow.
     main()
