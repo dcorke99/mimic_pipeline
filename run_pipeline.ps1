@@ -1,7 +1,7 @@
 # Run the catheter-removal pipeline with the local virtual environment
 $ErrorActionPreference = "Stop"
 
-$Python = "C:\venvs\datascience\Scripts\python.exe"
+$Python = ".venv\Scripts\python.exe"
 
 $Scripts = @(
     "create_data_panel.py",
