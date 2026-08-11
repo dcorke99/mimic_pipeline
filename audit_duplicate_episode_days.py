@@ -10,7 +10,7 @@ import policy_eval_common as pec
 
 REPO_ROOT = Path(__file__).resolve().parent
 INPUT_PATH = REPO_ROOT / "data" / "modelling_panel.csv"
-OUTDIR = REPO_ROOT / "artifacts" / "diagnostics" / "duplicate_episode_days"
+OUTDIR = REPO_ROOT / "artefacts" / "diagnostics" / "duplicate_episode_days"
 
 
 def add_episode_day_since_insertion(df):

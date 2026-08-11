@@ -12,29 +12,29 @@ import policy_eval_common as pec
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-POLICY_QA_PATH = REPO_ROOT / "artifacts" / "policy_interventions" / "policy_intervention_panel_qa.csv"
+POLICY_QA_PATH = REPO_ROOT / "artefacts" / "policy_interventions" / "policy_intervention_panel_qa.csv"
 GFORMULA_SUMMARY_PATH = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "gformula" / "gformula_policy_outcomes_summary.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / "gformula_policy_outcomes_summary.csv"
 )
 GFORMULA_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "gformula" / "gformula_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / "gformula_diagnostics.csv"
 )
 AIPW_SUMMARY_PATH = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "aipw" / "aipw_policy_outcomes_summary.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / "aipw_policy_outcomes_summary.csv"
 )
 AIPW_WEIGHT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "aipw" / "aipw_weight_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / "aipw_weight_diagnostics.csv"
 )
 IPW_SUMMARY_PATH = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "ipw" / "ipw_policy_outcomes_summary.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / "ipw_policy_outcomes_summary.csv"
 )
 IPW_WEIGHT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "ipw" / "ipw_weight_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / "ipw_weight_diagnostics.csv"
 )
 IPW_SUPPORT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artifacts" / "policy_eval" / "ipw" / "ipw_policy_support_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / "ipw_policy_support_diagnostics.csv"
 )
-OUTPUT_PATH = REPO_ROOT / "artifacts" / "policy_eval" / "baseline_policy_evaluation_audit.csv"
+OUTPUT_PATH = REPO_ROOT / "artefacts" / "policy_eval" / "baseline_policy_evaluation_audit.csv"
 
 CURRENT_PRACTICE_LABEL = "current_practice"
 TOLERANCE = 1e-10

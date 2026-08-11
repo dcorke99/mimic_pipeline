@@ -61,8 +61,22 @@ ACTION_COL = "removed_in_period"
 Y_CAUTI = "cauti_in_period"
 Y_REINS = "reinsertion_in_period"
 Y_DEATH = "death_in_period"
-Y_ICU_EXIT = "icu_end_in_period"
+Y_ICU_EXIT_ALIVE = "icu_exit_alive_in_period"
 OBSERVED_ACTION_COL = "observed_action"
+TERMINAL_REASONS = {"death", "reinsertion", "icu_exit_alive"}
+ETHNICITY_UNAVAILABLE_MARKERS = (
+    "UNKNOWN",
+    "UNABLE TO OBTAIN",
+    "PATIENT DECLINED",
+    "DECLINED",
+    "NOT SPECIFIED",
+    "NOT RECORDED",
+    "NOT REPORTED",
+    "NOT AVAILABLE",
+    "UNAVAILABLE",
+    "UNOBTAINABLE",
+    "NO INFORMATION",
+)
 
 
 def load_item_labels():
@@ -91,13 +105,28 @@ def print_section(title):
 
 # Catheter episode cohort and base panel
 
-def map_ethnicity_group(value):
-    # Collapse raw ethnicity labels
+def normalise_ethnicity_text(value):
+    # Standardise whitespace and case for matching
     if pd.isna(value):
-        return "Unknown"
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip()).upper()
+
+
+def ethnicity_is_missing(value):
+    # Identify unavailable ethnicity information
+    ethnicity_text = normalise_ethnicity_text(value)
+    return not ethnicity_text or any(
+        marker in ethnicity_text for marker in ETHNICITY_UNAVAILABLE_MARKERS
+    )
+
+
+def map_ethnicity_group(value):
+    # Collapse substantive raw ethnicity labels
+    if ethnicity_is_missing(value):
+        return pd.NA
 
     # Match broad groups
-    ethnicity_text = str(value).upper()
+    ethnicity_text = normalise_ethnicity_text(value)
     if "WHITE" in ethnicity_text:
         return "White"
     if "BLACK" in ethnicity_text:
@@ -106,9 +135,33 @@ def map_ethnicity_group(value):
         return "Asian"
     if "HISPANIC" in ethnicity_text or "LATIN" in ethnicity_text:
         return "Hispanic"
-    if "DECLINED" in ethnicity_text or "UNKNOWN" in ethnicity_text or "UNABLE" in ethnicity_text:
-        return "Unknown"
     return "Other"
+
+
+def build_ethnicity_mapping_audit(episodes):
+    # Summarise source ethnicity mappings in the episode cohort
+    audit = episodes[["ethnicity", "ethnicity_group", "ethnicity_missing"]].copy()
+    audit["source_ethnicity"] = (
+        audit["ethnicity"].astype("string").str.strip().replace("", pd.NA)
+        .fillna("<MISSING>")
+    )
+    audit["mapped_ethnicity_category"] = (
+        audit["ethnicity_group"].astype("string").fillna("Unavailable")
+    )
+    return (
+        audit.groupby(
+            ["source_ethnicity", "mapped_ethnicity_category", "ethnicity_missing"],
+            dropna=False,
+            observed=False,
+        )
+        .size()
+        .rename("n")
+        .reset_index()
+        .sort_values(
+            ["ethnicity_missing", "mapped_ethnicity_category", "source_ethnicity"]
+        )
+        .reset_index(drop=True)
+    )
 
 
 def merge_overlapping_foley_events(df):
@@ -143,6 +196,77 @@ def merge_overlapping_foley_events(df):
 
     # Return one row per episode
     return pd.DataFrame(episodes, columns=["stay_id", "inserted", "removed"])
+
+
+def add_episode_endpoints(catheterised):
+    # End each catheter episode at its first absorbing or episode-closing event
+    out = catheterised.copy()
+    endpoint_candidates = out[["death_time", "reinsertion_time", "ICU_out"]]
+    out["episode_end_time"] = endpoint_candidates.min(axis=1)
+
+    # Reject impossible trajectories rather than silently creating empty windows
+    invalid_end = (
+        out["episode_end_time"].isna()
+        | out["inserted"].isna()
+        | out["episode_end_time"].le(out["inserted"])
+    )
+    if invalid_end.any():
+        examples = out.loc[
+            invalid_end,
+            [
+                "stay_id",
+                "inserted",
+                "death_time",
+                "reinsertion_time",
+                "ICU_out",
+                "episode_end_time",
+            ],
+        ].head(10)
+        raise ValueError(
+            "Catheter episodes must end after insertion at death, reinsertion, "
+            f"or ICU exit. Examples:\n{examples}"
+        )
+
+    # Resolve exact timestamp ties deterministically: death, reinsertion, ICU exit alive
+    reason = pd.Series(pd.NA, index=out.index, dtype="string")
+    reason.loc[out["ICU_out"].eq(out["episode_end_time"])] = "icu_exit_alive"
+    reason.loc[out["reinsertion_time"].eq(out["episode_end_time"])] = "reinsertion"
+    reason.loc[out["death_time"].eq(out["episode_end_time"])] = "death"
+    out["episode_end_reason"] = reason
+
+    if out["episode_end_reason"].isna().any():
+        raise ValueError("Every catheter episode must have one resolved ending reason")
+
+    return out
+
+
+def exclude_post_terminal_episode_starts(catheterised):
+    # Remove source episodes that begin after the patient has died or left ICU
+    out = catheterised.copy()
+    first_patient_terminal = out[["death_time", "ICU_out"]].min(axis=1)
+    invalid_start = (
+        out["inserted"].isna()
+        | first_patient_terminal.isna()
+        | out["inserted"].ge(first_patient_terminal)
+    )
+
+    if invalid_start.any():
+        invalid_death = (
+            out["death_time"].notna()
+            & out["inserted"].ge(out["death_time"])
+        )
+        invalid_icu_exit = (
+            out["ICU_out"].notna()
+            & out["inserted"].ge(out["ICU_out"])
+        )
+        print(
+            "[Cohort exclusion] Foley episodes starting at/after a terminal event:",
+            int(invalid_start.sum()),
+            f"(at/after death={int((invalid_start & invalid_death).sum())}, "
+            f"at/after ICU exit={int((invalid_start & invalid_icu_exit).sum())})",
+        )
+
+    return out.loc[~invalid_start].reset_index(drop=True)
 
 
 def build_catheter_episodes():
@@ -191,6 +315,7 @@ def build_catheter_episodes():
         how="left",
     )
     icu["ethnicity_group"] = icu["ethnicity"].apply(map_ethnicity_group)
+    icu["ethnicity_missing"] = icu["ethnicity"].apply(ethnicity_is_missing).astype(int)
 
     # Load Foley procedures
     procedure_events = pd.read_csv(
@@ -238,7 +363,8 @@ def build_catheter_episodes():
     catheterised = collapsed.merge(
         icu[[
             "stay_id", "subject_id", "hadm_id", "intime", "outtime",
-            "gender", "age", "ethnicity_group", "deathtime",
+            "gender", "age", "ethnicity", "ethnicity_group", "ethnicity_missing",
+            "deathtime",
         ]],
         on="stay_id",
         how="inner",
@@ -251,12 +377,19 @@ def build_catheter_episodes():
     )
     catheterised = catheterised.drop(columns=["deathtime"])
 
+    # Exclude impossible post-death/post-discharge episode starts before linkage
+    catheterised = exclude_post_terminal_episode_starts(catheterised)
+
     # Find the next insertion
     catheterised = catheterised.sort_values(["stay_id", "inserted"]).reset_index(drop=True)
     catheterised["reinsertion_time"] = catheterised.groupby("stay_id")["inserted"].shift(-1)
 
+    # Resolve the earliest episode-ending event
+    catheterised = add_episode_endpoints(catheterised)
+
     # Keep sufficiently long episodes
-    episode_duration = catheterised["removed"] - catheterised["inserted"]
+    observed_catheter_end = catheterised[["removed", "episode_end_time"]].min(axis=1)
+    episode_duration = observed_catheter_end - catheterised["inserted"]
     catheterised = catheterised[episode_duration >= MIN_EPISODE_DURATION].copy()
 
     # Load microbiology results
@@ -274,15 +407,29 @@ def build_catheter_episodes():
 
     # Match cultures to episodes
     micro_matched = micro.merge(
-        catheterised[["subject_id", "hadm_id", "stay_id", "inserted", "removed"]],
+        catheterised[[
+            "subject_id",
+            "hadm_id",
+            "stay_id",
+            "inserted",
+            "removed",
+            "episode_end_time",
+        ]],
         on=["subject_id", "hadm_id"],
         how="inner",
     )
 
     # Limit the CAUTI window
+    micro_matched["cauti_window_end"] = (
+        micro_matched["removed"] + pd.Timedelta(hours=48)
+    ).where(
+        micro_matched["removed"] + pd.Timedelta(hours=48)
+        <= micro_matched["episode_end_time"],
+        micro_matched["episode_end_time"],
+    )
     micro_matched = micro_matched[
         (micro_matched["charttime"] >= micro_matched["inserted"]) &
-        (micro_matched["charttime"] <= micro_matched["removed"] + pd.Timedelta(hours=48))
+        (micro_matched["charttime"] <= micro_matched["cauti_window_end"])
     ].copy()
 
     # Keep the first culture
@@ -322,13 +469,25 @@ def make_state_windows(state_start, state_end):
 
 
 def build_base_panel(catheterised):
+    # Require episode-level terminal metadata
+    required_endpoint_cols = {"episode_end_time", "episode_end_reason"}
+    missing_endpoint_cols = required_endpoint_cols - set(catheterised.columns)
+    if missing_endpoint_cols:
+        raise ValueError(
+            "Catheter episodes are missing terminal metadata: "
+            f"{sorted(missing_endpoint_cols)}"
+        )
+
     # Collect panel rows
     rows = []
 
     # Expand each catheter episode
     for episode in catheterised.itertuples():
+        # A terminal event can occur before the recorded procedure end time
+        in_state_end = min(episode.removed, episode.episode_end_time)
+
         # Create catheter-in periods
-        for state_idx, period_start, period_end in make_state_windows(episode.inserted, episode.removed):
+        for state_idx, period_start, period_end in make_state_windows(episode.inserted, in_state_end):
             rows.append({
                 "subject_id": episode.subject_id,
                 "hadm_id": episode.hadm_id,
@@ -336,6 +495,8 @@ def build_base_panel(catheterised):
                 "inserted": episode.inserted,
                 "removed": episode.removed,
                 "reinsertion_time": episode.reinsertion_time,
+                "episode_end_time": episode.episode_end_time,
+                "_episode_end_reason": episode.episode_end_reason,
                 "catheter_state": "in",
                 "state_index": state_idx,
                 "period_start": period_start,
@@ -346,14 +507,16 @@ def build_base_panel(catheterised):
                 "intime": episode.ICU_in,
                 "gender": episode.gender,
                 "age": episode.age,
+                "ethnicity": episode.ethnicity,
                 "ethnicity_group": episode.ethnicity_group,
+                "ethnicity_missing": episode.ethnicity_missing,
             })
 
-        # End at reinsertion or ICU exit
-        out_state_end = episode.reinsertion_time if pd.notna(episode.reinsertion_time) else episode.ICU_out
-
-        # Create catheter-out periods
-        for state_idx, period_start, period_end in make_state_windows(episode.removed, out_state_end):
+        # Create catheter-out periods only after a removal preceding the terminal event
+        for state_idx, period_start, period_end in make_state_windows(
+            episode.removed,
+            episode.episode_end_time,
+        ):
             rows.append({
                 "subject_id": episode.subject_id,
                 "hadm_id": episode.hadm_id,
@@ -361,6 +524,8 @@ def build_base_panel(catheterised):
                 "inserted": episode.inserted,
                 "removed": episode.removed,
                 "reinsertion_time": episode.reinsertion_time,
+                "episode_end_time": episode.episode_end_time,
+                "_episode_end_reason": episode.episode_end_reason,
                 "catheter_state": "out",
                 "state_index": state_idx,
                 "period_start": period_start,
@@ -371,7 +536,9 @@ def build_base_panel(catheterised):
                 "intime": episode.ICU_in,
                 "gender": episode.gender,
                 "age": episode.age,
+                "ethnicity": episode.ethnicity,
                 "ethnicity_group": episode.ethnicity_group,
+                "ethnicity_missing": episode.ethnicity_missing,
             })
 
     # Build and order the panel
@@ -385,26 +552,31 @@ def build_base_panel(catheterised):
     panel["periods_in_state"] = panel["state_index"] + 1
     panel = panel.drop(columns=["state_index"])
 
-    # Flag removal periods
+    # Find each final period
+    episode_keys = ["stay_id", "inserted"]
+    last_row_index = panel.groupby(episode_keys)["period_end"].idxmax()
+    is_last_period = panel.index.isin(last_row_index)
+
+    # Flag clinical removal periods; terminal-time ties are not removal decisions
     panel["removed_in_period"] = (
         (panel["catheter_state"] == "in") &
+        (panel["removed"] < panel["episode_end_time"]) &
         (panel["removed"] > panel["period_start"]) &
         (panel["removed"] <= panel["period_end"])
     ).astype(int)
 
-    # Flag reinsertion periods
+    # Encode mutually exclusive terminal events on the final trajectory row
     panel["reinsertion_in_period"] = (
-        (panel["catheter_state"] == "out") &
-        panel["reinsertion_time"].notna() &
-        (panel["reinsertion_time"] > panel["period_start"]) &
-        (panel["reinsertion_time"] <= panel["period_end"])
+        is_last_period &
+        panel["_episode_end_reason"].eq("reinsertion")
     ).astype(int)
-
-    # Flag ICU exit periods
-    panel["icu_end_in_period"] = (
-        panel["ICU_out"].notna() &
-        (panel["ICU_out"] > panel["period_start"]) &
-        (panel["ICU_out"] <= panel["period_end"])
+    panel["death_in_period"] = (
+        is_last_period &
+        panel["_episode_end_reason"].eq("death")
+    ).astype(int)
+    panel["icu_exit_alive_in_period"] = (
+        is_last_period &
+        panel["_episode_end_reason"].eq("icu_exit_alive")
     ).astype(int)
 
     # Flag CAUTI periods
@@ -412,13 +584,6 @@ def build_base_panel(catheterised):
         panel["cauti_time"].notna() &
         (panel["cauti_time"] > panel["period_start"]) &
         (panel["cauti_time"] <= panel["period_end"])
-    ).astype(int)
-
-    # Flag death periods
-    panel["death_in_period"] = (
-        panel["death_time"].notna() &
-        (panel["death_time"] > panel["period_start"]) &
-        (panel["death_time"] <= panel["period_end"])
     ).astype(int)
 
     # Mark CAUTI risk periods
@@ -430,28 +595,32 @@ def build_base_panel(catheterised):
     # Mark reinsertion risk periods
     panel["at_risk_reinsertion"] = (panel["catheter_state"] == "out").astype(int)
 
-    # Find each final period
-    episode_keys = ["stay_id", "inserted"]
-    last_row_index = panel.groupby(episode_keys)["period_end"].idxmax()
-    is_last_period = panel.index.isin(last_row_index)
-
     # Record observed episode endings
-    panel["episode_end_reason"] = pd.NA
-    panel.loc[
-        is_last_period & (panel["reinsertion_in_period"] == 1),
-        "episode_end_reason",
-    ] = "reinsertion"
-    panel.loc[
-        is_last_period &
-        (panel["episode_end_reason"].isna()) &
-        (panel["icu_end_in_period"] == 1),
-        "episode_end_reason",
-    ] = "icu_end"
+    panel["episode_end_reason"] = panel["_episode_end_reason"].where(is_last_period)
+
+    # Validate terminal-state construction before dropping source timestamps
+    terminal_count = panel[
+        ["reinsertion_in_period", "death_in_period", "icu_exit_alive_in_period"]
+    ].sum(axis=1)
+    if not terminal_count.eq(is_last_period.astype(int)).all():
+        raise ValueError("Each episode must have exactly one terminal event on its final row")
+    if panel["period_end"].gt(panel["episode_end_time"]).any():
+        raise ValueError("Panel contains follow-up after an episode terminal event")
+    final_end_matches = panel.loc[is_last_period, "period_end"].eq(
+        panel.loc[is_last_period, "episode_end_time"]
+    )
+    if not final_end_matches.all():
+        raise ValueError("Each final panel period must end at episode_end_time")
+    invalid_reasons = set(panel["episode_end_reason"].dropna()) - TERMINAL_REASONS
+    if invalid_reasons:
+        raise ValueError(f"Unexpected episode ending reasons: {sorted(invalid_reasons)}")
 
     # Encode demographic categories
     panel["sex_M"] = (panel["gender"] == "M").astype(int)
     panel["sex_missing"] = panel["gender"].isna().astype(int)
-    eth_dummies = pd.get_dummies(panel["ethnicity_group"], prefix="ethnicity")
+    eth_dummies = pd.get_dummies(
+        panel["ethnicity_group"], prefix="ethnicity", dtype=int
+    )
     panel = pd.concat([panel, eth_dummies], axis=1)
 
     # Define covariate lookbacks
@@ -461,7 +630,16 @@ def build_base_panel(catheterised):
     panel["row_id"] = np.arange(1, len(panel) + 1)
 
     # Drop temporary source fields
-    panel = panel.drop(columns=["cauti_time", "death_time", "gender", "ethnicity_group", "intime", "ICU_out"])
+    panel = panel.drop(columns=[
+        "_episode_end_reason",
+        "cauti_time",
+        "death_time",
+        "gender",
+        "ethnicity",
+        "ethnicity_group",
+        "intime",
+        "ICU_out",
+    ])
 
     # Place columns consistently
     ethnicity_cols = sorted([c for c in panel.columns if c.startswith("ethnicity_")])
@@ -472,6 +650,7 @@ def build_base_panel(catheterised):
         "inserted",
         "removed",
         "reinsertion_time",
+        "episode_end_time",
         "catheter_state",
         "episode_index",
         "period_start",
@@ -481,7 +660,7 @@ def build_base_panel(catheterised):
         "reinsertion_in_period",
         "cauti_in_period",
         "death_in_period",
-        "icu_end_in_period",
+        "icu_exit_alive_in_period",
         "episode_end_reason",
         "at_risk_cauti",
         "at_risk_reinsertion",
@@ -502,10 +681,12 @@ def create_episode_cohort_and_base_panel():
     # Define stage outputs
     catheter_episodes_file = DATA_DIR / "catheter_episodes.csv"
     base_panel_file = DATA_DIR / "base_panel.csv"
+    ethnicity_mapping_audit_file = DATA_DIR / "ethnicity_mapping_audit.csv"
 
     # Build the cohort and panel
     episodes = build_catheter_episodes()
     base_panel = build_base_panel(episodes)
+    ethnicity_mapping_audit = build_ethnicity_mapping_audit(episodes)
 
     # Select exported episode fields
     episode_export = episodes[
@@ -516,6 +697,8 @@ def create_episode_cohort_and_base_panel():
             "inserted",
             "removed",
             "reinsertion_time",
+            "episode_end_time",
+            "episode_end_reason",
             "ICU_in",
             "ICU_out",
             "death_time",
@@ -525,10 +708,13 @@ def create_episode_cohort_and_base_panel():
     # Save both datasets
     episode_export.to_csv(catheter_episodes_file, index=False)
     base_panel.to_csv(base_panel_file, index=False)
+    ethnicity_mapping_audit.to_csv(ethnicity_mapping_audit_file, index=False)
 
     # Report cohort sizes
     print("[SAVE]", catheter_episodes_file)
     print("[SAVE]", base_panel_file)
+    print("[SAVE]", ethnicity_mapping_audit_file)
+    print(ethnicity_mapping_audit.to_string(index=False))
     print("Episodes:", len(episodes))
     print("Stays:", episodes["stay_id"].nunique())
     print("Base panel rows:", len(base_panel))
@@ -539,14 +725,14 @@ def create_episode_cohort_and_base_panel():
 def build_chart_extraction_windows(episodes):
     # Select episode boundaries
     windows = episodes[
-        ["stay_id", "inserted", "reinsertion_time", "ICU_in", "ICU_out"]
+        ["stay_id", "inserted", "episode_end_time", "ICU_in"]
     ].copy()
 
     # Define extraction bounds
     windows["window_start"] = (windows["inserted"] - LOOKBACK_DURATION).clip(
         lower=windows["ICU_in"]
     )
-    windows["window_end"] = windows["reinsertion_time"].fillna(windows["ICU_out"])
+    windows["window_end"] = windows["episode_end_time"]
 
     # Remove invalid windows
     windows = windows.dropna(subset=["window_start", "window_end"]).copy()
@@ -590,7 +776,7 @@ def extract_chart_covariates():
     d_items_keep_file = CONFIG_DIR / "d_items_keep.csv"
 
     # Load episode timing
-    episode_cols = ["stay_id", "inserted", "reinsertion_time", "ICU_in", "ICU_out"]
+    episode_cols = ["stay_id", "inserted", "episode_end_time", "ICU_in"]
     episodes = pd.read_csv(
         catheter_episodes_file,
         usecols=episode_cols,
@@ -598,7 +784,7 @@ def extract_chart_covariates():
     )
 
     # Parse episode timestamps
-    for col in ["inserted", "reinsertion_time", "ICU_in", "ICU_out"]:
+    for col in ["inserted", "episode_end_time", "ICU_in"]:
         episodes[col] = pd.to_datetime(episodes[col])
 
     # Build target stays and windows
@@ -1133,6 +1319,25 @@ def detect_covariate_itemids(columns):
     return pd.DataFrame({"itemid": sorted(itemids)})
 
 
+def add_itemid_missing_indicators(df):
+    # Add one missingness indicator per final itemid-derived feature
+    chart_feature_cols = sorted(
+        col for col in df.columns
+        if col.startswith("itemid_") and not col.endswith("__missing")
+    )
+    missing_indicators = {
+        f"{col}__missing": df[col].isna().astype(int)
+        for col in chart_feature_cols
+        if f"{col}__missing" not in df.columns
+    }
+    if not missing_indicators:
+        return df
+    return pd.concat(
+        [df, pd.DataFrame(missing_indicators, index=df.index)],
+        axis=1,
+    ).copy()
+
+
 def build_modelling_panel():
     # Define stage files
     base_panel_file = DATA_DIR / "base_panel.csv"
@@ -1144,7 +1349,16 @@ def build_modelling_panel():
     df = pd.read_csv(base_panel_file, low_memory=False)
 
     # Parse panel timestamps
-    for col in ["inserted", "removed", "reinsertion_time", "period_start", "period_end", "cov_start", "cov_end"]:
+    for col in [
+        "inserted",
+        "removed",
+        "reinsertion_time",
+        "episode_end_time",
+        "period_start",
+        "period_end",
+        "cov_start",
+        "cov_end",
+    ]:
         df[col] = pd.to_datetime(df[col])
 
     # Add retained chart features
@@ -1152,6 +1366,8 @@ def build_modelling_panel():
         df,
         load_item_labels(),
     )
+
+    df = add_itemid_missing_indicators(df)
 
     # Remove aggregation helpers
     df = df.drop(columns=["cov_start", "cov_end", "row_id"])
@@ -1167,7 +1383,7 @@ def build_modelling_panel():
     df[chart_feature_cols] = df[chart_feature_cols].round(ROUND_DP)
 
     # Normalise event indicators
-    for col in [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT]:
+    for col in [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT_ALIVE]:
         df[col] = pd.to_numeric(df[col]).fillna(0).astype(int)
 
     # Label observed actions
@@ -1217,7 +1433,8 @@ def build_modelling_panel():
     print("Removals:", df["removed_in_period"].sum())
     print("Reinsertions:", df["reinsertion_in_period"].sum())
     print("CAUTI:", df["cauti_in_period"].sum())
-    print("ICU end rows:", df["icu_end_in_period"].sum())
+    print("Deaths:", df["death_in_period"].sum())
+    print("ICU exits alive:", df["icu_exit_alive_in_period"].sum())
     print(f"Rows: {len(df)}")
     print(f"Features: {len(feature_cols)}")
     print("Retained chart columns:", int(retention_log["decision"].eq("retain").sum()))

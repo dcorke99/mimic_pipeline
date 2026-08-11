@@ -4,8 +4,8 @@ $ErrorActionPreference = "Stop"
 $Python = ".venv\Scripts\python.exe"
 
 $Scripts = @(
-    "create_data_panel.py",
-    "fit_nuisance_models.py",
+    # "create_data_panel.py",
+    # "fit_nuisance_models.py",
     "build_policy_intervention_panels.py",
     "evaluate_gformula_policies.py",
     "evaluate_ipw_policies.py",

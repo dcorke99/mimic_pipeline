@@ -14,20 +14,20 @@ import policy_eval_common as pec
 # Paths and constants
 
 REPO_ROOT = Path(__file__).resolve().parent
+NUISANCE_MODEL_TYPE = "xgboost"
+NUISANCE_MODEL_DIR = (
+    REPO_ROOT / "artefacts" / "nuisance_models" / NUISANCE_MODEL_TYPE
+)
 
 POLICY_PANEL_PATH = (
     REPO_ROOT
-    / "artifacts"
+    / "artefacts"
     / "policy_interventions"
     / "policy_intervention_panel_long.csv"
 )
-SCORED_PANEL_PATH = (
-    REPO_ROOT / "artifacts" / "nuisance_models" / "scored_panel.csv"
-)
-OUTCOME_MODELS_PATH = (
-    REPO_ROOT / "artifacts" / "nuisance_models" / "outcome_models.pkl"
-)
-OUTDIR = REPO_ROOT / "artifacts" / "policy_eval" / "gformula"
+SCORED_PANEL_PATH = NUISANCE_MODEL_DIR / "scored_panel.csv"
+OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
+OUTDIR = REPO_ROOT / "artefacts" / "policy_eval" / "gformula"
 
 OUTPUT_PATHS = {
     "summary": OUTDIR / "gformula_policy_outcomes_summary.csv",
@@ -85,7 +85,7 @@ SCORED_COLS = [
     "cauti_in_period",
     "reinsertion_in_period",
     "death_in_period",
-    "icu_end_in_period",
+    "icu_exit_alive_in_period",
     "at_risk_cauti",
     "at_risk_reinsertion",
     "episode_end_reason",
@@ -231,8 +231,16 @@ def predict_fold_model(fold_model, features):
     # Predict probabilities from one fold model
     if fold_model["fallback"]:
         return np.full(len(features), float(fold_model["fallback_probability"]), dtype=float)
+
+    retained_feature_cols = list(fold_model["retained_feature_cols"])
+    missing_features = sorted(set(retained_feature_cols) - set(features.columns))
+    if missing_features:
+        raise ValueError(
+            "Rescoring data are missing features retained by the fitted fold model: "
+            f"{missing_features}"
+        )
     return fold_model["model"].predict_proba(
-        features.to_numpy(dtype=float)
+        features.loc[:, retained_feature_cols].to_numpy(dtype=float)
     )[:, 1]
 
 
@@ -762,6 +770,7 @@ def metadata_payload(
     # Build run metadata
     return {
         "estimator": ESTIMATOR_NAME,
+        "nuisance_model_type": NUISANCE_MODEL_TYPE,
         "prediction_mode": PREDICTION_MODE,
         "current_practice_comparator_type": "model_based_plugin_observed_regime",
         "input_paths": {
@@ -797,8 +806,8 @@ def metadata_payload(
             ),
         },
         "icu_exit_alive_definition": (
-            "max(icu_end_in_period == 1 and death_in_period != 1); death takes "
-            "precedence when death and ICU exit occur in the same interval"
+            "max(icu_exit_alive_in_period == 1); death and ICU exit alive are "
+            "mutually exclusive terminal events in the source panel"
         ),
         "rescoring": rescore_metadata,
         "methodological_limitations": [
@@ -823,6 +832,7 @@ def print_console_summary(
     print()
     print("--- G-FORMULA POLICY EVALUATION COMPLETE ---")
     print(f"Policy-intervention panel: {POLICY_PANEL_PATH}")
+    print(f"Nuisance model type: {NUISANCE_MODEL_TYPE}")
     print(f"Scored nuisance panel: {SCORED_PANEL_PATH}")
     print(f"Number of policies: {row_df['policy_name'].nunique():,}")
     print(f"Number of patients: {row_df['subject_id'].nunique():,}")

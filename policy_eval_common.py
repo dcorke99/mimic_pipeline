@@ -79,12 +79,19 @@ def add_period_duration_days(
 
 
 def add_observed_icu_exit_alive_period(df):
-    # Exclude deaths from the ICU-exit-alive outcome
+    # Validate and expose the mutually exclusive ICU-exit-alive outcome
     out = df.copy()
     death = pd.to_numeric(out["death_in_period"], errors="coerce").fillna(0)
-    icu_exit = pd.to_numeric(out["icu_end_in_period"], errors="coerce").fillna(0)
-    out["death_and_icu_exit_same_period"] = ((death.eq(1)) & (icu_exit.eq(1))).astype(int)
-    out["observed_icu_exit_alive_in_period"] = ((icu_exit.eq(1)) & death.ne(1)).astype(int)
+    icu_exit_alive = pd.to_numeric(
+        out["icu_exit_alive_in_period"],
+        errors="coerce",
+    ).fillna(0)
+    overlap = death.eq(1) & icu_exit_alive.eq(1)
+    if overlap.any():
+        raise ValueError(
+            "death_in_period and icu_exit_alive_in_period must be mutually exclusive"
+        )
+    out["observed_icu_exit_alive_in_period"] = icu_exit_alive.eq(1).astype(int)
     return out
 
 

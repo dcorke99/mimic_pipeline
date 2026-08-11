@@ -1,6 +1,6 @@
 # Ignore large data + pipeline outputs
 data/
-artifacts/
+artefacts/
 
 # Common large file formats
 *.csv

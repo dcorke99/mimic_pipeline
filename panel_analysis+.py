@@ -10,10 +10,10 @@ import matplotlib.pyplot as plt
 
 # Config
 DATA_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\modelling_panel.csv")
-RESULTS_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\panel_analysis")
+RESULTS_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artefacts\panel_analysis")
 COVARIATE_DICT_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\covariate_dictionary.csv")
 
-STEP1_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artifacts\step1")
+STEP1_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artefacts\step1")
 STEP1_TOP_MODEL_FEATURES_FILE = STEP1_DIR / "top_model_features.csv"
 STEP1_TOP_SHAP_FEATURES_FILE = STEP1_DIR / "top_shap_features.csv"
 
@@ -163,7 +163,7 @@ def build_risk_sets(df):
         (out[STATE_COL] == "out") &
         ~(
             (out[LAST_PERIOD_COL] == 1) &
-            (out[END_REASON_COL] == "icu_end") &
+            (out[END_REASON_COL].isin(["death", "icu_exit_alive"])) &
             (out[Y_REINS] == 0)
         )
     ).astype(int)
@@ -601,7 +601,9 @@ def main():
     df = df.copy()
     df[ID_COL] = df[ID_COL].astype(str).str.strip()
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
-    df[END_REASON_COL] = df[END_REASON_COL].astype(str).str.strip().str.lower()
+    df[END_REASON_COL] = (
+        df[END_REASON_COL].astype("string").str.strip().str.lower()
+    )
 
     # Detect the itemid covariates used in the analysis and load their saved labels
     cov_cols, _ = detect_covariate_cols(df.columns.tolist(), KEEP_STATS)

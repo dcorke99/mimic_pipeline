@@ -13,17 +13,19 @@ import policy_eval_common as pec
 # Paths and constants
 
 REPO_ROOT = Path(__file__).resolve().parent
+NUISANCE_MODEL_TYPE = "xgboost"
+NUISANCE_MODEL_DIR = (
+    REPO_ROOT / "artefacts" / "nuisance_models" / NUISANCE_MODEL_TYPE
+)
 
 POLICY_PANEL_PATH = (
     REPO_ROOT
-    / "artifacts"
+    / "artefacts"
     / "policy_interventions"
     / "policy_intervention_panel_long.csv"
 )
-SCORED_PANEL_PATH = (
-    REPO_ROOT / "artifacts" / "nuisance_models" / "scored_panel.csv"
-)
-OUTDIR = REPO_ROOT / "artifacts" / "policy_eval" / "ipw"
+SCORED_PANEL_PATH = NUISANCE_MODEL_DIR / "scored_panel.csv"
+OUTDIR = REPO_ROOT / "artefacts" / "policy_eval" / "ipw"
 
 OUTPUT_PATHS = {
     "summary": OUTDIR / "ipw_policy_outcomes_summary.csv",
@@ -68,7 +70,7 @@ SCORED_COLS = [
     "cauti_in_period",
     "reinsertion_in_period",
     "death_in_period",
-    "icu_end_in_period",
+    "icu_exit_alive_in_period",
     "at_risk_cauti",
     "at_risk_reinsertion",
     "episode_end_reason",
@@ -977,6 +979,7 @@ def metadata_payload(
     # Build run metadata
     return {
         "estimator": "sequential_ipw",
+        "nuisance_model_type": NUISANCE_MODEL_TYPE,
         "current_practice_comparator_type": "observed_weight_one",
         "clipping_bounds": {"clip_lower": CLIP_LOWER, "clip_upper": CLIP_UPPER},
         "input_paths": {
@@ -1012,8 +1015,8 @@ def metadata_payload(
             ),
         },
         "icu_exit_alive_definition": (
-            "max(icu_end_in_period == 1 and death_in_period != 1); death takes "
-            "precedence when death and ICU exit occur in the same interval"
+            "max(icu_exit_alive_in_period == 1); death and ICU exit alive are "
+            "mutually exclusive terminal events in the source panel"
         ),
         "overlap_flag_thresholds": {
             "low_adherence_threshold": pec.LOW_ADHERENCE_THRESHOLD,
@@ -1048,6 +1051,7 @@ def print_summary(
     print()
     print("--- IPW POLICY EVALUATION COMPLETE ---")
     print(f"Policy-intervention panel: {POLICY_PANEL_PATH}")
+    print(f"Nuisance model type: {NUISANCE_MODEL_TYPE}")
     print(f"Scored nuisance panel: {SCORED_PANEL_PATH}")
     print(f"Candidate policies: {n_policies:,}")
     print(f"Current-practice episodes: {len(current_practice_episode_df):,}")

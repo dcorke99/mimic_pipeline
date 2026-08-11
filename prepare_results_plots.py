@@ -17,8 +17,8 @@ import policy_eval_common as pec
 # Paths
 
 REPO_ROOT = Path(__file__).resolve().parent
-POLICY_EVAL_DIR = REPO_ROOT / "artifacts" / "policy_eval"
-OUTDIR = REPO_ROOT / "artifacts" / "results_plots"
+POLICY_EVAL_DIR = REPO_ROOT / "artefacts" / "policy_eval"
+OUTDIR = REPO_ROOT / "artefacts" / "results_plots"
 
 
 def load_outputs():

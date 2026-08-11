@@ -14,20 +14,20 @@ import policy_eval_common as pec
 # Paths and constants
 
 REPO_ROOT = Path(__file__).resolve().parent
+NUISANCE_MODEL_TYPE = "xgboost"
+NUISANCE_MODEL_DIR = (
+    REPO_ROOT / "artefacts" / "nuisance_models" / NUISANCE_MODEL_TYPE
+)
 
 POLICY_PANEL_PATH = (
     REPO_ROOT
-    / "artifacts"
+    / "artefacts"
     / "policy_interventions"
     / "policy_intervention_panel_long.csv"
 )
-SCORED_PANEL_PATH = (
-    REPO_ROOT / "artifacts" / "nuisance_models" / "scored_panel.csv"
-)
-OUTCOME_MODELS_PATH = (
-    REPO_ROOT / "artifacts" / "nuisance_models" / "outcome_models.pkl"
-)
-OUTDIR = REPO_ROOT / "artifacts" / "policy_eval" / "aipw"
+SCORED_PANEL_PATH = NUISANCE_MODEL_DIR / "scored_panel.csv"
+OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
+OUTDIR = REPO_ROOT / "artefacts" / "policy_eval" / "aipw"
 
 OUTPUT_PATHS = {
     "summary": OUTDIR / "aipw_policy_outcomes_summary.csv",
@@ -96,7 +96,7 @@ SCORED_COLS = [
     "cauti_in_period",
     "reinsertion_in_period",
     "death_in_period",
-    "icu_end_in_period",
+    "icu_exit_alive_in_period",
     "at_risk_cauti",
     "at_risk_reinsertion",
     "episode_end_reason",
@@ -149,7 +149,7 @@ OUTCOME_SPECS = {
         "plugin": "plugin_predicted_icu_exit_alive",
         "observed": "observed_icu_exit_alive",
         "mu": "mu_icu_exit_alive_under_policy",
-        "period_outcome": "icu_end_in_period",
+        "period_outcome": "icu_exit_alive_in_period",
         "summary_stub": "icu_exit_alive_risk",
     },
     "catheter_exposure_days": {
@@ -289,8 +289,16 @@ def predict_fold_model(fold_model, features):
     # Predict probabilities from one fold model
     if fold_model["fallback"]:
         return np.full(len(features), float(fold_model["fallback_probability"]), dtype=float)
+
+    retained_feature_cols = list(fold_model["retained_feature_cols"])
+    missing_features = sorted(set(retained_feature_cols) - set(features.columns))
+    if missing_features:
+        raise ValueError(
+            "Rescoring data are missing features retained by the fitted fold model: "
+            f"{missing_features}"
+        )
     return fold_model["model"].predict_proba(
-        features.to_numpy(dtype=float)
+        features.loc[:, retained_feature_cols].to_numpy(dtype=float)
     )[:, 1]
 
 
@@ -566,16 +574,9 @@ def product_components_by_episode(df, component_col):
 
 
 def add_observed_outcomes_to_rows(df):
-    # Exclude deaths from the ICU-exit-alive outcome
-    death = pd.to_numeric(
-        df["death_in_period"],
-        errors="coerce",
-    ).fillna(0).astype(int)
-    icu_exit = pd.to_numeric(
-        df["icu_end_in_period"],
-        errors="coerce",
-    ).fillna(0).astype(int)
-    df["_icu_exit_alive_period"] = ((icu_exit == 1) & (death == 0)).astype(int)
+    # Validate and copy the mutually exclusive ICU-exit-alive outcome
+    df = pec.add_observed_icu_exit_alive_period(df)
+    df["_icu_exit_alive_period"] = df["observed_icu_exit_alive_in_period"]
     return df
 
 
@@ -607,7 +608,7 @@ def build_policy_episode_scores(df):
         errors="coerce",
     ).fillna(0)
     icu_period = pd.to_numeric(
-        df["icu_end_in_period"],
+        df["icu_exit_alive_in_period"],
         errors="coerce",
     ).fillna(0)
     terminal_period = death_period.eq(1) | icu_period.eq(1)
@@ -1468,6 +1469,7 @@ def metadata_payload(
     )
     return {
         "estimator": ESTIMATOR_NAME,
+        "nuisance_model_type": NUISANCE_MODEL_TYPE,
         "residual_normalisation": RESIDUAL_NORMALISATION,
         "current_practice_comparator_type": "aipw_observed_regime",
         "clipping_bounds": {"clip_lower": CLIP_LOWER, "clip_upper": CLIP_UPPER},
@@ -1519,8 +1521,8 @@ def metadata_payload(
             ),
         },
         "icu_exit_alive_definition": (
-            "max(icu_end_in_period == 1 and death_in_period != 1); death takes "
-            "precedence when death and ICU exit occur in the same interval"
+            "max(icu_exit_alive_in_period == 1); death and ICU exit alive are "
+            "mutually exclusive terminal events in the source panel"
         ),
         "overlap_flag_thresholds": {
             "low_adherence_threshold": pec.LOW_ADHERENCE_THRESHOLD,
@@ -1549,6 +1551,7 @@ def print_console_summary(summary_df, row_df, episode_df, output_paths):
     print()
     print("--- AIPW POLICY EVALUATION COMPLETE ---")
     print(f"Policy-intervention panel: {POLICY_PANEL_PATH}")
+    print(f"Nuisance model type: {NUISANCE_MODEL_TYPE}")
     print(f"Scored nuisance panel: {SCORED_PANEL_PATH}")
     print(f"Number of policies: {row_df['policy_name'].nunique():,}")
     print(f"Number of patients: {row_df['subject_id'].nunique():,}")

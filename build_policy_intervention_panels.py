@@ -15,7 +15,7 @@ import policy_eval_common as pec
 REPO_ROOT = Path(__file__).resolve().parent
 
 INPUT_PATH = REPO_ROOT / "data" / "modelling_panel.csv"
-OUTDIR = REPO_ROOT / "artifacts" / "policy_interventions"
+OUTDIR = REPO_ROOT / "artefacts" / "policy_interventions"
 POLICY_DAYS = [1, 2, 3, 4, 5]
 LONG_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_long.csv"
 QA_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_qa.csv"

@@ -3,16 +3,21 @@ from pathlib import Path
 import re
 
 import joblib
+from lightgbm import LGBMClassifier
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
     roc_auc_score,
 )
 from sklearn.model_selection import GroupKFold
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 import policy_eval_common as pec
@@ -21,17 +26,46 @@ import policy_eval_common as pec
 # Configuration
 
 SEED = 42
-MODEL_TYPE = "xgb"
+MODEL_TYPES = (
+    "logistic_regression",
+    "random_forest",
+    "xgboost",
+    "lightgbm",
+    "mlp",
+)
+MODEL_TYPE = "xgboost"
+MODEL_ALIASES = {
+    "logistic": "logistic_regression",
+    "lr": "logistic_regression",
+    "logistic_regression": "logistic_regression",
+    "rf": "random_forest",
+    "random_forest": "random_forest",
+    "xgb": "xgboost",
+    "xgboost": "xgboost",
+    "lgbm": "lightgbm",
+    "lightgbm": "lightgbm",
+    "mlp": "mlp",
+}
 
 REPO_ROOT = Path(__file__).resolve().parent
 INDIR = REPO_ROOT / "data"
-OUTDIR = REPO_ROOT / "artifacts" / "nuisance_models"
+NUISANCE_ROOT = REPO_ROOT / "artefacts" / "nuisance_models"
+MODEL_OUTPUT_NAMES = {
+    model_type: model_type for model_type in MODEL_TYPES
+}
+MODEL_OUTPUT_NAME = MODEL_OUTPUT_NAMES.get(
+    MODEL_TYPE,
+    re.sub(r"[^a-z0-9]+", "_", MODEL_TYPE.lower()).strip("_") or "model",
+)
+OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 
 INFILE = INDIR / "modelling_panel.csv"
 COVARIATE_DICT_FILE = INDIR / "covariate_dictionary.csv"
 FINAL_PANEL = OUTDIR / "scored_panel.csv"
 PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
 CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
+MODEL_COMPARISON_FILE = NUISANCE_ROOT / "nuisance_model_comparison.csv"
+CONSTANT_FEATURES_FILE = OUTDIR / "constant_features_by_fold.csv"
 
 ID_COL = "subject_id"
 TIME_COL = "episode_index"
@@ -42,23 +76,22 @@ ACTION_COL = "removed_in_period"
 Y_CAUTI = "cauti_in_period"
 Y_REINS = "reinsertion_in_period"
 Y_DEATH = "death_in_period"
-Y_ICU_EXIT = "icu_end_in_period"
+Y_ICU_EXIT_ALIVE = "icu_exit_alive_in_period"
 OBSERVED_ACTION_COL = "observed_action"
 END_REASON_COL = "episode_end_reason"
 AT_RISK_CAUTI = "at_risk_cauti"
 AT_RISK_REINS = "at_risk_reinsertion"
 
-Y_ICU_EXIT_ALIVE = "_target_icu_exit_alive"
 Y_NO_EVENT_IN = "_target_no_event_in"
 Y_NO_EVENT_OUT = "_target_no_event_out"
 
 NO_EVENT_DEFINITION = {
     "in": (
-        "No CAUTI, death, or ICU exit in the next outcome window; this does not "
+        "No CAUTI, death, or ICU exit alive in the next outcome window; this does not "
         "imply continued catheter-in state when removed_in_period=1."
     ),
     "out": (
-        "No reinsertion, CAUTI, death, or ICU exit in the next outcome window."
+        "No reinsertion, CAUTI, death, or ICU exit alive in the next outcome window."
     ),
 }
 
@@ -68,8 +101,96 @@ TOP_FEATURES_TO_SAVE = 15
 CALIBRATION_BINS = 10
 N_CROSSFIT_FOLDS = 5
 CROSSFIT_FOLD_COL = "_crossfit_fold"
+LEARNING_CURVE_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
 FALLBACK_PRIOR_EVENTS = 1.0
 FALLBACK_PRIOR_NON_EVENTS = 1.0
+
+LEARNER_CONFIGURATIONS = {
+    "logistic_regression": {
+        "max_iter": 1000,
+        "random_state": SEED,
+    },
+    "random_forest": {
+        "n_estimators": 200,
+        "max_depth": None,
+        "min_samples_leaf": 5,
+        "n_jobs": 1,
+        "random_state": SEED,
+    },
+    "xgboost": {
+        "objective": "binary:logistic",
+        "eval_metric": "auc",
+        "n_estimators": 300,
+        "max_depth": 4,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "tree_method": "hist",
+        "device": "cuda",
+        "random_state": SEED,
+        "n_jobs": 1,
+    },
+    "lightgbm": {
+        "objective": "binary",
+        "n_estimators": 300,
+        "num_leaves": 31,
+        "max_depth": -1,
+        "learning_rate": 0.05,
+        "subsample": 0.8,
+        "subsample_freq": 1,
+        "colsample_bytree": 0.8,
+        "deterministic": True,
+        "force_col_wise": True,
+        "verbosity": -1,
+        "random_state": SEED,
+        "n_jobs": 1,
+    },
+    "mlp": {
+        "hidden_layer_sizes": (100,),
+        "activation": "relu",
+        "solver": "adam",
+        "alpha": 0.0001,
+        "batch_size": "auto",
+        "learning_rate_init": 0.001,
+        "max_iter": 200,
+        "shuffle": True,
+        "early_stopping": False,
+        "random_state": SEED,
+    },
+}
+
+LEARNER_PREPROCESSING = {
+    "logistic_regression": {
+        "preprocessing_type": "median_imputation_and_standardisation",
+        "imputation_used": True,
+        "scaling_used": True,
+        "native_missing_handling": False,
+    },
+    "random_forest": {
+        "preprocessing_type": "median_imputation",
+        "imputation_used": True,
+        "scaling_used": False,
+        "native_missing_handling": False,
+    },
+    "xgboost": {
+        "preprocessing_type": "native_missing_values",
+        "imputation_used": False,
+        "scaling_used": False,
+        "native_missing_handling": True,
+    },
+    "lightgbm": {
+        "preprocessing_type": "native_missing_values",
+        "imputation_used": False,
+        "scaling_used": False,
+        "native_missing_handling": True,
+    },
+    "mlp": {
+        "preprocessing_type": "median_imputation_and_standardisation",
+        "imputation_used": True,
+        "scaling_used": True,
+        "native_missing_handling": False,
+    },
+}
 
 PROPENSITY_SCORE_COL = "p_remove_obs"
 KEEP_PROPENSITY_SCORE_COL = "p_keep_obs"
@@ -109,6 +230,44 @@ ALL_SCORE_COLS = [
 # Support functions
 
 
+def normalise_model_type(model_type):
+    # Resolve supported learner aliases to their canonical names
+    key = re.sub(r"[^a-z0-9]+", "_", str(model_type).lower()).strip("_")
+    if key not in MODEL_ALIASES:
+        raise ValueError(
+            f"Unknown MODEL_TYPE: {model_type}. Expected one of {MODEL_TYPES}"
+        )
+    return MODEL_ALIASES[key]
+
+
+def learner_provenance():
+    # Describe the active learner and its fold-fitted preprocessing
+    return {
+        "model_type": MODEL_TYPE,
+        "model_output_name": MODEL_OUTPUT_NAME,
+        **LEARNER_PREPROCESSING[MODEL_TYPE],
+        "random_seed": SEED,
+        "learner_configuration": LEARNER_CONFIGURATIONS[MODEL_TYPE].copy(),
+    }
+
+
+def configure_model_run(model_type):
+    # Set the active learner and its model-specific output paths
+    global MODEL_TYPE, MODEL_OUTPUT_NAME, OUTDIR
+    global FINAL_PANEL, PERFORMANCE_METRICS_FILE, CROSSFIT_ROW_ASSIGNMENTS_FILE
+    global CONSTANT_FEATURES_FILE
+    MODEL_TYPE = normalise_model_type(model_type)
+    MODEL_OUTPUT_NAME = MODEL_OUTPUT_NAMES.get(
+        MODEL_TYPE,
+        re.sub(r"[^a-z0-9]+", "_", MODEL_TYPE.lower()).strip("_") or "model",
+    )
+    OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
+    FINAL_PANEL = OUTDIR / "scored_panel.csv"
+    PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
+    CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
+    CONSTANT_FEATURES_FILE = OUTDIR / "constant_features_by_fold.csv"
+
+
 def binary_values(series):
     # Convert values
     return pd.to_numeric(series, errors="coerce").fillna(0).astype(int).clip(0, 1)
@@ -123,7 +282,9 @@ def load_panel():
 
     df[ID_COL] = df[ID_COL].astype(str).str.strip()
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
-    df[END_REASON_COL] = df[END_REASON_COL].astype(str).str.strip().str.lower()
+    df[END_REASON_COL] = (
+        df[END_REASON_COL].astype("string").str.strip().str.lower()
+    )
 
     unknown_states = sorted(set(df[STATE_COL].dropna()) - {"in", "out"})
     if unknown_states:
@@ -135,7 +296,7 @@ def load_panel():
         Y_CAUTI,
         Y_REINS,
         Y_DEATH,
-        Y_ICU_EXIT,
+        Y_ICU_EXIT_ALIVE,
         AT_RISK_CAUTI,
         AT_RISK_REINS,
     ]:
@@ -210,33 +371,72 @@ def fit_binary_model(features, target, model_name):
             f"{int(target.iloc[0])}"
         )
 
-    pipe = Pipeline([
-        ("imputer", SimpleImputer(strategy="median", add_indicator=False)),
-        ("xgb", XGBClassifier(
-            objective="binary:logistic",
-            eval_metric="auc",
-            n_estimators=300,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            tree_method="hist",
-            device="cuda",
-            random_state=SEED,
-            n_jobs=1,
-        )),
-    ])
+    learner_configuration = LEARNER_CONFIGURATIONS[MODEL_TYPE]
+    if MODEL_TYPE == "logistic_regression":
+        estimator = LogisticRegression(**learner_configuration)
+    elif MODEL_TYPE == "random_forest":
+        estimator = RandomForestClassifier(**learner_configuration)
+    elif MODEL_TYPE == "xgboost":
+        estimator = XGBClassifier(**learner_configuration)
+    elif MODEL_TYPE == "lightgbm":
+        estimator = LGBMClassifier(**learner_configuration)
+    elif MODEL_TYPE == "mlp":
+        estimator = MLPClassifier(**learner_configuration)
+    else:
+        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
+
+    steps = []
+    if LEARNER_PREPROCESSING[MODEL_TYPE]["imputation_used"]:
+        steps.append(("imputer", SimpleImputer(strategy="median", add_indicator=False)))
+    if LEARNER_PREPROCESSING[MODEL_TYPE]["scaling_used"]:
+        steps.append(("standardiser", StandardScaler()))
+    steps.append((MODEL_TYPE, estimator))
+    pipe = Pipeline(steps)
     pipe.fit(features.to_numpy(dtype=float), target.to_numpy(dtype=int))
     # Training uses CUDA, but downstream predictions use NumPy arrays in CPU
     # memory. Match the fitted booster to those arrays to avoid XGBoost's
     # cross-device DMatrix fallback during prediction.
-    pipe.named_steps["xgb"].set_params(device="cpu")
+    if MODEL_TYPE == "xgboost":
+        pipe.named_steps["xgboost"].set_params(device="cpu")
     return pipe
 
 
 def predict_binary_proba(pipe, features):
     # Predict binary probabilities
-    return pipe.predict_proba(features.to_numpy(dtype=float))[:, 1]
+    feature_values = features.to_numpy(dtype=float)
+    if MODEL_TYPE == "lightgbm":
+        feature_values = pd.DataFrame(
+            feature_values,
+            columns=pipe.named_steps["lightgbm"].feature_names_in_,
+        )
+    return pipe.predict_proba(feature_values)[:, 1]
+
+
+def split_constant_features(features):
+    # Identify unusable features from training rows only
+    retained_feature_cols = []
+    constant_features = []
+    for feature in features.columns:
+        non_missing = features[feature].dropna()
+        if non_missing.empty:
+            reason = "all_missing"
+        elif non_missing.nunique(dropna=True) == 1:
+            value = non_missing.iloc[0]
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                numeric_value = np.nan
+            if numeric_value == 0:
+                reason = "constant_zero"
+            elif numeric_value == 1:
+                reason = "constant_one"
+            else:
+                reason = "single_unique_value"
+        else:
+            retained_feature_cols.append(feature)
+            continue
+        constant_features.append({"feature": feature, "reason": reason})
+    return retained_feature_cols, constant_features
 
 
 def fit_crossfit_fold_model(
@@ -246,19 +446,28 @@ def fit_crossfit_fold_model(
     fold,
 ):
     # Fit crossfit fold model
-    if features.empty:
+    if len(features) == 0:
         raise ValueError(f"Cannot fit {model_name} fold {fold}: training risk set is empty")
     # Convert values
     target = binary_values(target)
     events = int(target.sum())
     non_events = int(len(target) - events)
+    retained_feature_cols, constant_features = split_constant_features(features)
     fold_metadata = {
         "fold": int(fold),
         "training_n": int(len(target)),
         "training_events": events,
         "training_non_events": non_events,
+        "candidate_feature_cols": list(features.columns),
+        "retained_feature_cols": retained_feature_cols,
+        "constant_features": constant_features,
     }
+    fallback_reason = None
     if target.nunique() < 2:
+        fallback_reason = "single_target_class"
+    elif not retained_feature_cols:
+        fallback_reason = "no_usable_features"
+    if fallback_reason is not None:
         # Beta(1, 1) / Laplace smoothing avoids exact zero or one while using
         # only this fold's training rows. Held-out outcomes are never used
         fallback_probability = float(
@@ -278,6 +487,7 @@ def fit_crossfit_fold_model(
             **fold_metadata,
             "model": None,
             "fallback": True,
+            "fallback_reason": fallback_reason,
             "fallback_probability": fallback_probability,
             "fallback_probability_source": "fold_training_rows_only",
             "fallback_smoothing": "beta_binomial",
@@ -286,11 +496,16 @@ def fit_crossfit_fold_model(
         }
 
     # Fit binary model
-    model = fit_binary_model(features, target, f"{model_name}_fold_{fold}")
+    model = fit_binary_model(
+        features.loc[:, retained_feature_cols],
+        target,
+        f"{model_name}_fold_{fold}",
+    )
     return {
         **fold_metadata,
         "model": model,
         "fallback": False,
+        "fallback_reason": None,
         "fallback_probability": None,
         "fallback_probability_source": None,
         "fallback_smoothing": None,
@@ -308,26 +523,44 @@ def predict_crossfit_fold(fold_model, features):
             dtype=float,
         )
     # Predict binary probabilities
-    return predict_binary_proba(fold_model["model"], features)
+    retained_feature_cols = fold_model["retained_feature_cols"]
+    missing_features = set(retained_feature_cols) - set(features.columns)
+    if missing_features:
+        raise ValueError(
+            f"Held-out data are missing retained features: {sorted(missing_features)}"
+        )
+    return predict_binary_proba(
+        fold_model["model"],
+        features.loc[:, retained_feature_cols],
+    )
 
 
 def feature_importance_series(pipe, feature_cols):
     # Build importance series
-    estimator = pipe.named_steps["xgb"]
+    estimator = pipe.named_steps[MODEL_TYPE]
+    if hasattr(estimator, "coef_"):
+        values = np.abs(estimator.coef_[0])
+    elif hasattr(estimator, "feature_importances_"):
+        values = estimator.feature_importances_
+    else:
+        return pd.Series(dtype=float)
     return pd.Series(
-        estimator.feature_importances_,
+        values,
         index=list(feature_cols),
     ).sort_values(ascending=False)
 
 
-def mean_feature_importance_series(fold_models, feature_cols):
+def mean_feature_importance_series(fold_models):
     # Calculate feature importance series
     # Build importance series
     importances = [
-        feature_importance_series(fold_model["model"], feature_cols)
+        feature_importance_series(
+            fold_model["model"], fold_model["retained_feature_cols"]
+        )
         for fold_model in fold_models
         if not fold_model["fallback"] and fold_model["model"] is not None
     ]
+    importances = [importance for importance in importances if not importance.empty]
     if not importances:
         return pd.Series(dtype=float)
     return pd.concat(importances, axis=1).mean(axis=1).sort_values(ascending=False)
@@ -345,12 +578,60 @@ def outcome_fallback_counts(outcome_models):
     return counts
 
 
+def constant_features_by_fold(propensity_fold_models, in_models, out_models):
+    # Build the training-fold-only constant-feature audit
+    columns = [
+        "model_type",
+        "model_group",
+        "outcome",
+        "risk_set",
+        "fold",
+        "feature",
+        "reason",
+    ]
+    rows = []
+
+    def add_rows(model_group, outcome, risk_set, fold_models):
+        for fold_model in fold_models:
+            for constant_feature in fold_model["constant_features"]:
+                rows.append({
+                    "model_type": MODEL_TYPE,
+                    "model_group": model_group,
+                    "outcome": outcome,
+                    "risk_set": risk_set,
+                    "fold": fold_model["fold"],
+                    **constant_feature,
+                })
+
+    add_rows("propensity", "removal", "all IN rows", propensity_fold_models)
+    for outcome, payload in in_models.items():
+        add_rows("in_outcome", outcome, payload["risk_set"], payload["fold_models"])
+    for outcome, payload in out_models.items():
+        add_rows("out_outcome", outcome, payload["risk_set"], payload["fold_models"])
+    return pd.DataFrame(rows, columns=columns)
+
+
 def top_series_df(model_name, values, top_n):
     # Build series data frame
+    if values.empty:
+        return pd.DataFrame([{
+            "model": model_name,
+            "rank": pd.NA,
+            "feature": pd.NA,
+            "model_importance": np.nan,
+            "importance_available": False,
+            "importance_reason": (
+                "native_feature_importance_unavailable"
+                if MODEL_TYPE == "mlp"
+                else "no_fitted_fold_importance_available"
+            ),
+        }])
     top_df = values.head(top_n).reset_index()
     top_df.columns = ["feature", "model_importance"]
     top_df.insert(0, "rank", np.arange(1, len(top_df) + 1))
     top_df.insert(0, "model", model_name)
+    top_df["importance_available"] = True
+    top_df["importance_reason"] = pd.NA
     return top_df
 
 
@@ -413,6 +694,29 @@ def scalar_binary_metrics(df, outcome_col, pred_col):
         if n
         else np.nan
     )
+    calibration_intercept = np.nan
+    calibration_slope = np.nan
+    if has_both_classes:
+        clipped_predictions = np.clip(
+            eval_df[pred_col].to_numpy(dtype=float), 1e-6, 1.0 - 1e-6
+        )
+        prediction_logit = np.log(clipped_predictions / (1.0 - clipped_predictions))
+        if not np.isclose(np.ptp(prediction_logit), 0.0, atol=1e-12, rtol=0.0):
+            try:
+                calibration_model = LogisticRegression(
+                    C=np.inf,
+                    solver="lbfgs",
+                    max_iter=1000,
+                )
+                calibration_model.fit(
+                    prediction_logit.reshape(-1, 1),
+                    eval_df[outcome_col],
+                )
+                calibration_intercept = float(calibration_model.intercept_[0])
+                calibration_slope = float(calibration_model.coef_[0, 0])
+            except (TypeError, ValueError):
+                calibration_intercept = np.nan
+                calibration_slope = np.nan
     return {
         "n": n,
         "events": events,
@@ -420,6 +724,8 @@ def scalar_binary_metrics(df, outcome_col, pred_col):
         "auc": auc,
         "average_precision": average_precision,
         "brier": brier,
+        "calibration_intercept": calibration_intercept,
+        "calibration_slope": calibration_slope,
     }
 
 
@@ -469,24 +775,19 @@ def prepare_outcome_targets(df):
         "out",
         np.where(df[ACTION_COL].eq(1), "remove", "keep"),
     )
-    # ICU exit alive excludes deaths occurring in the same interval
-    df[Y_ICU_EXIT_ALIVE] = (
-        df[Y_ICU_EXIT].eq(1) & df[Y_DEATH].eq(0)
-    ).astype(int)
-
     # These are interval outcomes, not transition-state labels. In particular,
     # IN no_event under removed_in_period=1 does not mean the catheter stayed IN
     # Removal is deliberately absent because it is the action
     df[Y_NO_EVENT_IN] = (
         df[Y_CAUTI].eq(0)
         & df[Y_DEATH].eq(0)
-        & df[Y_ICU_EXIT].eq(0)
+        & df[Y_ICU_EXIT_ALIVE].eq(0)
     ).astype(int)
     df[Y_NO_EVENT_OUT] = (
         df[Y_REINS].eq(0)
         & df[Y_CAUTI].eq(0)
         & df[Y_DEATH].eq(0)
-        & df[Y_ICU_EXIT].eq(0)
+        & df[Y_ICU_EXIT_ALIVE].eq(0)
     ).astype(int)
     return df
 
@@ -613,6 +914,9 @@ def labelled_calibration(eval_df, target_col, pred_col, model_group, outcome, ri
 def propensity_summary_rows(df, eligible_mask, feature_cols, summary):
     # Build propensity summary rows
     eligible_patients = df.loc[eligible_mask, ID_COL].nunique()
+    p_remove = pd.to_numeric(
+        df.loc[eligible_mask, PROPENSITY_SCORE_COL], errors="coerce"
+    ).dropna()
     return pd.DataFrame([
         {"metric": "model_type", "value": MODEL_TYPE},
         {"metric": "evaluation", "value": "grouped_cross_fit_oof"},
@@ -630,6 +934,19 @@ def propensity_summary_rows(df, eligible_mask, feature_cols, summary):
         {"metric": "oof_auc", "value": summary["auc"]},
         {"metric": "oof_average_precision", "value": summary["average_precision"]},
         {"metric": "oof_brier", "value": summary["brier"]},
+        {"metric": "oof_calibration_intercept", "value": summary["calibration_intercept"]},
+        {"metric": "oof_calibration_slope", "value": summary["calibration_slope"]},
+        {"metric": "p_remove_min", "value": p_remove.min()},
+        {"metric": "p_remove_p01", "value": p_remove.quantile(0.01)},
+        {"metric": "p_remove_p05", "value": p_remove.quantile(0.05)},
+        {"metric": "p_remove_p50", "value": p_remove.quantile(0.50)},
+        {"metric": "p_remove_p95", "value": p_remove.quantile(0.95)},
+        {"metric": "p_remove_p99", "value": p_remove.quantile(0.99)},
+        {"metric": "p_remove_max", "value": p_remove.max()},
+        {"metric": "pct_p_remove_below_0_01", "value": 100.0 * p_remove.lt(0.01).mean()},
+        {"metric": "pct_p_remove_below_0_05", "value": 100.0 * p_remove.lt(0.05).mean()},
+        {"metric": "pct_p_remove_above_0_95", "value": 100.0 * p_remove.gt(0.95).mean()},
+        {"metric": "pct_p_remove_above_0_99", "value": 100.0 * p_remove.gt(0.99).mean()},
     ])
 
 
@@ -653,6 +970,8 @@ def performance_metrics_rows(propensity_summary, in_summary, out_summary):
         "auc",
         "average_precision",
         "brier",
+        "calibration_intercept",
+        "calibration_slope",
         "risk_set_auc",
         "risk_set_brier",
     ]
@@ -667,6 +986,438 @@ def performance_metrics_rows(propensity_summary, in_summary, out_summary):
                     "metric": metric,
                     "value": getattr(row, metric),
                 })
+    return pd.DataFrame(rows)
+
+
+def fold_performance_metrics(df):
+    # Build held-out performance metrics for each cross-fit fold
+    rows = []
+
+    def add_rows(model_group, outcome, risk_set, eval_df, target_col, pred_col):
+        for fold in range(N_CROSSFIT_FOLDS):
+            fold_df = eval_df.loc[eval_df[CROSSFIT_FOLD_COL].eq(fold)]
+            rows.append({
+                "model_group": model_group,
+                "model_type": MODEL_TYPE,
+                "outcome": outcome,
+                "risk_set": risk_set,
+                "fold": fold,
+                **scalar_binary_metrics(fold_df, target_col, pred_col),
+            })
+
+    propensity_mask = df[STATE_COL].eq("in")
+    add_rows(
+        "propensity",
+        "removal",
+        "all IN rows",
+        df.loc[propensity_mask],
+        ACTION_COL,
+        PROPENSITY_SCORE_COL,
+    )
+    for outcome, target_col in IN_OUTCOMES.items():
+        risk_mask = outcome_risk_mask(df, "in", outcome)
+        keep_col = f"p_{outcome}_if_keep"
+        remove_col = f"p_{outcome}_if_remove"
+        pred_col = f"_p_{outcome}_observed_in"
+        eval_df = df.loc[
+            risk_mask,
+            [CROSSFIT_FOLD_COL, target_col, ACTION_COL, keep_col, remove_col],
+        ].copy()
+        eval_df[pred_col] = np.where(
+            eval_df[ACTION_COL].eq(1), eval_df[remove_col], eval_df[keep_col]
+        )
+        risk_set = "IN and at_risk_cauti == 1" if outcome == "cauti" else "all IN rows"
+        add_rows("in_outcome", outcome, risk_set, eval_df, target_col, pred_col)
+
+    for outcome, target_col in OUT_OUTCOMES.items():
+        risk_mask = outcome_risk_mask(df, "out", outcome)
+        pred_col = f"p_{outcome}_if_out"
+        if outcome == "cauti":
+            risk_set = "OUT and at_risk_cauti == 1 (48-hour attribution window)"
+        elif outcome == "reinsertion":
+            risk_set = "OUT and at_risk_reinsertion == 1"
+        else:
+            risk_set = "all OUT rows"
+        add_rows(
+            "out_outcome",
+            outcome,
+            risk_set,
+            df.loc[risk_mask],
+            target_col,
+            pred_col,
+        )
+    return pd.DataFrame(rows)
+
+
+def nuisance_subgroup_diagnostics(df):
+    # Build subgroup performance and calibration from production OOF predictions
+    performance_rows = []
+    calibration_tables = []
+
+    def add_task(
+        model_group,
+        outcome,
+        risk_set,
+        risk_mask,
+        target_col,
+        prediction,
+        period_subgroup,
+    ):
+        columns = [ID_COL, target_col, "age", PERIODS_COL]
+        if "sex_M" in df.columns:
+            columns.append("sex_M")
+        eval_df = df.loc[risk_mask, columns].copy()
+        pred_col = "_subgroup_oof_prediction"
+        eval_df[pred_col] = prediction.loc[risk_mask]
+
+        subgroups = []
+        if "sex_M" in eval_df.columns:
+            sex = pd.to_numeric(eval_df["sex_M"], errors="coerce")
+            sex_levels = pd.Series(
+                np.select(
+                    [sex.eq(1), sex.eq(0)],
+                    ["Male", "Female"],
+                    default="Unknown",
+                ),
+                index=eval_df.index,
+            )
+            subgroups.append(("sex", sex_levels, ["Male", "Female", "Unknown"]))
+
+        age = pd.to_numeric(eval_df["age"], errors="coerce")
+        age_levels = pd.Series(
+            np.select(
+                [
+                    age.lt(50),
+                    age.ge(50) & age.lt(65),
+                    age.ge(65) & age.lt(80),
+                    age.ge(80),
+                ],
+                ["<50", "50-64", "65-79", "80+"],
+                default="Missing",
+            ),
+            index=eval_df.index,
+        )
+        subgroups.append(
+            ("age_band", age_levels, ["<50", "50-64", "65-79", "80+", "Missing"])
+        )
+
+        period = pd.to_numeric(eval_df[PERIODS_COL], errors="coerce")
+        period_levels = pd.Series(
+            np.select(
+                [
+                    period.eq(0),
+                    period.eq(1),
+                    period.eq(2),
+                    period.eq(3),
+                    period.eq(4),
+                    period.ge(5),
+                    period.isna(),
+                ],
+                ["0", "1", "2", "3", "4", "5+", "Missing"],
+                default="Unknown",
+            ),
+            index=eval_df.index,
+        )
+        subgroups.append(
+            (
+                period_subgroup,
+                period_levels,
+                ["0", "1", "2", "3", "4", "5+", "Missing", "Unknown"],
+            )
+        )
+
+        for subgroup_variable, levels, level_order in subgroups:
+            for subgroup_level in level_order:
+                subgroup_df = eval_df.loc[levels.eq(subgroup_level)]
+                if subgroup_df.empty:
+                    continue
+                metrics = scalar_binary_metrics(subgroup_df, target_col, pred_col)
+                performance_rows.append({
+                    "model_group": model_group,
+                    "model_type": MODEL_TYPE,
+                    "outcome": outcome,
+                    "risk_set": risk_set,
+                    "subgroup_variable": subgroup_variable,
+                    "subgroup_level": subgroup_level,
+                    "n": metrics["n"],
+                    "patients": int(subgroup_df[ID_COL].nunique()),
+                    "events": metrics["events"],
+                    "prevalence": metrics["prevalence"],
+                    "auc": metrics["auc"],
+                    "average_precision": metrics["average_precision"],
+                    "brier": metrics["brier"],
+                    "calibration_intercept": metrics["calibration_intercept"],
+                    "calibration_slope": metrics["calibration_slope"],
+                })
+                table = calibration_table(
+                    subgroup_df,
+                    target_col,
+                    pred_col,
+                    bins=CALIBRATION_BINS,
+                )
+                metadata = {
+                    "model_group": model_group,
+                    "model_type": MODEL_TYPE,
+                    "outcome": outcome,
+                    "risk_set": risk_set,
+                    "subgroup_variable": subgroup_variable,
+                    "subgroup_level": subgroup_level,
+                }
+                for column, value in reversed(list(metadata.items())):
+                    table.insert(0, column, value)
+                calibration_tables.append(table)
+
+    propensity_mask = df[STATE_COL].eq("in")
+    add_task(
+        "propensity",
+        "removal",
+        "all IN rows",
+        propensity_mask,
+        ACTION_COL,
+        df[PROPENSITY_SCORE_COL],
+        "catheter_duration_period",
+    )
+    for outcome, target_col in IN_OUTCOMES.items():
+        risk_mask = outcome_risk_mask(df, "in", outcome)
+        factual_prediction = pd.Series(
+            np.where(
+                df[ACTION_COL].eq(1),
+                df[f"p_{outcome}_if_remove"],
+                df[f"p_{outcome}_if_keep"],
+            ),
+            index=df.index,
+        )
+        risk_set = "IN and at_risk_cauti == 1" if outcome == "cauti" else "all IN rows"
+        add_task(
+            "in_outcome",
+            outcome,
+            risk_set,
+            risk_mask,
+            target_col,
+            factual_prediction,
+            "catheter_duration_period",
+        )
+
+    for outcome, target_col in OUT_OUTCOMES.items():
+        risk_mask = outcome_risk_mask(df, "out", outcome)
+        if outcome == "cauti":
+            risk_set = "OUT and at_risk_cauti == 1 (48-hour attribution window)"
+        elif outcome == "reinsertion":
+            risk_set = "OUT and at_risk_reinsertion == 1"
+        else:
+            risk_set = "all OUT rows"
+        add_task(
+            "out_outcome",
+            outcome,
+            risk_set,
+            risk_mask,
+            target_col,
+            df[f"p_{outcome}_if_out"],
+            "post_removal_period",
+        )
+
+    return (
+        pd.DataFrame(performance_rows),
+        pd.concat(calibration_tables, ignore_index=True),
+    )
+
+
+def nuisance_learning_curves(
+    df,
+    remove_feature_cols,
+    in_feature_cols,
+    out_feature_cols,
+    propensity_fold_models,
+    in_models,
+    out_models,
+):
+    # Build deterministic patient-grouped diagnostic learning curves
+    tasks = [{
+        "model_group": "propensity",
+        "outcome": "removal",
+        "risk_set": "all IN rows",
+        "risk_mask": df[STATE_COL].eq("in"),
+        "target_col": ACTION_COL,
+        "feature_cols": remove_feature_cols,
+        "fold_models": propensity_fold_models,
+        "oof_prediction": df[PROPENSITY_SCORE_COL],
+        "model_name": "propensity_removal",
+    }]
+    for outcome, target_col in IN_OUTCOMES.items():
+        risk_set = "IN and at_risk_cauti == 1" if outcome == "cauti" else "all IN rows"
+        tasks.append({
+            "model_group": "in_outcome",
+            "outcome": outcome,
+            "risk_set": risk_set,
+            "risk_mask": outcome_risk_mask(df, "in", outcome),
+            "target_col": target_col,
+            "feature_cols": in_feature_cols,
+            "fold_models": in_models[outcome]["fold_models"],
+            "oof_prediction": pd.Series(
+                np.where(
+                    df[ACTION_COL].eq(1),
+                    df[f"p_{outcome}_if_remove"],
+                    df[f"p_{outcome}_if_keep"],
+                ),
+                index=df.index,
+            ),
+            "model_name": f"in_{outcome}",
+        })
+    for outcome, target_col in OUT_OUTCOMES.items():
+        if outcome == "cauti":
+            risk_set = "OUT and at_risk_cauti == 1 (48-hour attribution window)"
+        elif outcome == "reinsertion":
+            risk_set = "OUT and at_risk_reinsertion == 1"
+        else:
+            risk_set = "all OUT rows"
+        tasks.append({
+            "model_group": "out_outcome",
+            "outcome": outcome,
+            "risk_set": risk_set,
+            "risk_mask": outcome_risk_mask(df, "out", outcome),
+            "target_col": target_col,
+            "feature_cols": out_feature_cols,
+            "fold_models": out_models[outcome]["fold_models"],
+            "oof_prediction": df[f"p_{outcome}_if_out"],
+            "model_name": f"out_{outcome}",
+        })
+
+    rows = []
+    for task in tasks:
+        pooled_predictions = {fraction: [] for fraction in LEARNING_CURVE_FRACTIONS}
+        training_summaries = {fraction: [] for fraction in LEARNING_CURVE_FRACTIONS}
+        fallback_flags = {fraction: [] for fraction in LEARNING_CURVE_FRACTIONS}
+        for fold in range(N_CROSSFIT_FOLDS):
+            training_mask = task["risk_mask"] & df[CROSSFIT_FOLD_COL].ne(fold)
+            validation_mask = task["risk_mask"] & df[CROSSFIT_FOLD_COL].eq(fold)
+            training_patients = np.array(
+                sorted(df.loc[training_mask, ID_COL].unique()),
+                dtype=object,
+            )
+            held_out_patients = set(
+                df.loc[df[CROSSFIT_FOLD_COL].eq(fold), ID_COL].unique()
+            )
+            rng = np.random.default_rng(SEED + fold)
+            training_patients = training_patients[
+                rng.permutation(len(training_patients))
+            ]
+            previous_patients = set()
+
+            for training_fraction in LEARNING_CURVE_FRACTIONS:
+                selected_n = (
+                    len(training_patients)
+                    if training_fraction == 1.0
+                    else max(1, int(np.ceil(training_fraction * len(training_patients))))
+                )
+                selected_patients = set(training_patients[:selected_n])
+                if not previous_patients.issubset(selected_patients):
+                    raise ValueError("Learning-curve patient subsets are not nested")
+                if selected_patients & held_out_patients:
+                    raise ValueError("Learning-curve patient leakage detected")
+                previous_patients = selected_patients
+                subset_mask = training_mask & df[ID_COL].isin(selected_patients)
+                training_target = binary_values(df.loc[subset_mask, task["target_col"]])
+
+                reuse_model = training_fraction == 1.0
+                print(
+                    f"[LEARNING CURVE] {task['model_name']} "
+                    f"fold {fold + 1}/{N_CROSSFIT_FOLDS} "
+                    f"fraction={training_fraction:.2f} "
+                    f"source={'production model' if reuse_model else 'diagnostic fit'}",
+                    flush=True,
+                )
+                fold_model = (
+                    task["fold_models"][fold]
+                    if reuse_model
+                    else fit_crossfit_fold_model(
+                        df.loc[subset_mask, task["feature_cols"]],
+                        df.loc[subset_mask, task["target_col"]],
+                        f"learning_curve_{task['model_name']}_{training_fraction:.2f}",
+                        fold,
+                    )
+                )
+                predictions = predict_crossfit_fold(
+                    fold_model,
+                    df.loc[validation_mask, task["feature_cols"]],
+                )
+                if reuse_model and not np.allclose(
+                    predictions,
+                    task["oof_prediction"].loc[validation_mask].to_numpy(dtype=float),
+                    atol=1e-10,
+                    rtol=0.0,
+                ):
+                    raise ValueError(
+                        f"Full learning-curve predictions differ from production OOF "
+                        f"predictions for {task['model_name']} fold {fold}"
+                    )
+
+                validation_df = df.loc[
+                    validation_mask, [ID_COL, task["target_col"]]
+                ].copy()
+                pred_col = "_learning_curve_prediction"
+                validation_df[pred_col] = predictions
+                metrics = scalar_binary_metrics(
+                    validation_df, task["target_col"], pred_col
+                )
+                fallback_used = bool(fold_model["fallback"])
+                rows.append({
+                    "aggregation": "fold",
+                    "model_group": task["model_group"],
+                    "model_type": MODEL_TYPE,
+                    "outcome": task["outcome"],
+                    "risk_set": task["risk_set"],
+                    "fold": fold,
+                    "training_fraction": training_fraction,
+                    "training_patients": len(selected_patients),
+                    "training_n": int(len(training_target)),
+                    "training_events": int(training_target.sum()),
+                    "validation_patients": int(validation_df[ID_COL].nunique()),
+                    "validation_n": metrics["n"],
+                    "validation_events": metrics["events"],
+                    "prevalence": metrics["prevalence"],
+                    "auc": metrics["auc"],
+                    "average_precision": metrics["average_precision"],
+                    "brier": metrics["brier"],
+                    "calibration_intercept": metrics["calibration_intercept"],
+                    "calibration_slope": metrics["calibration_slope"],
+                    "fallback_used": fallback_used,
+                })
+                pooled_predictions[training_fraction].append(validation_df)
+                training_summaries[training_fraction].append(
+                    (len(selected_patients), len(training_target), int(training_target.sum()))
+                )
+                fallback_flags[training_fraction].append(fallback_used)
+
+        for training_fraction in LEARNING_CURVE_FRACTIONS:
+            pooled_df = pd.concat(
+                pooled_predictions[training_fraction], ignore_index=True
+            )
+            pred_col = "_learning_curve_prediction"
+            metrics = scalar_binary_metrics(pooled_df, task["target_col"], pred_col)
+            training_summary = training_summaries[training_fraction]
+            rows.append({
+                "aggregation": "pooled_oof",
+                "model_group": task["model_group"],
+                "model_type": MODEL_TYPE,
+                "outcome": task["outcome"],
+                "risk_set": task["risk_set"],
+                "fold": np.nan,
+                "training_fraction": training_fraction,
+                "training_patients": sum(value[0] for value in training_summary),
+                "training_n": sum(value[1] for value in training_summary),
+                "training_events": sum(value[2] for value in training_summary),
+                "validation_patients": int(pooled_df[ID_COL].nunique()),
+                "validation_n": metrics["n"],
+                "validation_events": metrics["events"],
+                "prevalence": metrics["prevalence"],
+                "auc": metrics["auc"],
+                "average_precision": metrics["average_precision"],
+                "brier": metrics["brier"],
+                "calibration_intercept": metrics["calibration_intercept"],
+                "calibration_slope": metrics["calibration_slope"],
+                "fallback_used": any(fallback_flags[training_fraction]),
+            })
+
     return pd.DataFrame(rows)
 
 
@@ -743,7 +1494,7 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
     # Write joblib
     joblib.dump(
         {
-            "model_type": MODEL_TYPE,
+            **learner_provenance(),
             "evaluation": "grouped_cross_fit_oof",
             "crossfit_folds": N_CROSSFIT_FOLDS,
             "crossfit_group_col": ID_COL,
@@ -768,7 +1519,7 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
         OUTDIR / "propensity_model.pkl",
     )
 
-    return df, summary
+    return df, summary, fold_models
 
 
 # State-specific binary outcome nuisance models
@@ -788,6 +1539,8 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
     out_summary_rows = []
     in_calibration_tables = []
     out_calibration_tables = []
+    in_action_summary_rows = []
+    in_action_calibration_tables = []
     importance_tables = []
 
     in_rows = df[STATE_COL].eq("in")
@@ -875,11 +1628,38 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
                 risk_set,
             )
         )
+        for action_value, observed_action, pred_col in [
+            (0, "keep", keep_col),
+            (1, "remove", remove_col),
+        ]:
+            action_eval_df = eval_df.loc[eval_df[ACTION_COL].eq(action_value)]
+            action_metrics = scalar_binary_metrics(
+                action_eval_df, target_col, pred_col
+            )
+            in_action_summary_rows.append({
+                "model_group": "in_outcome",
+                "model_type": MODEL_TYPE,
+                "outcome": outcome,
+                "risk_set": risk_set,
+                "observed_action": observed_action,
+                **action_metrics,
+            })
+            action_calibration = calibration_table(
+                action_eval_df,
+                target_col,
+                pred_col,
+                bins=CALIBRATION_BINS,
+            )
+            action_calibration.insert(0, "observed_action", observed_action)
+            action_calibration.insert(0, "risk_set", risk_set)
+            action_calibration.insert(0, "outcome", outcome)
+            action_calibration.insert(0, "model_group", "in_outcome")
+            in_action_calibration_tables.append(action_calibration)
         # Build series data frame
         importance_tables.append(
             top_series_df(
                 model_name,
-                mean_feature_importance_series(fold_models, in_feature_cols),
+                mean_feature_importance_series(fold_models),
                 TOP_FEATURES_TO_SAVE,
             )
         )
@@ -963,7 +1743,7 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
         importance_tables.append(
             top_series_df(
                 model_name,
-                mean_feature_importance_series(fold_models, out_feature_cols),
+                mean_feature_importance_series(fold_models),
                 TOP_FEATURES_TO_SAVE,
             )
         )
@@ -1004,6 +1784,15 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
         pd.concat(out_calibration_tables, ignore_index=True),
         OUTDIR / "out_outcome_calibration.csv",
     )
+    # Save factual IN outcome diagnostics by observed action
+    pec.save_report_df(
+        pd.DataFrame(in_action_summary_rows),
+        OUTDIR / "in_outcome_action_summary.csv",
+    )
+    pec.save_report_df(
+        pd.concat(in_action_calibration_tables, ignore_index=True),
+        OUTDIR / "in_outcome_action_calibration.csv",
+    )
 
     # Add feature descriptions
     importance_df = add_feature_descriptions(
@@ -1019,7 +1808,8 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
     # Write joblib
     joblib.dump(
         {
-            "model_type": "state_specific_binary_xgb",
+            **learner_provenance(),
+            "model_group": "state_specific_binary",
             "evaluation": "grouped_cross_fit_oof",
             "crossfit_folds": N_CROSSFIT_FOLDS,
             "crossfit_group_col": ID_COL,
@@ -1049,14 +1839,255 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
         OUTDIR / "outcome_models.pkl",
     )
 
-    return df, fallback_counts, in_summary, out_summary
+    return df, fallback_counts, in_summary, out_summary, in_models, out_models
+
+
+def build_nuisance_model_comparison():
+    # Consolidate saved pooled OOF diagnostics without fitting any models
+    propensity_tail_metrics = [
+        "p_remove_min",
+        "p_remove_p01",
+        "p_remove_p05",
+        "p_remove_p50",
+        "p_remove_p95",
+        "p_remove_p99",
+        "p_remove_max",
+        "pct_p_remove_below_0_01",
+        "pct_p_remove_below_0_05",
+        "pct_p_remove_above_0_95",
+        "pct_p_remove_above_0_99",
+    ]
+    stability_columns = [
+        "fold_auc_mean",
+        "fold_auc_sd",
+        "fold_brier_mean",
+        "fold_brier_sd",
+        "fold_calibration_intercept_mean",
+        "fold_calibration_intercept_sd",
+        "fold_calibration_slope_mean",
+        "fold_calibration_slope_sd",
+    ]
+    columns = [
+        "model_type",
+        "model_folder",
+        "model_group",
+        "outcome",
+        "risk_set",
+        "n",
+        "events",
+        "prevalence",
+        "auc",
+        "average_precision",
+        "brier",
+        "calibration_intercept",
+        "calibration_slope",
+        *propensity_tail_metrics,
+        *stability_columns,
+    ]
+    required_files = [
+        "propensity_summary.csv",
+        "in_outcome_summary.csv",
+        "out_outcome_summary.csv",
+        "fold_performance_metrics.csv",
+    ]
+    required_outcome_columns = {
+        "model_group",
+        "model_type",
+        "outcome",
+        "risk_set",
+        "n",
+        "events",
+        "prevalence",
+        "auc",
+        "average_precision",
+        "brier",
+        "calibration_intercept",
+        "calibration_slope",
+    }
+    required_fold_columns = {
+        "model_group",
+        "model_type",
+        "outcome",
+        "auc",
+        "brier",
+        "calibration_intercept",
+        "calibration_slope",
+    }
+    required_propensity_metrics = {
+        "oof_n",
+        "oof_events",
+        "oof_prevalence",
+        "oof_auc",
+        "oof_average_precision",
+        "oof_brier",
+        "oof_calibration_intercept",
+        "oof_calibration_slope",
+    }
+
+    rows = []
+    ignored_folders = []
+    for model_folder in sorted(path for path in NUISANCE_ROOT.iterdir() if path.is_dir()):
+        missing_files = [
+            name for name in required_files if not (model_folder / name).is_file()
+        ]
+        if missing_files:
+            print(
+                f"[WARNING] Ignoring incomplete model folder {model_folder.name}: "
+                f"missing {', '.join(missing_files)}",
+                flush=True,
+            )
+            ignored_folders.append(model_folder.name)
+            continue
+
+        try:
+            propensity_summary = pd.read_csv(
+                model_folder / "propensity_summary.csv"
+            )
+            in_summary = pd.read_csv(model_folder / "in_outcome_summary.csv")
+            out_summary = pd.read_csv(model_folder / "out_outcome_summary.csv")
+            fold_metrics = pd.read_csv(
+                model_folder / "fold_performance_metrics.csv"
+            )
+        except (OSError, UnicodeDecodeError, pd.errors.ParserError) as error:
+            print(
+                f"[WARNING] Ignoring invalid model folder {model_folder.name}: {error}",
+                flush=True,
+            )
+            ignored_folders.append(model_folder.name)
+            continue
+
+        propensity_columns_valid = {"metric", "value"}.issubset(
+            propensity_summary.columns
+        )
+        propensity_metrics = (
+            set(propensity_summary["metric"])
+            if propensity_columns_valid
+            else set()
+        )
+        if (
+            not propensity_columns_valid
+            or not required_propensity_metrics.issubset(propensity_metrics)
+            or not required_outcome_columns.issubset(in_summary.columns)
+            or not required_outcome_columns.issubset(out_summary.columns)
+            or not required_fold_columns.issubset(fold_metrics.columns)
+        ):
+            print(
+                f"[WARNING] Ignoring invalid model folder {model_folder.name}: "
+                "required comparison columns are missing",
+                flush=True,
+            )
+            ignored_folders.append(model_folder.name)
+            continue
+
+        identities = set()
+        model_type_values = propensity_summary.loc[
+            propensity_summary["metric"].eq("model_type"), "value"
+        ].dropna()
+        identities.update(model_type_values.astype(str))
+        for summary_df in [in_summary, out_summary, fold_metrics]:
+            identities.update(summary_df["model_type"].dropna().astype(str).unique())
+        if len(identities) > 1:
+            print(
+                f"[WARNING] Ignoring invalid model folder {model_folder.name}: "
+                "inconsistent model identifiers",
+                flush=True,
+            )
+            ignored_folders.append(model_folder.name)
+            continue
+        model_type = next(iter(identities), model_folder.name)
+
+        def propensity_value(metric):
+            values = propensity_summary.loc[
+                propensity_summary["metric"].eq(metric), "value"
+            ]
+            if values.empty:
+                return np.nan
+            return pd.to_numeric(values.iloc[0], errors="coerce")
+
+        folder_rows = [{
+            "model_type": model_type,
+            "model_folder": model_folder.name,
+            "model_group": "propensity",
+            "outcome": "removal",
+            "risk_set": "all IN rows",
+            "n": propensity_value("oof_n"),
+            "events": propensity_value("oof_events"),
+            "prevalence": propensity_value("oof_prevalence"),
+            "auc": propensity_value("oof_auc"),
+            "average_precision": propensity_value("oof_average_precision"),
+            "brier": propensity_value("oof_brier"),
+            "calibration_intercept": propensity_value(
+                "oof_calibration_intercept"
+            ),
+            "calibration_slope": propensity_value("oof_calibration_slope"),
+            **{
+                metric: propensity_value(metric)
+                for metric in propensity_tail_metrics
+            },
+        }]
+        for outcome_row in pd.concat(
+            [in_summary, out_summary], ignore_index=True
+        ).to_dict("records"):
+            folder_rows.append({
+                "model_type": model_type,
+                "model_folder": model_folder.name,
+                "model_group": outcome_row["model_group"],
+                "outcome": outcome_row["outcome"],
+                "risk_set": outcome_row["risk_set"],
+                "n": outcome_row["n"],
+                "events": outcome_row["events"],
+                "prevalence": outcome_row["prevalence"],
+                "auc": outcome_row["auc"],
+                "average_precision": outcome_row["average_precision"],
+                "brier": outcome_row["brier"],
+                "calibration_intercept": outcome_row["calibration_intercept"],
+                "calibration_slope": outcome_row["calibration_slope"],
+                **{metric: np.nan for metric in propensity_tail_metrics},
+            })
+
+        fold_groups = {
+            key: group
+            for key, group in fold_metrics.groupby(
+                ["model_group", "outcome"], observed=False
+            )
+        }
+        for row in folder_rows:
+            fold_group = fold_groups.get((row["model_group"], row["outcome"]))
+            stability = {}
+            for metric in [
+                "auc",
+                "brier",
+                "calibration_intercept",
+                "calibration_slope",
+            ]:
+                values = (
+                    pd.to_numeric(fold_group[metric], errors="coerce")
+                    if fold_group is not None
+                    else pd.Series(dtype=float)
+                )
+                stability[f"fold_{metric}_mean"] = (
+                    float(values.mean()) if values.notna().any() else np.nan
+                )
+                stability[f"fold_{metric}_sd"] = (
+                    float(values.std()) if values.notna().sum() > 1 else np.nan
+                )
+            row.update(stability)
+        rows.extend(folder_rows)
+
+    comparison = pd.DataFrame(rows, columns=columns)
+    if not comparison.empty:
+        comparison = comparison.sort_values(
+            ["model_group", "outcome", "model_type", "model_folder"]
+        ).reset_index(drop=True)
+    pec.save_report_df(comparison, MODEL_COMPARISON_FILE)
+    return comparison, ignored_folders
 
 
 # Final panel assembly
 
 def save_scored_panel(df):
     # Save scored panel
-    excluded_cols = {Y_ICU_EXIT_ALIVE, Y_NO_EVENT_IN, Y_NO_EVENT_OUT}
+    excluded_cols = {Y_NO_EVENT_IN, Y_NO_EVENT_OUT}
     output_cols = [
         col
         for col in df.columns
@@ -1072,7 +2103,12 @@ def save_scored_panel(df):
     )
 
 
-def main():
+def run_nuisance_model(model_type):
+    configure_model_run(model_type)
+    print(
+        f"[MODEL] Starting {MODEL_OUTPUT_NAME} ({MODEL_TYPE})",
+        flush=True,
+    )
     OUTDIR.mkdir(exist_ok=True, parents=True)
 
     # Load and prepare the modelling panel
@@ -1104,18 +2140,26 @@ def main():
     )
 
     # Fit propensity scores
-    df, propensity_summary = fit_propensity_scores(
+    df, propensity_summary, propensity_fold_models = fit_propensity_scores(
         df,
         feature_cols,
         remove_feature_cols,
     )
 
     # Fit outcome scores
-    df, _, in_summary, out_summary = fit_outcome_scores(
+    df, _, in_summary, out_summary, in_models, out_models = fit_outcome_scores(
         df,
         feature_cols,
         in_feature_cols,
         out_feature_cols,
+    )
+    pec.save_report_df(
+        constant_features_by_fold(
+            propensity_fold_models,
+            in_models,
+            out_models,
+        ),
+        CONSTANT_FEATURES_FILE,
     )
 
     # Validate exported probabilities
@@ -1126,9 +2170,50 @@ def main():
         performance_metrics_rows(propensity_summary, in_summary, out_summary),
         PERFORMANCE_METRICS_FILE,
     )
+    pec.save_report_df(
+        fold_performance_metrics(df),
+        OUTDIR / "fold_performance_metrics.csv",
+    )
+
+    production_predictions = df[ALL_SCORE_COLS].copy()
+    subgroup_performance, subgroup_calibration = nuisance_subgroup_diagnostics(df)
+    pec.save_report_df(
+        subgroup_performance,
+        OUTDIR / "nuisance_subgroup_performance.csv",
+    )
+    pec.save_report_df(
+        subgroup_calibration,
+        OUTDIR / "nuisance_subgroup_calibration.csv",
+    )
+    pec.save_report_df(
+        nuisance_learning_curves(
+            df,
+            remove_feature_cols,
+            in_feature_cols,
+            out_feature_cols,
+            propensity_fold_models,
+            in_models,
+            out_models,
+        ),
+        OUTDIR / "nuisance_learning_curves.csv",
+    )
+    if not df[ALL_SCORE_COLS].equals(production_predictions):
+        raise ValueError("Diagnostics altered production nuisance predictions")
 
     # Save scored panel
     save_scored_panel(df)
+    print(
+        f"[MODEL] Completed {MODEL_OUTPUT_NAME} ({MODEL_TYPE})",
+        flush=True,
+    )
+
+
+def main():
+    for model_type in MODEL_TYPES:
+        run_nuisance_model(model_type)
+
+    # Consolidate completed nuisance-model runs
+    build_nuisance_model_comparison()
 
 
 if __name__ == "__main__":
