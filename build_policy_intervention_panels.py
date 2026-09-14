@@ -2,12 +2,14 @@
 # Build estimator-agnostic target-policy intervention panels
 
 
+import argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
+from panel_run_config import add_panel_argument, resolve_panel_run
 
 
 # Paths and policy settings
@@ -59,6 +61,17 @@ POLICY_COLS = [
 ]
 
 POLICY_TYPE = "fixed_day_removal"
+
+
+def configure_panel_run(panel_name):
+    # Keep the policy panel in the same isolated artefact tree as its source panel
+    global INPUT_PATH, OUTDIR, LONG_OUTPUT_PATH, QA_OUTPUT_PATH
+    paths = resolve_panel_run(REPO_ROOT, panel_name)
+    INPUT_PATH = paths.panel_path
+    OUTDIR = paths.artefact_root / "policy_interventions"
+    LONG_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_long.csv"
+    QA_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_qa.csv"
+    return paths
 
 
 def add_stable_ids_and_decision_flag(df):
@@ -303,7 +316,18 @@ def print_console_summary(
     print(f"Saved policy QA report: {qa_output_path}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build fixed-day policy interventions for one source panel."
+    )
+    add_panel_argument(parser)
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    configure_panel_run(args.panel)
+
     # Create the output directory
     OUTDIR.mkdir(exist_ok=True, parents=True)
 

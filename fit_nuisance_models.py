@@ -1,4 +1,5 @@
 # Fit propensity and outcome nuisance models for policy evaluation
+import argparse
 from pathlib import Path
 import re
 
@@ -21,6 +22,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 import policy_eval_common as pec
+from panel_run_config import add_panel_argument, resolve_panel_run
 
 
 # Configuration
@@ -61,7 +63,7 @@ OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 
 INFILE = INDIR / "modelling_panel.csv"
 COVARIATE_DICT_FILE = INDIR / "covariate_dictionary.csv"
-FINAL_PANEL = OUTDIR / "scored_panel.csv"
+NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
 PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
 CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
 MODEL_COMPARISON_FILE = NUISANCE_ROOT / "nuisance_model_comparison.csv"
@@ -254,7 +256,8 @@ def learner_provenance():
 def configure_model_run(model_type):
     # Set the active learner and its model-specific output paths
     global MODEL_TYPE, MODEL_OUTPUT_NAME, OUTDIR
-    global FINAL_PANEL, PERFORMANCE_METRICS_FILE, CROSSFIT_ROW_ASSIGNMENTS_FILE
+    global NUISANCE_PREDICTIONS_FILE, PERFORMANCE_METRICS_FILE
+    global CROSSFIT_ROW_ASSIGNMENTS_FILE
     global CONSTANT_FEATURES_FILE
     MODEL_TYPE = normalise_model_type(model_type)
     MODEL_OUTPUT_NAME = MODEL_OUTPUT_NAMES.get(
@@ -262,10 +265,21 @@ def configure_model_run(model_type):
         re.sub(r"[^a-z0-9]+", "_", MODEL_TYPE.lower()).strip("_") or "model",
     )
     OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
-    FINAL_PANEL = OUTDIR / "scored_panel.csv"
+    NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
     PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
     CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
     CONSTANT_FEATURES_FILE = OUTDIR / "constant_features_by_fold.csv"
+
+
+def configure_panel_run(panel_name):
+    # Route the source panel and every fitted-model artefact together
+    global INFILE, NUISANCE_ROOT, MODEL_COMPARISON_FILE
+    paths = resolve_panel_run(REPO_ROOT, panel_name)
+    INFILE = paths.panel_path
+    NUISANCE_ROOT = paths.artefact_root / "nuisance_models"
+    MODEL_COMPARISON_FILE = NUISANCE_ROOT / "nuisance_model_comparison.csv"
+    configure_model_run(MODEL_TYPE)
+    return paths
 
 
 def binary_values(series):
@@ -886,7 +900,7 @@ def model_summary_row(
         "outcome": outcome,
         "target_col": target_col,
         "risk_set": risk_set,
-        "evaluation": "grouped_cross_fit_oof",
+        "evaluation": "grouped_cross_fit",
         "crossfit_folds": N_CROSSFIT_FOLDS,
         "crossfit_group_col": ID_COL,
         "feature_count": int(len(feature_cols)),
@@ -919,7 +933,7 @@ def propensity_summary_rows(df, eligible_mask, feature_cols, summary):
     ).dropna()
     return pd.DataFrame([
         {"metric": "model_type", "value": MODEL_TYPE},
-        {"metric": "evaluation", "value": "grouped_cross_fit_oof"},
+        {"metric": "evaluation", "value": "grouped_cross_fit"},
         {"metric": "crossfit_folds", "value": N_CROSSFIT_FOLDS},
         {"metric": "crossfit_group_col", "value": ID_COL},
         {"metric": "period_hours", "value": PERIOD_HOURS},
@@ -928,14 +942,14 @@ def propensity_summary_rows(df, eligible_mask, feature_cols, summary):
         {"metric": "decision_eligible_rows", "value": int(eligible_mask.sum())},
         {"metric": "decision_eligible_patients", "value": int(eligible_patients)},
         {"metric": "explicit_feature_count", "value": int(len(feature_cols))},
-        {"metric": "oof_n", "value": summary["n"]},
-        {"metric": "oof_events", "value": summary["events"]},
-        {"metric": "oof_prevalence", "value": summary["prevalence"]},
-        {"metric": "oof_auc", "value": summary["auc"]},
-        {"metric": "oof_average_precision", "value": summary["average_precision"]},
-        {"metric": "oof_brier", "value": summary["brier"]},
-        {"metric": "oof_calibration_intercept", "value": summary["calibration_intercept"]},
-        {"metric": "oof_calibration_slope", "value": summary["calibration_slope"]},
+        {"metric": "n", "value": summary["n"]},
+        {"metric": "events", "value": summary["events"]},
+        {"metric": "prevalence", "value": summary["prevalence"]},
+        {"metric": "auc", "value": summary["auc"]},
+        {"metric": "average_precision", "value": summary["average_precision"]},
+        {"metric": "brier", "value": summary["brier"]},
+        {"metric": "calibration_intercept", "value": summary["calibration_intercept"]},
+        {"metric": "calibration_slope", "value": summary["calibration_slope"]},
         {"metric": "p_remove_min", "value": p_remove.min()},
         {"metric": "p_remove_p01", "value": p_remove.quantile(0.01)},
         {"metric": "p_remove_p05", "value": p_remove.quantile(0.05)},
@@ -957,7 +971,7 @@ def performance_metrics_rows(propensity_summary, in_summary, out_summary):
         rows.append({
             "model": "propensity",
             "model_type": MODEL_TYPE,
-            "split": "grouped_cross_fit_oof",
+            "split": "grouped_cross_fit",
             "outcome": "removal",
             "metric": metric,
             "value": value,
@@ -981,7 +995,7 @@ def performance_metrics_rows(propensity_summary, in_summary, out_summary):
                 rows.append({
                     "model": row.model_group,
                     "model_type": row.model_type,
-                    "split": "grouped_cross_fit_oof",
+                    "split": "grouped_cross_fit",
                     "outcome": row.outcome,
                     "metric": metric,
                     "value": getattr(row, metric),
@@ -1050,7 +1064,7 @@ def fold_performance_metrics(df):
 
 
 def nuisance_subgroup_diagnostics(df):
-    # Build subgroup performance and calibration from production OOF predictions
+    # Build subgroup performance and calibration from production predictions
     performance_rows = []
     calibration_tables = []
 
@@ -1067,7 +1081,7 @@ def nuisance_subgroup_diagnostics(df):
         if "sex_M" in df.columns:
             columns.append("sex_M")
         eval_df = df.loc[risk_mask, columns].copy()
-        pred_col = "_subgroup_oof_prediction"
+        pred_col = "_subgroup_prediction"
         eval_df[pred_col] = prediction.loc[risk_mask]
 
         subgroups = []
@@ -1240,7 +1254,7 @@ def nuisance_learning_curves(
         "target_col": ACTION_COL,
         "feature_cols": remove_feature_cols,
         "fold_models": propensity_fold_models,
-        "oof_prediction": df[PROPENSITY_SCORE_COL],
+        "prediction": df[PROPENSITY_SCORE_COL],
         "model_name": "propensity_removal",
     }]
     for outcome, target_col in IN_OUTCOMES.items():
@@ -1253,7 +1267,7 @@ def nuisance_learning_curves(
             "target_col": target_col,
             "feature_cols": in_feature_cols,
             "fold_models": in_models[outcome]["fold_models"],
-            "oof_prediction": pd.Series(
+            "prediction": pd.Series(
                 np.where(
                     df[ACTION_COL].eq(1),
                     df[f"p_{outcome}_if_remove"],
@@ -1278,7 +1292,7 @@ def nuisance_learning_curves(
             "target_col": target_col,
             "feature_cols": out_feature_cols,
             "fold_models": out_models[outcome]["fold_models"],
-            "oof_prediction": df[f"p_{outcome}_if_out"],
+            "prediction": df[f"p_{outcome}_if_out"],
             "model_name": f"out_{outcome}",
         })
 
@@ -1342,12 +1356,12 @@ def nuisance_learning_curves(
                 )
                 if reuse_model and not np.allclose(
                     predictions,
-                    task["oof_prediction"].loc[validation_mask].to_numpy(dtype=float),
+                    task["prediction"].loc[validation_mask].to_numpy(dtype=float),
                     atol=1e-10,
                     rtol=0.0,
                 ):
                     raise ValueError(
-                        f"Full learning-curve predictions differ from production OOF "
+                        f"Full learning-curve predictions differ from production "
                         f"predictions for {task['model_name']} fold {fold}"
                     )
 
@@ -1396,7 +1410,7 @@ def nuisance_learning_curves(
             metrics = scalar_binary_metrics(pooled_df, task["target_col"], pred_col)
             training_summary = training_summaries[training_fraction]
             rows.append({
-                "aggregation": "pooled_oof",
+                "aggregation": "pooled_predictions",
                 "model_group": task["model_group"],
                 "model_type": MODEL_TYPE,
                 "outcome": task["outcome"],
@@ -1470,12 +1484,12 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
     if not np.allclose(propensity_sums.to_numpy(), 1.0, atol=1e-10):
         raise ValueError("p_remove_obs + p_keep_obs does not equal 1 for all IN rows")
 
-    eval_oof = df.loc[
+    evaluation_df = df.loc[
         eligible_mask,
         [ACTION_COL, PROPENSITY_SCORE_COL],
     ]
     # Calculate binary metrics
-    summary = scalar_binary_metrics(eval_oof, ACTION_COL, PROPENSITY_SCORE_COL)
+    summary = scalar_binary_metrics(evaluation_df, ACTION_COL, PROPENSITY_SCORE_COL)
     # Save a data frame as CSV
     pec.save_report_df(
         propensity_summary_rows(df, eligible_mask, feature_cols, summary),
@@ -1484,7 +1498,7 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
     # Save a data frame as CSV
     pec.save_report_df(
         calibration_table(
-            eval_oof,
+            evaluation_df,
             ACTION_COL,
             PROPENSITY_SCORE_COL,
             bins=CALIBRATION_BINS,
@@ -1495,7 +1509,7 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
     joblib.dump(
         {
             **learner_provenance(),
-            "evaluation": "grouped_cross_fit_oof",
+            "evaluation": "grouped_cross_fit",
             "crossfit_folds": N_CROSSFIT_FOLDS,
             "crossfit_group_col": ID_COL,
             "fallback_probability_source": "fold_training_rows_only",
@@ -1810,7 +1824,7 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
         {
             **learner_provenance(),
             "model_group": "state_specific_binary",
-            "evaluation": "grouped_cross_fit_oof",
+            "evaluation": "grouped_cross_fit",
             "crossfit_folds": N_CROSSFIT_FOLDS,
             "crossfit_group_col": ID_COL,
             "fallback_probability_source": "fold_training_rows_only",
@@ -1843,7 +1857,7 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
 
 
 def build_nuisance_model_comparison():
-    # Consolidate saved pooled OOF diagnostics without fitting any models
+    # Consolidate saved pooled prediction diagnostics without fitting any models
     propensity_tail_metrics = [
         "p_remove_min",
         "p_remove_p01",
@@ -1914,14 +1928,14 @@ def build_nuisance_model_comparison():
         "calibration_slope",
     }
     required_propensity_metrics = {
-        "oof_n",
-        "oof_events",
-        "oof_prevalence",
-        "oof_auc",
-        "oof_average_precision",
-        "oof_brier",
-        "oof_calibration_intercept",
-        "oof_calibration_slope",
+        "n",
+        "events",
+        "prevalence",
+        "auc",
+        "average_precision",
+        "brier",
+        "calibration_intercept",
+        "calibration_slope",
     }
 
     rows = []
@@ -2010,16 +2024,14 @@ def build_nuisance_model_comparison():
             "model_group": "propensity",
             "outcome": "removal",
             "risk_set": "all IN rows",
-            "n": propensity_value("oof_n"),
-            "events": propensity_value("oof_events"),
-            "prevalence": propensity_value("oof_prevalence"),
-            "auc": propensity_value("oof_auc"),
-            "average_precision": propensity_value("oof_average_precision"),
-            "brier": propensity_value("oof_brier"),
-            "calibration_intercept": propensity_value(
-                "oof_calibration_intercept"
-            ),
-            "calibration_slope": propensity_value("oof_calibration_slope"),
+            "n": propensity_value("n"),
+            "events": propensity_value("events"),
+            "prevalence": propensity_value("prevalence"),
+            "auc": propensity_value("auc"),
+            "average_precision": propensity_value("average_precision"),
+            "brier": propensity_value("brier"),
+            "calibration_intercept": propensity_value("calibration_intercept"),
+            "calibration_slope": propensity_value("calibration_slope"),
             **{
                 metric: propensity_value(metric)
                 for metric in propensity_tail_metrics
@@ -2085,8 +2097,8 @@ def build_nuisance_model_comparison():
 
 # Final panel assembly
 
-def save_scored_panel(df):
-    # Save scored panel
+def save_nuisance_predictions(df):
+    # Save the modelling panel together with its nuisance predictions
     excluded_cols = {Y_NO_EVENT_IN, Y_NO_EVENT_OUT}
     output_cols = [
         col
@@ -2096,7 +2108,7 @@ def save_scored_panel(df):
     insert_at = output_cols.index("age")
     output_cols[insert_at:insert_at] = ALL_SCORE_COLS
     df.to_csv(
-        FINAL_PANEL,
+        NUISANCE_PREDICTIONS_FILE,
         columns=output_cols,
         index=False,
         float_format="%.6f",
@@ -2200,16 +2212,38 @@ def run_nuisance_model(model_type):
     if not df[ALL_SCORE_COLS].equals(production_predictions):
         raise ValueError("Diagnostics altered production nuisance predictions")
 
-    # Save scored panel
-    save_scored_panel(df)
+    # Save nuisance predictions
+    save_nuisance_predictions(df)
     print(
         f"[MODEL] Completed {MODEL_OUTPUT_NAME} ({MODEL_TYPE})",
         flush=True,
     )
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Fit cross-fitted nuisance models for one source panel."
+    )
+    add_panel_argument(parser)
+    parser.add_argument(
+        "--model-type",
+        choices=("all", *MODEL_TYPES),
+        default="xgboost",
+        help=(
+            "Nuisance learner to fit. The default is the selected production "
+            "learner, xgboost; use 'all' only for a model-comparison run."
+        ),
+    )
+    return parser.parse_args()
+
+
 def main():
-    for model_type in MODEL_TYPES:
+    args = parse_args()
+    paths = configure_panel_run(args.panel)
+    print(f"[PANEL] {paths.panel_name}: {paths.panel_path}", flush=True)
+
+    model_types = MODEL_TYPES if args.model_type == "all" else (args.model_type,)
+    for model_type in model_types:
         run_nuisance_model(model_type)
 
     # Consolidate completed nuisance-model runs

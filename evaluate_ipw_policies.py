@@ -2,12 +2,14 @@
 # Evaluate catheter-removal policies with sequential IPW estimates
 
 
+import argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
+from panel_run_config import add_panel_argument, resolve_panel_run
 
 
 # Paths and constants
@@ -24,7 +26,7 @@ POLICY_PANEL_PATH = (
     / "policy_interventions"
     / "policy_intervention_panel_long.csv"
 )
-SCORED_PANEL_PATH = NUISANCE_MODEL_DIR / "scored_panel.csv"
+NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
 OUTDIR = REPO_ROOT / "artefacts" / "policy_eval" / "ipw"
 
 OUTPUT_PATHS = {
@@ -36,6 +38,33 @@ OUTPUT_PATHS = {
     "current_practice": OUTDIR / "current_practice_episode_outcomes.csv",
     "metadata": OUTDIR / "ipw_run_metadata.json",
 }
+
+
+def configure_panel_run(panel_name):
+    # Resolve mutually consistent policy, nuisance, and evaluator paths
+    global NUISANCE_MODEL_DIR, POLICY_PANEL_PATH, NUISANCE_PREDICTIONS_PATH
+    global OUTDIR, OUTPUT_PATHS
+    paths = resolve_panel_run(REPO_ROOT, panel_name)
+    NUISANCE_MODEL_DIR = (
+        paths.artefact_root / "nuisance_models" / NUISANCE_MODEL_TYPE
+    )
+    POLICY_PANEL_PATH = (
+        paths.artefact_root
+        / "policy_interventions"
+        / "policy_intervention_panel_long.csv"
+    )
+    NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
+    OUTDIR = paths.artefact_root / "policy_eval" / "ipw"
+    OUTPUT_PATHS = {
+        "summary": OUTDIR / "ipw_policy_outcomes_summary.csv",
+        "episodes": OUTDIR / "ipw_policy_episode_outcomes.csv",
+        "weight_diagnostics": OUTDIR / "ipw_weight_diagnostics.csv",
+        "support_diagnostics": OUTDIR / "ipw_policy_support_diagnostics.csv",
+        "clipping_sensitivity": OUTDIR / "ipw_clipping_sensitivity.csv",
+        "current_practice": OUTDIR / "current_practice_episode_outcomes.csv",
+        "metadata": OUTDIR / "ipw_run_metadata.json",
+    }
+    return paths
 
 CLIP_LOWER = 0.01
 CLIP_UPPER = 0.99
@@ -65,7 +94,7 @@ ROW_JOIN_KEY_COLS = [
     "removed_in_period",
 ]
 
-SCORED_COLS = [
+NUISANCE_COLUMNS = [
     "p_keep_obs",
     "cauti_in_period",
     "reinsertion_in_period",
@@ -158,11 +187,11 @@ def load_policy_panel(path):
     return df
 
 
-def load_scored_panel(path):
-    # Load and validate the scored nuisance panel
+def load_nuisance_predictions(path):
+    # Load and validate the nuisance predictions
     usecols = list(
         dict.fromkeys(
-            [*ROW_JOIN_KEY_COLS, "p_remove_obs", *SCORED_COLS]
+            [*ROW_JOIN_KEY_COLS, "p_remove_obs", *NUISANCE_COLUMNS]
         )
     )
     df = pd.read_csv(path, usecols=usecols, low_memory=False)
@@ -213,15 +242,15 @@ def validate_policy_panel(df):
     )
 
 
-def join_scored_panel(policy_df, scored_df):
-    scored_add_cols = [
+def join_nuisance_predictions(policy_df, nuisance_df):
+    nuisance_add_cols = [
         col
-        for col in dict.fromkeys(["p_remove_obs", *SCORED_COLS])
+        for col in dict.fromkeys(["p_remove_obs", *NUISANCE_COLUMNS])
         if col not in ROW_JOIN_KEY_COLS
     ]
 
     merged = policy_df.merge(
-        scored_df[[*ROW_JOIN_KEY_COLS, *scored_add_cols]],
+        nuisance_df[[*ROW_JOIN_KEY_COLS, *nuisance_add_cols]],
         on=ROW_JOIN_KEY_COLS,
         how="left",
         validate="many_to_one",
@@ -231,7 +260,7 @@ def join_scored_panel(policy_df, scored_df):
     if unmatched.any():
         examples = merged.loc[unmatched, ROW_JOIN_KEY_COLS + ["policy_name"]].head(10)
         raise ValueError(
-            "Some policy-panel rows did not match the scored nuisance panel on "
+            "Some policy-panel rows did not match the nuisance predictions on "
             f"the natural keys. Examples:\n{examples}"
         )
 
@@ -258,7 +287,7 @@ def add_ipw_row_quantities(
         ].head(10)
         raise ValueError(
             "Applicable IN decision rows are missing p_remove_obs or p_keep_obs "
-            f"after joining scored panel. Examples:\n{examples}"
+            f"after joining nuisance predictions. Examples:\n{examples}"
         )
 
     for col in ["p_remove_obs", "p_keep_obs"]:
@@ -473,33 +502,36 @@ def build_policy_episode_panel(df):
     return episode_all, policy_episode_df
 
 
-def build_current_practice_episode_panel(scored_df, policy_df):
+def build_current_practice_episode_panel(nuisance_df, policy_df):
     # Build observed current-practice episode outcomes
-    scored_df = scored_df.copy()
-    scored_df = pec.add_period_duration_days(scored_df, context="current-practice IPW scored rows")
-    scored_df = pec.add_observed_icu_exit_alive_period(scored_df)
-    # Map each scored row to its policy-panel episode
+    nuisance_df = nuisance_df.copy()
+    nuisance_df = pec.add_period_duration_days(
+        nuisance_df,
+        context="current-practice IPW nuisance-prediction rows",
+    )
+    nuisance_df = pec.add_observed_icu_exit_alive_period(nuisance_df)
+    # Map each nuisance-prediction row to its policy-panel episode
     episode_map = policy_df[[*EPISODE_KEY_COLS, EPISODE_ID_COL]].drop_duplicates()
-    scored_df = scored_df.merge(
+    nuisance_df = nuisance_df.merge(
         episode_map,
         on=EPISODE_KEY_COLS,
         how="left",
         validate="many_to_one",
     )
-    if scored_df[EPISODE_ID_COL].isna().any():
-        examples = scored_df.loc[
-            scored_df[EPISODE_ID_COL].isna(),
+    if nuisance_df[EPISODE_ID_COL].isna().any():
+        examples = nuisance_df.loc[
+            nuisance_df[EPISODE_ID_COL].isna(),
             EPISODE_KEY_COLS,
         ].head(10)
         raise ValueError(
-            "Some scored-panel rows could not be mapped to catheter_episode_id "
+            "Some nuisance-prediction rows could not be mapped to catheter_episode_id "
             f"from the policy panel. Examples:\n{examples}"
         )
 
-    scored_df["catheter_state"] = scored_df["catheter_state"].astype("string").str.strip().str.lower()
-    scored_df["_catheter_in_row_int"] = scored_df["catheter_state"].eq("in").astype(int)
-    scored_df["_catheter_exposure_days"] = scored_df["_catheter_in_row_int"] * pd.to_numeric(
-        scored_df["period_duration_days"],
+    nuisance_df["catheter_state"] = nuisance_df["catheter_state"].astype("string").str.strip().str.lower()
+    nuisance_df["_catheter_in_row_int"] = nuisance_df["catheter_state"].eq("in").astype(int)
+    nuisance_df["_catheter_exposure_days"] = nuisance_df["_catheter_in_row_int"] * pd.to_numeric(
+        nuisance_df["period_duration_days"],
         errors="coerce",
     )
 
@@ -515,7 +547,7 @@ def build_current_practice_episode_panel(scored_df, policy_df):
     for risk_col in ["at_risk_cauti", "at_risk_reinsertion"]:
         aggregations[risk_col] = "sum"
 
-    episode_df = scored_df.groupby(group_cols, dropna=False, as_index=False, sort=False).agg(aggregations)
+    episode_df = nuisance_df.groupby(group_cols, dropna=False, as_index=False, sort=False).agg(aggregations)
     episode_df = episode_df.rename(
         columns={
             "_catheter_in_row_int": "observed_catheter_in_intervals",
@@ -984,7 +1016,7 @@ def metadata_payload(
         "clipping_bounds": {"clip_lower": CLIP_LOWER, "clip_upper": CLIP_UPPER},
         "input_paths": {
             "policy_panel": str(POLICY_PANEL_PATH),
-            "scored_panel": str(SCORED_PANEL_PATH),
+            "nuisance_predictions": str(NUISANCE_PREDICTIONS_PATH),
         },
         "output_paths": {key: str(value) for key, value in output_paths.items()},
         "number_of_policies": int(joined_df["policy_name"].nunique()),
@@ -1052,7 +1084,7 @@ def print_summary(
     print("--- IPW POLICY EVALUATION COMPLETE ---")
     print(f"Policy-intervention panel: {POLICY_PANEL_PATH}")
     print(f"Nuisance model type: {NUISANCE_MODEL_TYPE}")
-    print(f"Scored nuisance panel: {SCORED_PANEL_PATH}")
+    print(f"Nuisance predictions: {NUISANCE_PREDICTIONS_PATH}")
     print(f"Candidate policies: {n_policies:,}")
     print(f"Current-practice episodes: {len(current_practice_episode_df):,}")
     print(f"Adherent target-policy episode rows: {len(policy_episode_df):,}")
@@ -1062,17 +1094,28 @@ def print_summary(
         print(f"Saved {label}: {path}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Evaluate fixed-day policies with sequential IPW."
+    )
+    add_panel_argument(parser)
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    configure_panel_run(args.panel)
+
     # Create the output directory
     OUTDIR.mkdir(exist_ok=True, parents=True)
 
     # Load and validate the policy panel
     policy_df = load_policy_panel(POLICY_PANEL_PATH)
-    # Load and validate the scored nuisance panel
-    scored_df = load_scored_panel(SCORED_PANEL_PATH)
+    # Load and validate the nuisance predictions
+    nuisance_df = load_nuisance_predictions(NUISANCE_PREDICTIONS_PATH)
 
     # Join nuisance scores to policy rows
-    joined_df = join_scored_panel(policy_df, scored_df)
+    joined_df = join_nuisance_predictions(policy_df, nuisance_df)
     joined_df = pec.add_period_duration_days(joined_df, context="joined IPW policy rows")
     joined_df = pec.add_observed_icu_exit_alive_period(joined_df)
     # Add row-level IPW quantities
@@ -1096,7 +1139,10 @@ def main():
         )
 
     # Build observed current-practice episode outcomes
-    current_practice_episode_df = build_current_practice_episode_panel(scored_df, policy_df)
+    current_practice_episode_df = build_current_practice_episode_panel(
+        nuisance_df,
+        policy_df,
+    )
     output_episode_df = pd.concat(
         [current_practice_episode_df, policy_episode_df],
         ignore_index=True,

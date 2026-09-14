@@ -468,6 +468,42 @@ def make_state_windows(state_start, state_end):
     return rows
 
 
+def validate_cauti_risk_set(panel, episode_keys):
+    # Reconstruct first-event eligibility in episode-time order
+    ordered = panel.sort_values(
+        [*episode_keys, "period_start", "period_end", "catheter_state"]
+    )
+    prior_cauti = (
+        ordered.groupby(episode_keys, sort=False)[Y_CAUTI].cumsum()
+        - ordered[Y_CAUTI]
+    ).gt(0)
+    state_window_eligible = (
+        ordered["catheter_state"].eq("in")
+        | (
+            ordered["catheter_state"].eq("out")
+            & ordered["periods_in_state"].le(POST_REMOVE_RISK_PERIODS)
+        )
+    )
+    at_risk = ordered["at_risk_cauti"].eq(1)
+
+    # The event row belongs to the first-event risk set
+    if (ordered[Y_CAUTI].eq(1) & ~at_risk).any():
+        raise ValueError("Every CAUTI event row must be marked at risk")
+
+    # Follow-up remains in the panel, but not in the observed first-event risk set
+    if (prior_cauti & at_risk).any():
+        raise ValueError(
+            "Panel contains CAUTI at-risk rows after an earlier episode CAUTI"
+        )
+
+    expected_at_risk = state_window_eligible & ~prior_cauti
+    if not at_risk.eq(expected_at_risk).all():
+        raise ValueError(
+            "CAUTI risk set does not match catheter-state, post-removal-window, "
+            "and first-event eligibility"
+        )
+
+
 def build_base_panel(catheterised):
     # Require episode-level terminal metadata
     required_endpoint_cols = {"episode_end_time", "episode_end_reason"}
@@ -586,10 +622,19 @@ def build_base_panel(catheterised):
         (panel["cauti_time"] <= panel["period_end"])
     ).astype(int)
 
-    # Mark CAUTI risk periods
-    panel["at_risk_cauti"] = (
+    # Mark existing catheter-state and post-removal CAUTI eligibility
+    cauti_state_window_eligible = (
         (panel["catheter_state"] == "in") |
         ((panel["catheter_state"] == "out") & (panel["periods_in_state"] <= POST_REMOVE_RISK_PERIODS))
+    )
+
+    # Retain the event row, then remove only later rows from the first-event risk set
+    prior_cauti = (
+        panel.groupby(episode_keys, sort=False)[Y_CAUTI].cumsum()
+        - panel[Y_CAUTI]
+    ).gt(0)
+    panel["at_risk_cauti"] = (
+        cauti_state_window_eligible & ~prior_cauti
     ).astype(int)
 
     # Mark reinsertion risk periods
@@ -614,6 +659,7 @@ def build_base_panel(catheterised):
     invalid_reasons = set(panel["episode_end_reason"].dropna()) - TERMINAL_REASONS
     if invalid_reasons:
         raise ValueError(f"Unexpected episode ending reasons: {sorted(invalid_reasons)}")
+    validate_cauti_risk_set(panel, episode_keys)
 
     # Encode demographic categories
     panel["sex_M"] = (panel["gender"] == "M").astype(int)
