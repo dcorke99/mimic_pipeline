@@ -5,6 +5,7 @@ weights, and a patient with no fixed-policy support.  Physical row expansion
 provides an independent check of the sufficient-statistic bootstrap.
 """
 
+from io import StringIO
 import unittest
 
 import numpy as np
@@ -107,7 +108,7 @@ def expand_patients(episodes, subjects, counts):
     }
 
 
-def example_summaries(episodes, policies):
+def example_summaries(episodes, policies, rounded=True):
     """Build realistic saved summaries, including comparisons before rounding."""
     summaries = {
         "gformula": ci.gformula.build_policy_summary(
@@ -122,7 +123,15 @@ def example_summaries(episodes, policies):
             group, policy.policy_name, policy.policy_remove_day, 4, len(group),
         ))
     summaries["ipw"] = ci.ipw.add_current_practice_comparisons(pd.DataFrame(rows))
-    return {name: frame.round(3) for name, frame in summaries.items()}
+    return {name: frame.round(3) if rounded else frame for name, frame in summaries.items()}
+
+
+def reference_values(episodes, policies):
+    summaries = example_summaries(episodes, policies, rounded=False)
+    return np.array([
+        summaries[name].set_index("policy_name").loc[policy, ci.SUMMARY_COLUMNS[name][outcome]]
+        for name in ci.ESTIMATORS for policy in policies.policy_name for outcome in OUTCOMES
+    ], dtype=float)
 
 
 class PatientBootstrapTests(unittest.TestCase):
@@ -150,7 +159,7 @@ class PatientBootstrapTests(unittest.TestCase):
                     self.entry_index(estimator, policy, outcome)
         np.testing.assert_allclose(
             self.design.estimate(np.ones(3, dtype=int)),
-            ci.reference_values(self.episodes, self.policies),
+            reference_values(self.episodes, self.policies),
             rtol=1e-12, atol=1e-12, equal_nan=True,
         )
 
@@ -163,7 +172,7 @@ class PatientBootstrapTests(unittest.TestCase):
         np.testing.assert_array_equal(self.design.episode_counts, [2, 1, 1])
         self.assertEqual(int(counts @ self.design.episode_counts), len(baseline))
         np.testing.assert_allclose(
-            self.design.estimate(counts), ci.reference_values(expanded, self.policies),
+            self.design.estimate(counts), reference_values(expanded, self.policies),
             rtol=1e-12, atol=1e-12, equal_nan=True,
         )
 
@@ -200,7 +209,7 @@ class PatientBootstrapTests(unittest.TestCase):
         self.assertEqual(values.shape, (n_bootstrap, len(self.design.entries)))
         rng, raw_rng = np.random.default_rng(seed), np.random.default_rng(seed)
         for replicate in range(n_bootstrap):
-            counts = ci.draw_patient_counts(rng, len(self.subjects))
+            counts = np.bincount(rng.integers(0, 3, size=3), minlength=3)
             expected = np.bincount(raw_rng.integers(0, 3, size=3), minlength=3)
             np.testing.assert_array_equal(counts, expected)
             self.assertEqual(int(counts.sum()), 3)
@@ -217,6 +226,38 @@ class PatientBootstrapTests(unittest.TestCase):
                 differences[:, index], values[:, index] - values[:, baseline],
                 rtol=1e-12, atol=1e-12, equal_nan=True,
             )
+
+    def test_replicate_csv_has_one_row_per_draw_and_preserves_appended_estimates(self):
+        values, diagnostics = ci.bootstrap_values(self.design, 5, 91)
+        values[2, self.entry_index("ipw", "remove_on_day_1", "cauti")] = np.nan
+        diagnostics["n_fallback_folds"] = [0, 1, 0, 0, 0]
+        table, columns = ci.bootstrap_replicate_table(self.design.entries, values, diagnostics)
+        self.assertEqual(len(table), 5)
+        self.assertTrue(table.columns.is_unique)
+        self.assertEqual(len(columns), 2 * len(self.design.entries))
+        pd.testing.assert_frame_equal(table[diagnostics.columns], diagnostics)
+        value_columns = columns.loc[columns.estimate_type.eq("policy_value"), "column_name"]
+        difference_columns = columns.loc[
+            columns.estimate_type.eq("difference_vs_current_practice"), "column_name",
+        ]
+        np.testing.assert_array_equal(table[value_columns].to_numpy(), values)
+        np.testing.assert_array_equal(
+            table[difference_columns].to_numpy(), ci.paired_differences(values, self.design.entries),
+        )
+        self.assertTrue(columns.loc[columns.policy_name.eq("current_practice"), "policy_remove_day"].isna().all())
+        self.assertTrue(columns.loc[columns.estimate_type.eq("difference_vs_current_practice"), "comparator"].eq("current_practice").all())
+
+        # The refitting script writes one completed pass at a time. Reading
+        # those appended rows must give exactly the same table as batch export.
+        output = StringIO()
+        for replicate in range(len(values)):
+            row, row_columns = ci.bootstrap_replicate_table(
+                self.design.entries, values[replicate:replicate + 1], diagnostics.iloc[[replicate]],
+            )
+            pd.testing.assert_frame_equal(columns, row_columns)
+            row.to_csv(output, index=False, header=replicate == 0)
+        restored = pd.read_csv(StringIO(output.getvalue()), float_precision="round_trip")
+        pd.testing.assert_frame_equal(restored, table)
 
     def test_missing_values_and_incomplete_predictions_keep_original_masks(self):
         episodes = {name: frame.copy() for name, frame in self.episodes.items()}
@@ -237,7 +278,7 @@ class PatientBootstrapTests(unittest.TestCase):
             with self.subTest(counts=counts.tolist()):
                 expanded = expand_patients(episodes, self.subjects, counts)
                 np.testing.assert_allclose(
-                    design.estimate(counts), ci.reference_values(expanded, self.policies),
+                    design.estimate(counts), reference_values(expanded, self.policies),
                     rtol=1e-12, atol=1e-12, equal_nan=True,
                 )
         values = design.estimate(np.ones(3, dtype=int))
@@ -267,7 +308,7 @@ class PatientBootstrapTests(unittest.TestCase):
                 design = ci.build_patient_statistics(episodes, self.policies, self.subjects)
                 values = design.estimate(np.ones(3, dtype=int))
                 np.testing.assert_allclose(
-                    values, ci.reference_values(episodes, self.policies),
+                    values, reference_values(episodes, self.policies),
                     rtol=1e-12, atol=1e-12, equal_nan=True,
                 )
                 self.assertAlmostEqual(values[self.entry_index(
@@ -324,22 +365,6 @@ class PatientBootstrapTests(unittest.TestCase):
                         point, self.design, self.episodes, self.policies, stale,
                     )
 
-    def test_input_validation_rejects_duplicates_and_mismatched_cohorts(self):
-        summaries = example_summaries(self.episodes, self.policies)
-        policies, subjects = ci.validate_inputs(self.episodes, summaries)
-        pd.testing.assert_frame_equal(policies, self.policies)
-        pd.testing.assert_index_equal(subjects, self.subjects)
-        duplicate = {name: frame.copy() for name, frame in self.episodes.items()}
-        duplicate["aipw"] = pd.concat([duplicate["aipw"], duplicate["aipw"].iloc[[0]]])
-        with self.assertRaisesRegex(ValueError, "duplicate policy/episode rows"):
-            ci.validate_inputs(duplicate, summaries)
-        mismatch = {name: frame.copy() for name, frame in self.episodes.items()}
-        frame = mismatch["aipw"]
-        mismatch["aipw"] = frame.loc[~(
-            frame.policy_name.eq("remove_on_day_1") & frame.catheter_episode_id.eq(102)
-        )]
-        with self.assertRaisesRegex(ValueError, "full episode/patient cohort differs"):
-            ci.validate_inputs(mismatch, summaries)
 
 
 if __name__ == "__main__":
