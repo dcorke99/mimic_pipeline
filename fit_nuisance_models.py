@@ -36,29 +36,11 @@ MODEL_TYPES = (
     "mlp",
 )
 MODEL_TYPE = "xgboost"
-MODEL_ALIASES = {
-    "logistic": "logistic_regression",
-    "lr": "logistic_regression",
-    "logistic_regression": "logistic_regression",
-    "rf": "random_forest",
-    "random_forest": "random_forest",
-    "xgb": "xgboost",
-    "xgboost": "xgboost",
-    "lgbm": "lightgbm",
-    "lightgbm": "lightgbm",
-    "mlp": "mlp",
-}
 
 REPO_ROOT = Path(__file__).resolve().parent
 INDIR = REPO_ROOT / "data"
 NUISANCE_ROOT = REPO_ROOT / "artefacts" / "nuisance_models"
-MODEL_OUTPUT_NAMES = {
-    model_type: model_type for model_type in MODEL_TYPES
-}
-MODEL_OUTPUT_NAME = MODEL_OUTPUT_NAMES.get(
-    MODEL_TYPE,
-    re.sub(r"[^a-z0-9]+", "_", MODEL_TYPE.lower()).strip("_") or "model",
-)
+MODEL_OUTPUT_NAME = MODEL_TYPE
 OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 
 INFILE = INDIR / "modelling_panel.csv"
@@ -87,15 +69,6 @@ AT_RISK_REINS = "at_risk_reinsertion"
 Y_NO_EVENT_IN = "_target_no_event_in"
 Y_NO_EVENT_OUT = "_target_no_event_out"
 
-NO_EVENT_DEFINITION = {
-    "in": (
-        "No CAUTI, death, or ICU exit alive in the next outcome window; this does not "
-        "imply continued catheter-in state when removed_in_period=1."
-    ),
-    "out": (
-        "No reinsertion, CAUTI, death, or ICU exit alive in the next outcome window."
-    ),
-}
 
 POST_REMOVE_RISK_PERIODS = 2
 PERIOD_HOURS = 24
@@ -232,38 +205,14 @@ ALL_SCORE_COLS = [
 # Support functions
 
 
-def normalise_model_type(model_type):
-    # Resolve supported learner aliases to their canonical names
-    key = re.sub(r"[^a-z0-9]+", "_", str(model_type).lower()).strip("_")
-    if key not in MODEL_ALIASES:
-        raise ValueError(
-            f"Unknown MODEL_TYPE: {model_type}. Expected one of {MODEL_TYPES}"
-        )
-    return MODEL_ALIASES[key]
-
-
-def learner_provenance():
-    # Describe the active learner and its fold-fitted preprocessing
-    return {
-        "model_type": MODEL_TYPE,
-        "model_output_name": MODEL_OUTPUT_NAME,
-        **LEARNER_PREPROCESSING[MODEL_TYPE],
-        "random_seed": SEED,
-        "learner_configuration": LEARNER_CONFIGURATIONS[MODEL_TYPE].copy(),
-    }
-
-
 def configure_model_run(model_type):
     # Set the active learner and its model-specific output paths
     global MODEL_TYPE, MODEL_OUTPUT_NAME, OUTDIR
     global NUISANCE_PREDICTIONS_FILE, PERFORMANCE_METRICS_FILE
     global CROSSFIT_ROW_ASSIGNMENTS_FILE
     global CONSTANT_FEATURES_FILE
-    MODEL_TYPE = normalise_model_type(model_type)
-    MODEL_OUTPUT_NAME = MODEL_OUTPUT_NAMES.get(
-        MODEL_TYPE,
-        re.sub(r"[^a-z0-9]+", "_", MODEL_TYPE.lower()).strip("_") or "model",
-    )
+    MODEL_TYPE = model_type
+    MODEL_OUTPUT_NAME = MODEL_TYPE
     OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
     NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
     PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
@@ -283,13 +232,12 @@ def configure_panel_run(panel_name):
 
 
 def binary_values(series):
-    # Convert values
     return pd.to_numeric(series, errors="coerce").fillna(0).astype(int).clip(0, 1)
 
 
-def load_panel():
+def load_panel(path=None):
     # Read the full modelling panel
-    df = pd.read_csv(INFILE, low_memory=False)
+    df = pd.read_csv(INFILE if path is None else path, low_memory=False)
 
     # Standardise identifiers and categorical values
     df.columns = df.columns.str.strip()
@@ -304,7 +252,6 @@ def load_panel():
     if unknown_states:
         raise ValueError(f"Unexpected catheter states: {unknown_states}")
 
-    # Convert values
     for col in [
         ACTION_COL,
         Y_CAUTI,
@@ -314,7 +261,6 @@ def load_panel():
         AT_RISK_CAUTI,
         AT_RISK_REINS,
     ]:
-        # Convert values
         df[col] = binary_values(df[col])
 
     # Consolidate internal column blocks
@@ -324,11 +270,6 @@ def load_panel():
 
 def add_grouped_crossfit_folds(df, n_splits=N_CROSSFIT_FOLDS):
     # Add grouped crossfit folds
-    n_groups = int(df[ID_COL].nunique())
-    if n_groups < n_splits:
-        raise ValueError(
-            f"Grouped cross-fitting needs at least {n_splits} patients; found {n_groups}"
-        )
 
     df[CROSSFIT_FOLD_COL] = -1
     splitter = GroupKFold(n_splits=n_splits)
@@ -373,31 +314,17 @@ def crossfit_row_assignments(df):
     return df[columns].copy()
 
 
-def fit_binary_model(features, target, model_name):
-    # Fit binary model
-    # Convert values
+def fit_binary_model(features, target):
     target = binary_values(target)
-    if features.empty:
-        raise ValueError(f"Cannot fit {model_name}: training risk set is empty")
-    if target.nunique() < 2:
-        raise ValueError(
-            f"Cannot fit {model_name}: training target contains only class "
-            f"{int(target.iloc[0])}"
-        )
 
     learner_configuration = LEARNER_CONFIGURATIONS[MODEL_TYPE]
-    if MODEL_TYPE == "logistic_regression":
-        estimator = LogisticRegression(**learner_configuration)
-    elif MODEL_TYPE == "random_forest":
-        estimator = RandomForestClassifier(**learner_configuration)
-    elif MODEL_TYPE == "xgboost":
-        estimator = XGBClassifier(**learner_configuration)
-    elif MODEL_TYPE == "lightgbm":
-        estimator = LGBMClassifier(**learner_configuration)
-    elif MODEL_TYPE == "mlp":
-        estimator = MLPClassifier(**learner_configuration)
-    else:
-        raise ValueError(f"Unknown MODEL_TYPE: {MODEL_TYPE}")
+    estimator = {
+        "logistic_regression": LogisticRegression,
+        "random_forest": RandomForestClassifier,
+        "xgboost": XGBClassifier,
+        "lightgbm": LGBMClassifier,
+        "mlp": MLPClassifier,
+    }[MODEL_TYPE](**learner_configuration)
 
     steps = []
     if LEARNER_PREPROCESSING[MODEL_TYPE]["imputation_used"]:
@@ -416,7 +343,6 @@ def fit_binary_model(features, target, model_name):
 
 
 def predict_binary_proba(pipe, features):
-    # Predict binary probabilities
     feature_values = features.to_numpy(dtype=float)
     if MODEL_TYPE == "lightgbm":
         feature_values = pd.DataFrame(
@@ -462,12 +388,11 @@ def fit_crossfit_fold_model(
     # Fit crossfit fold model
     if len(features) == 0:
         raise ValueError(f"Cannot fit {model_name} fold {fold}: training risk set is empty")
-    # Convert values
     target = binary_values(target)
     events = int(target.sum())
     non_events = int(len(target) - events)
     retained_feature_cols, constant_features = split_constant_features(features)
-    fold_metadata = {
+    fold_details = {
         "fold": int(fold),
         "training_n": int(len(target)),
         "training_events": events,
@@ -498,33 +423,23 @@ def fit_crossfit_fold_model(
                 f"{fallback_probability}"
             )
         return {
-            **fold_metadata,
+            **fold_details,
             "model": None,
             "fallback": True,
             "fallback_reason": fallback_reason,
             "fallback_probability": fallback_probability,
-            "fallback_probability_source": "fold_training_rows_only",
-            "fallback_smoothing": "beta_binomial",
-            "fallback_prior_events": FALLBACK_PRIOR_EVENTS,
-            "fallback_prior_non_events": FALLBACK_PRIOR_NON_EVENTS,
         }
 
-    # Fit binary model
     model = fit_binary_model(
         features.loc[:, retained_feature_cols],
         target,
-        f"{model_name}_fold_{fold}",
     )
     return {
-        **fold_metadata,
+        **fold_details,
         "model": model,
         "fallback": False,
         "fallback_reason": None,
         "fallback_probability": None,
-        "fallback_probability_source": None,
-        "fallback_smoothing": None,
-        "fallback_prior_events": None,
-        "fallback_prior_non_events": None,
     }
 
 
@@ -536,13 +451,7 @@ def predict_crossfit_fold(fold_model, features):
             fold_model["fallback_probability"],
             dtype=float,
         )
-    # Predict binary probabilities
     retained_feature_cols = fold_model["retained_feature_cols"]
-    missing_features = set(retained_feature_cols) - set(features.columns)
-    if missing_features:
-        raise ValueError(
-            f"Held-out data are missing retained features: {sorted(missing_features)}"
-        )
     return predict_binary_proba(
         fold_model["model"],
         features.loc[:, retained_feature_cols],
@@ -580,16 +489,6 @@ def mean_feature_importance_series(fold_models):
     return pd.concat(importances, axis=1).mean(axis=1).sort_values(ascending=False)
 
 
-def outcome_fallback_counts(outcome_models):
-    # Summarise constant-probability fold counts
-    counts = {}
-    for state, models in outcome_models.items():
-        for outcome, payload in models.items():
-            counts[f"{state}_{outcome}"] = sum(
-                int(fold_model["fallback"])
-                for fold_model in payload["fold_models"]
-            )
-    return counts
 
 
 def constant_features_by_fold(propensity_fold_models, in_models, out_models):
@@ -716,21 +615,17 @@ def scalar_binary_metrics(df, outcome_col, pred_col):
         )
         prediction_logit = np.log(clipped_predictions / (1.0 - clipped_predictions))
         if not np.isclose(np.ptp(prediction_logit), 0.0, atol=1e-12, rtol=0.0):
-            try:
-                calibration_model = LogisticRegression(
-                    C=np.inf,
-                    solver="lbfgs",
-                    max_iter=1000,
-                )
-                calibration_model.fit(
-                    prediction_logit.reshape(-1, 1),
-                    eval_df[outcome_col],
-                )
-                calibration_intercept = float(calibration_model.intercept_[0])
-                calibration_slope = float(calibration_model.coef_[0, 0])
-            except (TypeError, ValueError):
-                calibration_intercept = np.nan
-                calibration_slope = np.nan
+            calibration_model = LogisticRegression(
+                C=np.inf,
+                solver="lbfgs",
+                max_iter=1000,
+            )
+            calibration_model.fit(
+                prediction_logit.reshape(-1, 1),
+                eval_df[outcome_col],
+            )
+            calibration_intercept = float(calibration_model.intercept_[0])
+            calibration_slope = float(calibration_model.coef_[0, 0])
     return {
         "n": n,
         "events": events,
@@ -892,7 +787,6 @@ def model_summary_row(
     # Build summary row
     # Calculate binary metrics
     metrics = scalar_binary_metrics(eval_df, target_col, pred_col)
-    # Convert values
     modelling_target = binary_values(modelling_df[target_col])
     return {
         "model_group": model_group,
@@ -1490,12 +1384,10 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
     ]
     # Calculate binary metrics
     summary = scalar_binary_metrics(evaluation_df, ACTION_COL, PROPENSITY_SCORE_COL)
-    # Save a data frame as CSV
     pec.save_report_df(
         propensity_summary_rows(df, eligible_mask, feature_cols, summary),
         OUTDIR / "propensity_summary.csv",
     )
-    # Save a data frame as CSV
     pec.save_report_df(
         calibration_table(
             evaluation_df,
@@ -1505,30 +1397,10 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
         ),
         OUTDIR / "propensity_calibration.csv",
     )
-    # Write joblib
     joblib.dump(
         {
-            **learner_provenance(),
-            "evaluation": "grouped_cross_fit",
-            "crossfit_folds": N_CROSSFIT_FOLDS,
-            "crossfit_group_col": ID_COL,
-            "fallback_probability_source": "fold_training_rows_only",
-            "fallback_smoothing": {
-                "method": "beta_binomial",
-                "prior_events": FALLBACK_PRIOR_EVENTS,
-                "prior_non_events": FALLBACK_PRIOR_NON_EVENTS,
-            },
             "remove_fold_models": fold_models,
-            "features": feature_cols,
             "x_cols_remove": remove_feature_cols,
-            "target_col": ACTION_COL,
-            "eligible_state": "in",
-            "id_col": ID_COL,
-            "time_col": TIME_COL,
-            "period_hours": PERIOD_HOURS,
-            "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
-            "risk_set_columns": {"cauti": AT_RISK_CAUTI, "reinsertion": AT_RISK_REINS},
-            "modelling_panel_file": str(INFILE),
         },
         OUTDIR / "propensity_model.pkl",
     )
@@ -1538,7 +1410,7 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
 
 # State-specific binary outcome nuisance models
 
-def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
+def fit_outcome_scores(df, in_feature_cols, out_feature_cols):
     # Fit outcome scores
     covariate_dict = pd.read_csv(COVARIATE_DICT_FILE)
     # Prepare outcome targets
@@ -1682,7 +1554,6 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
             "features": in_feature_cols,
             "target_col": target_col,
             "risk_set": risk_set,
-            "no_event_definition": NO_EVENT_DEFINITION["in"] if outcome == "no_event" else None,
             "no_event_is_transition_state": False if outcome == "no_event" else None,
         }
 
@@ -1767,7 +1638,6 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
             "target_col": target_col,
             "risk_set": risk_set,
             "non_risk_prediction": 0.0 if outcome in {"cauti", "reinsertion"} else None,
-            "no_event_definition": NO_EVENT_DEFINITION["out"] if outcome == "no_event" else None,
             "no_event_is_transition_state": False if outcome == "no_event" else None,
         }
 
@@ -1784,16 +1654,12 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
 
     in_summary = pd.DataFrame(in_summary_rows)
     out_summary = pd.DataFrame(out_summary_rows)
-    # Save a data frame as CSV
     pec.save_report_df(in_summary, OUTDIR / "in_outcome_summary.csv")
-    # Save a data frame as CSV
     pec.save_report_df(out_summary, OUTDIR / "out_outcome_summary.csv")
-    # Save a data frame as CSV
     pec.save_report_df(
         pd.concat(in_calibration_tables, ignore_index=True),
         OUTDIR / "in_outcome_calibration.csv",
     )
-    # Save a data frame as CSV
     pec.save_report_df(
         pd.concat(out_calibration_tables, ignore_index=True),
         OUTDIR / "out_outcome_calibration.csv",
@@ -1813,47 +1679,20 @@ def fit_outcome_scores(df, feature_cols, in_feature_cols, out_feature_cols):
         pd.concat(importance_tables, ignore_index=True),
         covariate_dict,
     )
-    # Save a data frame as CSV
     pec.save_report_df(importance_df, OUTDIR / "outcome_top_model_features.csv")
 
-    fallback_counts = outcome_fallback_counts(
-        {"in": in_models, "out": out_models}
-    )
-    # Write joblib
     joblib.dump(
         {
-            **learner_provenance(),
-            "model_group": "state_specific_binary",
-            "evaluation": "grouped_cross_fit",
-            "crossfit_folds": N_CROSSFIT_FOLDS,
-            "crossfit_group_col": ID_COL,
-            "fallback_probability_source": "fold_training_rows_only",
-            "fallback_smoothing": {
-                "method": "beta_binomial",
-                "prior_events": FALLBACK_PRIOR_EVENTS,
-                "prior_non_events": FALLBACK_PRIOR_NON_EVENTS,
-            },
             "in_models": in_models,
             "out_models": out_models,
             "x_cols_in": in_feature_cols,
             "x_cols_out": out_feature_cols,
             "action_remove_col": ACTION_COL,
-            "features": feature_cols,
-            "id_col": ID_COL,
-            "time_col": TIME_COL,
-            "period_hours": PERIOD_HOURS,
-            "post_remove_risk_periods": POST_REMOVE_RISK_PERIODS,
-            "risk_set_columns": {"cauti": AT_RISK_CAUTI, "reinsertion": AT_RISK_REINS},
-            "out_cauti_non_risk_prediction": 0.0,
-            "fallback_fold_counts": fallback_counts,
-            "no_event_definition": NO_EVENT_DEFINITION,
-            "no_event_is_transition_state": False,
-            "modelling_panel_file": str(INFILE),
         },
         OUTDIR / "outcome_models.pkl",
     )
 
-    return df, fallback_counts, in_summary, out_summary, in_models, out_models
+    return df, in_summary, out_summary, in_models, out_models
 
 
 def build_nuisance_model_comparison():
@@ -1898,125 +1737,16 @@ def build_nuisance_model_comparison():
         *propensity_tail_metrics,
         *stability_columns,
     ]
-    required_files = [
-        "propensity_summary.csv",
-        "in_outcome_summary.csv",
-        "out_outcome_summary.csv",
-        "fold_performance_metrics.csv",
-    ]
-    required_outcome_columns = {
-        "model_group",
-        "model_type",
-        "outcome",
-        "risk_set",
-        "n",
-        "events",
-        "prevalence",
-        "auc",
-        "average_precision",
-        "brier",
-        "calibration_intercept",
-        "calibration_slope",
-    }
-    required_fold_columns = {
-        "model_group",
-        "model_type",
-        "outcome",
-        "auc",
-        "brier",
-        "calibration_intercept",
-        "calibration_slope",
-    }
-    required_propensity_metrics = {
-        "n",
-        "events",
-        "prevalence",
-        "auc",
-        "average_precision",
-        "brier",
-        "calibration_intercept",
-        "calibration_slope",
-    }
-
     rows = []
-    ignored_folders = []
     for model_folder in sorted(path for path in NUISANCE_ROOT.iterdir() if path.is_dir()):
-        missing_files = [
-            name for name in required_files if not (model_folder / name).is_file()
-        ]
-        if missing_files:
-            print(
-                f"[WARNING] Ignoring incomplete model folder {model_folder.name}: "
-                f"missing {', '.join(missing_files)}",
-                flush=True,
-            )
-            ignored_folders.append(model_folder.name)
-            continue
-
-        try:
-            propensity_summary = pd.read_csv(
-                model_folder / "propensity_summary.csv"
-            )
-            in_summary = pd.read_csv(model_folder / "in_outcome_summary.csv")
-            out_summary = pd.read_csv(model_folder / "out_outcome_summary.csv")
-            fold_metrics = pd.read_csv(
-                model_folder / "fold_performance_metrics.csv"
-            )
-        except (OSError, UnicodeDecodeError, pd.errors.ParserError) as error:
-            print(
-                f"[WARNING] Ignoring invalid model folder {model_folder.name}: {error}",
-                flush=True,
-            )
-            ignored_folders.append(model_folder.name)
-            continue
-
-        propensity_columns_valid = {"metric", "value"}.issubset(
-            propensity_summary.columns
-        )
-        propensity_metrics = (
-            set(propensity_summary["metric"])
-            if propensity_columns_valid
-            else set()
-        )
-        if (
-            not propensity_columns_valid
-            or not required_propensity_metrics.issubset(propensity_metrics)
-            or not required_outcome_columns.issubset(in_summary.columns)
-            or not required_outcome_columns.issubset(out_summary.columns)
-            or not required_fold_columns.issubset(fold_metrics.columns)
-        ):
-            print(
-                f"[WARNING] Ignoring invalid model folder {model_folder.name}: "
-                "required comparison columns are missing",
-                flush=True,
-            )
-            ignored_folders.append(model_folder.name)
-            continue
-
-        identities = set()
-        model_type_values = propensity_summary.loc[
-            propensity_summary["metric"].eq("model_type"), "value"
-        ].dropna()
-        identities.update(model_type_values.astype(str))
-        for summary_df in [in_summary, out_summary, fold_metrics]:
-            identities.update(summary_df["model_type"].dropna().astype(str).unique())
-        if len(identities) > 1:
-            print(
-                f"[WARNING] Ignoring invalid model folder {model_folder.name}: "
-                "inconsistent model identifiers",
-                flush=True,
-            )
-            ignored_folders.append(model_folder.name)
-            continue
-        model_type = next(iter(identities), model_folder.name)
+        propensity_summary = pd.read_csv(model_folder / "propensity_summary.csv").set_index("metric")["value"]
+        in_summary = pd.read_csv(model_folder / "in_outcome_summary.csv")
+        out_summary = pd.read_csv(model_folder / "out_outcome_summary.csv")
+        fold_metrics = pd.read_csv(model_folder / "fold_performance_metrics.csv")
+        model_type = propensity_summary["model_type"]
 
         def propensity_value(metric):
-            values = propensity_summary.loc[
-                propensity_summary["metric"].eq(metric), "value"
-            ]
-            if values.empty:
-                return np.nan
-            return pd.to_numeric(values.iloc[0], errors="coerce")
+            return pd.to_numeric(propensity_summary[metric])
 
         folder_rows = [{
             "model_type": model_type,
@@ -2092,7 +1822,7 @@ def build_nuisance_model_comparison():
             ["model_group", "outcome", "model_type", "model_folder"]
         ).reset_index(drop=True)
     pec.save_report_df(comparison, MODEL_COMPARISON_FILE)
-    return comparison, ignored_folders
+    return comparison
 
 
 # Final panel assembly
@@ -2144,7 +1874,6 @@ def run_nuisance_model(model_type):
         crossfit_fold_summary(df),
         OUTDIR / "crossfit_fold_summary.csv",
     )
-    # Save a data frame as CSV
     crossfit_row_assignments(df).to_csv(
         CROSSFIT_ROW_ASSIGNMENTS_FILE,
         index=False,
@@ -2159,9 +1888,8 @@ def run_nuisance_model(model_type):
     )
 
     # Fit outcome scores
-    df, _, in_summary, out_summary, in_models, out_models = fit_outcome_scores(
+    df, in_summary, out_summary, in_models, out_models = fit_outcome_scores(
         df,
-        feature_cols,
         in_feature_cols,
         out_feature_cols,
     )

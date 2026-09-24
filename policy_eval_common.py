@@ -1,8 +1,7 @@
 # Share estimator-agnostic helpers for policy-evaluation scripts
 
 
-import json
-
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -14,18 +13,6 @@ LOW_ESS_FRACTION = 0.10
 LOW_SUPPORT_PCT_BELOW_005_THRESHOLD = 0.10
 EXTREME_WEIGHT_P99_THRESHOLD = 30.0
 EXTREME_WEIGHT_MAX_THRESHOLD = 100.0
-TARGET_POLICY_TIMING_SOURCE = "policy_intervention_panel_long.csv resolved target-policy timeline"
-TARGET_POLICY_TIMELINE_HELPER = "policy_eval_common.add_fixed_day_target_policy_timeline"
-TARGET_POLICY_TIMELINE_SEMANTICS = (
-    "fixed-day removal: before removal day is in/keep; first row on removal "
-    "day is in/remove; later rows on the same removal day are out/out with "
-    "policy_periods_out = 0; later days are out/out"
-)
-
-
-def save_json(payload, path):
-    # Save structured run metadata
-    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
 def save_report_df(df, path, decimals=3):
@@ -356,3 +343,148 @@ def add_overlap_quality_flags(
     for col in ["low_adherence_flag", "low_ess_flag", "low_support_flag", "extreme_weight_flag"]:
         out.loc[current, col] = False
     return out
+
+
+CROSSFIT_FOLD_COL = "_crossfit_fold"
+
+
+PREDICTION_COLUMNS = [
+    "p_cauti_if_keep",
+    "p_cauti_if_remove",
+    "p_cauti_if_out",
+    "p_reinsertion_if_out",
+    "p_death_if_keep",
+    "p_death_if_remove",
+    "p_death_if_out",
+    "p_icu_exit_alive_if_keep",
+    "p_icu_exit_alive_if_remove",
+    "p_icu_exit_alive_if_out",
+    "p_no_event_if_keep",
+    "p_no_event_if_remove",
+    "p_no_event_if_out",
+]
+
+
+def first_non_null(series):
+    # Return the first non-missing value
+    non_null = series.dropna()
+    return non_null.iloc[0] if len(non_null) else np.nan
+
+
+def max_binary(series):
+    # Return whether any binary value is present
+    numeric = pd.to_numeric(series, errors="coerce").fillna(0)
+    if numeric.empty:
+        return np.nan
+    return int(numeric.max() > 0)
+
+
+def add_episode_day_since_insertion(df):
+    # Add episode day since catheter insertion
+    df = df.copy()
+    inserted = pd.to_datetime(df["inserted"], errors="coerce")
+    period_start = pd.to_datetime(df["period_start"], errors="coerce")
+    elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
+    df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
+    df.loc[df["episode_day_since_insertion"].lt(1), "episode_day_since_insertion"] = 1
+    return df
+
+
+def predict_fold_model(fold_model, features):
+    if fold_model["fallback"]:
+        return np.full(len(features), float(fold_model["fallback_probability"]), dtype=float)
+
+    retained_feature_cols = list(fold_model["retained_feature_cols"])
+    return fold_model["model"].predict_proba(
+        features.loc[:, retained_feature_cols].to_numpy(dtype=float)
+    )[:, 1]
+
+
+def rescore_state_action_predictions(
+    df,
+    payload,
+    state,
+    outcome,
+    output_col,
+    target_mask,
+    action_remove=None,
+):
+    if int(target_mask.sum()) == 0:
+        return df
+
+    models_key = "in_models" if state == "in" else "out_models"
+    x_cols_key = "x_cols_in" if state == "in" else "x_cols_out"
+    feature_cols = list(payload[x_cols_key])
+
+    fold_models = payload[models_key][outcome]["fold_models"]
+    for fold_model in fold_models:
+        fold = int(fold_model["fold"])
+        rows = target_mask & pd.to_numeric(
+            df[CROSSFIT_FOLD_COL],
+            errors="coerce",
+        ).eq(fold)
+        if int(rows.sum()) == 0:
+            continue
+        features = df.loc[rows, feature_cols].copy()
+        if state == "in":
+            action_col = payload["action_remove_col"]
+            features[action_col] = action_remove
+        df.loc[rows, output_col] = predict_fold_model(fold_model, features[feature_cols])
+        df.loc[rows, f"__rescored_{output_col}"] = True
+    return df
+
+
+def fill_missing_counterfactual_predictions(
+    df,
+    outcome_models_path,
+):
+    # Standardise prediction columns and track rescored values
+    df[PREDICTION_COLUMNS] = df[PREDICTION_COLUMNS].apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    rescored_cols = {
+        f"__rescored_{col}": False
+        for col in PREDICTION_COLUMNS
+    }
+    df = pd.concat([df, pd.DataFrame(rescored_cols, index=df.index)], axis=1)
+
+    # Define every state-action prediction needed downstream
+    needed_specs = [
+        ("in", "cauti", "p_cauti_if_keep", 0),
+        ("in", "cauti", "p_cauti_if_remove", 1),
+        ("out", "cauti", "p_cauti_if_out", None),
+        ("out", "reinsertion", "p_reinsertion_if_out", None),
+        ("in", "death", "p_death_if_keep", 0),
+        ("in", "death", "p_death_if_remove", 1),
+        ("out", "death", "p_death_if_out", None),
+        ("in", "icu_exit_alive", "p_icu_exit_alive_if_keep", 0),
+        ("in", "icu_exit_alive", "p_icu_exit_alive_if_remove", 1),
+        ("out", "icu_exit_alive", "p_icu_exit_alive_if_out", None),
+        ("in", "no_event", "p_no_event_if_keep", 0),
+        ("in", "no_event", "p_no_event_if_remove", 1),
+        ("out", "no_event", "p_no_event_if_out", None),
+    ]
+
+
+    if not df[PREDICTION_COLUMNS].isna().any().any():
+        return df
+
+    # Load saved outcome model artefacts
+    payload = joblib.load(outcome_models_path)
+
+    for state, outcome, col, action_remove in needed_specs:
+        missing_mask = df[col].isna()
+        if int(missing_mask.sum()) == 0:
+            continue
+        df = rescore_state_action_predictions(
+            df,
+            payload,
+            state,
+            outcome,
+            col,
+            missing_mask,
+            action_remove,
+        )
+
+    return df

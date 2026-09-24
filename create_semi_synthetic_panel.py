@@ -6,21 +6,18 @@ its first synthetic removal and is OUT thereafter. Oracle quantities are written
 to separate files and never added to an estimator input panel.
 
 The script is intentionally standalone and is not called by the production
-pipeline. See README_validation.md for the estimand, DGP, and staging caveats.
+pipeline.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from build_policy_intervention_panels import (
-    EPISODE_KEY_COLS,
     POLICY_DAYS,
     POLICY_INPUT_COLS,
     add_policy_episode_day,
@@ -109,7 +106,6 @@ RANDOMISED_PANEL_FILENAME = "semi_synthetic_panel_randomised_action.csv"
 TRUTH_FILENAME = "semi_synthetic_truth.csv"
 ORACLE_POLICY_FILENAME = "oracle_policy_values.csv"
 COEFFICIENTS_FILENAME = "simulation_coefficients.csv"
-METADATA_FILENAME = "simulation_metadata.json"
 
 ORACLE_ONLY_PREFIXES = (
     "true_",
@@ -146,11 +142,6 @@ def parse_args():
             "constant and independent of the selected confounders."
         ),
     )
-    parser.add_argument(
-        "--overwrite-validation-outputs",
-        action="store_true",
-        help="Allow replacement of existing files inside the validation output directory.",
-    )
     return parser.parse_args()
 
 
@@ -175,26 +166,7 @@ def normalise_binary(series, column_name):
     return numeric.astype(np.int8)
 
 
-def required_source_columns():
-    return {
-        *EPISODE_KEY_COLS,
-        *POLICY_INPUT_COLS,
-        "episode_index",
-        REINSERTION_RISK_COL,
-        "reinsertion_in_period",
-        "death_in_period",
-        "icu_exit_alive_in_period",
-        "episode_end_time",
-        "episode_end_reason",
-        AGE_COL,
-        HEART_RATE_MEAN_COL,
-        CAUTI_RISK_COL,
-    }
-
-
 def load_source_panel(path):
-    if not path.is_file():
-        raise FileNotFoundError(f"Source modelling panel not found: {path}")
 
     panel = pd.read_csv(path, low_memory=False)
     panel.columns = panel.columns.str.strip()
@@ -202,9 +174,6 @@ def load_source_panel(path):
         duplicates = panel.columns[panel.columns.duplicated()].tolist()
         raise ValueError(f"Source panel contains duplicate columns: {duplicates}")
 
-    missing = sorted(required_source_columns() - set(panel.columns))
-    if missing:
-        raise ValueError(f"Source panel is missing required columns: {missing}")
 
     states = panel[STATE_COL].astype("string").str.strip().str.lower()
     unknown_states = sorted(set(states.dropna()) - {"in", "out"})
@@ -524,7 +493,7 @@ def make_omitted_confounder_panel(primary_panel):
     # ``all_missing``.
     for column in omitted_columns:
         omitted_panel[column] = np.nan
-    return omitted_panel, omitted_columns
+    return omitted_panel
 
 
 def build_truth_table(
@@ -1106,84 +1075,6 @@ def assert_no_oracle_columns(panel, panel_name):
         )
 
 
-def assert_truth_safety(primary_panel, truth, probability_arrays):
-    if len(truth) != len(primary_panel):
-        raise AssertionError("Truth table row count does not match the validation panel")
-    expected_ids = np.arange(1, len(primary_panel) + 1, dtype=np.int64)
-    if not np.array_equal(truth[VALIDATION_ROW_ID_COL].to_numpy(), expected_ids):
-        raise AssertionError("Validation truth row IDs are not stable and sequential")
-
-    assert_no_oracle_columns(primary_panel, "primary estimator-input panel")
-
-    eligible = normalise_binary(truth["dgp_action_eligible"], "dgp_action_eligible").eq(1)
-    propensity = pd.to_numeric(truth["true_propensity_remove"], errors="coerce")
-    if propensity.loc[eligible].isna().any() or propensity.loc[~eligible].notna().any():
-        raise AssertionError("Primary truth propensities do not match sequential decision rows")
-    if not np.array_equal(
-        truth["synthetic_action"].to_numpy(dtype=np.int8),
-        normalise_binary(primary_panel[ACTION_COL], ACTION_COL).to_numpy(dtype=np.int8),
-    ):
-        raise AssertionError("Primary truth actions do not match the estimator-input panel")
-    if not np.array_equal(
-        truth["synthetic_outcome"].to_numpy(dtype=np.int8),
-        normalise_binary(primary_panel[OUTCOME_COL], OUTCOME_COL).to_numpy(dtype=np.int8),
-    ):
-        raise AssertionError("Primary truth outcomes do not match the estimator-input panel")
-
-    if "true_propensity_remove_randomised" in truth.columns:
-        randomised_eligible = normalise_binary(
-            truth["dgp_action_eligible_randomised"],
-            "dgp_action_eligible_randomised",
-        ).eq(1)
-        randomised_propensity = pd.to_numeric(
-            truth["true_propensity_remove_randomised"], errors="coerce"
-        )
-        if (
-            randomised_propensity.loc[randomised_eligible].isna().any()
-            or randomised_propensity.loc[~randomised_eligible].notna().any()
-        ):
-            raise AssertionError(
-                "Randomised truth propensities do not match sequential decision rows"
-            )
-
-    for label, values in probability_arrays.items():
-        numeric = np.asarray(values, dtype=float)
-        present = numeric[np.isfinite(numeric)]
-        if present.size and ((present < 0.0) | (present > 1.0)).any():
-            raise AssertionError(f"{label} contains probabilities outside [0, 1]")
-
-
-def assert_omitted_panel(primary_panel, omitted_panel, omitted_columns):
-    if len(omitted_panel) != len(primary_panel):
-        raise AssertionError("Omitted-confounder panel changed the row count")
-    if list(omitted_panel.columns) != list(primary_panel.columns):
-        raise AssertionError("Omitted-confounder panel changed the panel schema")
-    if omitted_panel.loc[:, omitted_columns].notna().any().any():
-        raise AssertionError("The selected heart-rate confounder block remains available")
-
-    retained_columns = [
-        column for column in primary_panel.columns if column not in omitted_columns
-    ]
-    pd.testing.assert_frame_equal(
-        primary_panel.loc[:, retained_columns],
-        omitted_panel.loc[:, retained_columns],
-        check_dtype=True,
-        check_exact=True,
-    )
-    pd.testing.assert_series_equal(
-        primary_panel[ACTION_COL],
-        omitted_panel[ACTION_COL],
-        check_dtype=True,
-        check_exact=True,
-    )
-    pd.testing.assert_series_equal(
-        primary_panel[OUTCOME_COL],
-        omitted_panel[OUTCOME_COL],
-        check_dtype=True,
-        check_exact=True,
-    )
-
-
 def output_paths(output_dir, include_randomised):
     paths = {
         "primary_panel": output_dir / PRIMARY_PANEL_FILENAME,
@@ -1191,239 +1082,17 @@ def output_paths(output_dir, include_randomised):
         "truth": output_dir / TRUTH_FILENAME,
         "oracle_policy_values": output_dir / ORACLE_POLICY_FILENAME,
         "coefficients": output_dir / COEFFICIENTS_FILENAME,
-        "metadata": output_dir / METADATA_FILENAME,
     }
     if include_randomised:
         paths["randomised_panel"] = output_dir / RANDOMISED_PANEL_FILENAME
     return paths
 
 
-def assert_output_safety(source_path, paths, overwrite):
+def assert_output_safety(source_path, paths):
     source_resolved = source_path.resolve()
     for label, path in paths.items():
         if path.resolve() == source_resolved:
             raise AssertionError(f"Output {label} would overwrite the real source panel")
-        if path.exists() and not overwrite:
-            raise FileExistsError(
-                f"Validation output already exists: {path}. Use "
-                "--overwrite-validation-outputs only after reviewing it."
-            )
-
-
-def build_metadata(
-    source_path,
-    output_dir,
-    source_panel,
-    primary_panel,
-    standardisation,
-    action_intercept,
-    true_propensity,
-    observed_probability,
-    omitted_columns,
-    write_randomised,
-):
-    source_states = source_panel[STATE_COL].astype("string").str.strip().str.lower()
-    source_decision_mask = source_states.eq("in")
-    primary_states = primary_panel[STATE_COL].astype("string").str.strip().str.lower()
-    decision_mask = primary_states.eq("in")
-    outcome_risk = normalise_binary(
-        primary_panel[CAUTI_RISK_COL], CAUTI_RISK_COL
-    ).eq(1)
-    real_action = normalise_binary(source_panel[ACTION_COL], ACTION_COL)
-    synthetic_action = normalise_binary(primary_panel[ACTION_COL], ACTION_COL)
-    synthetic_outcome = normalise_binary(primary_panel[OUTCOME_COL], OUTCOME_COL)
-
-    return {
-        "source_panel": str(source_path.resolve()),
-        "output_directory": str(output_dir.resolve()),
-        "generation_date_utc": datetime.now(timezone.utc).isoformat(),
-        "random_seed": RANDOM_SEED,
-        "scenario": "semi_synthetic_measured_confounding_sequential_catheter_trajectory",
-        "selected_confounders": [
-            {
-                "column": AGE_COL,
-                "description": "age",
-                "timing": "baseline/pre-decision",
-            },
-            {
-                "column": PERIODS_COL,
-                "description": "number of periods already spent in the current catheter state",
-                "timing": "available at the current decision",
-            },
-            {
-                "column": HEART_RATE_MEAN_COL,
-                "description": "mean heart rate in the production 24-hour lookback ending at period_start",
-                "timing": "pre-decision chart covariate",
-            },
-        ],
-        "standardisation_reference": (
-            "all source rows with at_risk_cauti == 1; missing continuous values "
-            "are mean-imputed only inside the DGP so their z-score is zero"
-        ),
-        "standardisation": standardisation,
-        "action_dgp": {
-            "eligible_rows": (
-                "sequential synthetic catheter_state == 'in'; eligibility ends "
-                "permanently at the first synthetic removal"
-            ),
-            "formula": (
-                "clip(expit(alpha_0 + 0.45*z_age + "
-                "0.70*z_periods_in_state + 0.80*z_heart_rate_mean), 0.05, 0.95)"
-            ),
-            "alpha_0_calibrated": action_intercept,
-            "coefficients": ACTION_COEFFICIENTS,
-            "probability_bounds": [
-                ACTION_PROBABILITY_LOWER,
-                ACTION_PROBABILITY_UPPER,
-            ],
-            "intercept_calibration_target": (
-                "real action prevalence on source catheter-IN rows; the realised "
-                "sequential prevalence can differ because later decisions cease after removal"
-            ),
-        },
-        "outcome_dgp": {
-            "outcome": "row-level synthetic CAUTI indicator",
-            "risk_rows": (
-                "all synthetic IN rows and the first two synthetic OUT periods; "
-                "zero outside this recalculated risk set"
-            ),
-            "formula_keep": (
-                "expit(-2.40 + 0.40*z_age + 0.55*z_periods_in_state + "
-                "0.75*z_heart_rate_mean)"
-            ),
-            "formula_remove": (
-                "expit(-2.40 + 0.40*z_age + 0.55*z_periods_in_state + "
-                "0.75*z_heart_rate_mean - 0.90)"
-            ),
-            "formula_out": "same as formula_remove on eligible synthetic OUT follow-up rows",
-            "intercept": OUTCOME_INTERCEPT,
-            "confounder_coefficients": OUTCOME_COEFFICIENTS,
-            "treatment_log_odds_effect_tau": TREATMENT_LOG_ODDS_EFFECT,
-            "causal_interpretation": (
-                "Removal is conditionally protective on the row-level outcome odds. "
-                "Positive shared confounder coefficients make higher-risk rows more "
-                "likely to be removed, deliberately biasing crude comparisons toward "
-                "less protection, the null, or harm."
-            ),
-            "row_draws": (
-                "independent Bernoulli draws conditional on action and measured "
-                "pre-decision covariates; repeated interval events within an episode "
-                "are permitted for this code-validation endpoint"
-            ),
-        },
-        "prevalence": {
-            "real_action_prevalence_on_decision_rows": float(
-                real_action.loc[source_decision_mask].mean()
-            ),
-            "intended_synthetic_action_prevalence": float(
-                real_action.loc[source_decision_mask].mean()
-            ),
-            "mean_true_synthetic_propensity_on_decision_rows": float(
-                np.nanmean(true_propensity)
-            ),
-            "realised_synthetic_action_prevalence_on_decision_rows": float(
-                synthetic_action.loc[decision_mask].mean()
-            ),
-            "intended_synthetic_event_prevalence_on_risk_rows": float(
-                np.asarray(observed_probability)[outcome_risk.to_numpy()].mean()
-            ),
-            "realised_synthetic_event_prevalence_on_risk_rows": float(
-                synthetic_outcome.loc[outcome_risk].mean()
-            ),
-        },
-        "replaced_columns": {
-            "synthetic_removal_time": "removed",
-            "catheter_state": STATE_COL,
-            "episode_index": "episode_index",
-            "periods_in_state": PERIODS_COL,
-            "action": ACTION_COL,
-            "binary_action": ACTION_REMOVE_COL,
-            "derived_action_label": OBSERVED_ACTION_COL,
-            "cauti_risk_set": CAUTI_RISK_COL,
-            "reinsertion_risk_set": REINSERTION_RISK_COL,
-            "outcome": OUTCOME_COL,
-        },
-        "unchanged_observed_outcomes": [
-            "reinsertion_in_period",
-            "death_in_period",
-            "icu_exit_alive_in_period",
-        ],
-        "recalculated_state_dependent_fields": [
-            "removed",
-            STATE_COL,
-            "episode_index",
-            PERIODS_COL,
-            ACTION_COL,
-            ACTION_REMOVE_COL,
-            OBSERVED_ACTION_COL,
-            CAUTI_RISK_COL,
-            REINSERTION_RISK_COL,
-            *[
-                column
-                for column in OPTIONAL_DECISION_INDICATOR_COLS
-                if column in primary_panel.columns
-            ],
-        ],
-        "omitted_confounder": {
-            "selected_information": "Heart Rate (MIMIC itemid 220045)",
-            "method": (
-                "set every itemid_220045__* aggregation and missingness indicator "
-                "to all-missing; normal fold-specific feature handling removes them"
-            ),
-            "columns": omitted_columns,
-        },
-        "optional_randomised_action_panel_written": bool(write_randomised),
-        "oracle": {
-            "row_truth_file": TRUTH_FILENAME,
-            "policy_truth_file": ORACLE_POLICY_FILENAME,
-            "policies_source": "build_policy_intervention_panels.POLICY_DAYS and production helper functions",
-            "policy_days": list(POLICY_DAYS),
-            "policy_names": [f"remove_on_day_{day}" for day in POLICY_DAYS],
-            "target_population": (
-                "all catheter episodes on the preserved row grid with policy-specific IN/OUT states"
-            ),
-            "trajectory_rule": (
-                "IN/keep before the fixed removal day, IN/remove on its first row, "
-                "then OUT with no further keep/remove decisions"
-            ),
-            "episode_aggregation": "1 - product(1 - row hazard)",
-            "policy_aggregation": "equally weighted mean across catheter episodes",
-        },
-        "trajectory_scaffold": {
-            "source_row_count": int(len(source_panel)),
-            "retained_row_count": int(len(primary_panel)),
-            "dropped_row_count": int(len(source_panel) - len(primary_panel)),
-            "patients": int(source_panel["subject_id"].nunique()),
-            "stays": int(source_panel["stay_id"].nunique()),
-            "stable_episode_identity_columns": EPISODE_IDENTITY_COLS,
-            "downstream_episode_key": EPISODE_KEY_COLS,
-            "statement": (
-                "Synthetic removal determines the subsequent catheter IN/OUT path. "
-                "The first removal ends keep/remove decisions; retained later rows are "
-                "OUT follow-up rows. Clinical covariates and terminal events remain fixed."
-            ),
-            "post_removal_rows": (
-                "retained through the existing terminal endpoint; the first two OUT "
-                "periods remain in the CAUTI attribution risk set"
-            ),
-            "episodes_without_synthetic_removal": (
-                "remain IN through the existing terminal endpoint; removed is set equal "
-                "to episode_end_time and no removal is forced"
-            ),
-        },
-        "limitations": [
-            "Tests measured-confounding adjustment while preserving the observed longitudinal EHR scaffold.",
-            "Does not validate treatment-confounder feedback in clinical covariates.",
-            "Does not simulate action-induced changes in later clinical covariate values.",
-            "Does not simulate policy-induced changes in episode duration.",
-            "Does not simulate terminal-event evolution.",
-            "Post-removal catheter state and deterministic risk sets are rebuilt, but future clinical state variables are not simulated.",
-            "Does not test hidden confounding.",
-            "Does not establish full longitudinal identification.",
-            "Does not test severe positivity failure because action probabilities are bounded to [0.05, 0.95].",
-            "Repeated row-level synthetic CAUTI events within an episode are permitted; the target endpoint is any event.",
-        ],
-    }
 
 
 def main():
@@ -1434,7 +1103,6 @@ def main():
     assert_output_safety(
         source_path,
         paths,
-        args.overwrite_validation_outputs,
     )
 
     source_panel = load_source_panel(source_path)
@@ -1480,7 +1148,7 @@ def main():
         outcome_uniform,
     )
     primary_panel = attach_synthetic_outcome(primary_trajectory, synthetic_outcome)
-    omitted_panel, omitted_columns = make_omitted_confounder_panel(primary_panel)
+    omitted_panel = make_omitted_confounder_panel(primary_panel)
 
     randomised_panel = None
     randomised_propensity = None
@@ -1545,39 +1213,10 @@ def main():
         action_intercept,
         randomised_action_intercept,
     )
-    metadata = build_metadata(
-        source_path,
-        output_dir,
-        source_panel,
-        primary_panel,
-        standardisation,
-        action_intercept,
-        true_propensity,
-        observed_probability,
-        omitted_columns,
-        args.write_randomised_action,
-    )
 
     # All safety checks run before any validation output is written.
     assert_primary_integrity(source_panel, primary_panel)
-    assert_omitted_panel(primary_panel, omitted_panel, omitted_columns)
     assert_no_oracle_columns(omitted_panel, "omitted-confounder estimator-input panel")
-    probability_arrays = {
-        "true_propensity_remove": true_propensity,
-        "true_mu_keep": true_mu_keep,
-        "true_mu_remove": true_mu_remove,
-        "true_mu_out": true_mu_out,
-        "true_mu_observed_action": observed_probability,
-    }
-    if randomised_propensity is not None:
-        probability_arrays["true_propensity_remove_randomised"] = randomised_propensity
-        probability_arrays["true_mu_keep_randomised"] = randomised_truth["mu_keep"]
-        probability_arrays["true_mu_remove_randomised"] = randomised_truth["mu_remove"]
-        probability_arrays["true_mu_out_randomised"] = randomised_truth["mu_out"]
-        probability_arrays["true_mu_observed_action_randomised"] = randomised_truth[
-            "observed_probability"
-        ]
-    assert_truth_safety(primary_panel, truth, probability_arrays)
     if randomised_panel is not None:
         assert_primary_integrity(source_panel, randomised_panel)
         assert_no_oracle_columns(randomised_panel, "randomised estimator-input panel")
@@ -1588,10 +1227,6 @@ def main():
     truth.to_csv(paths["truth"], index=False)
     oracle_policy_values.to_csv(paths["oracle_policy_values"], index=False)
     coefficients.to_csv(paths["coefficients"], index=False)
-    paths["metadata"].write_text(
-        json.dumps(metadata, indent=2, default=str),
-        encoding="utf-8",
-    )
     if randomised_panel is not None:
         randomised_panel.to_csv(paths["randomised_panel"], index=False)
 

@@ -5,11 +5,19 @@
 import argparse
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
+import policy_bootstrap as bootstrap
+import fit_nuisance_models as nuisance
+from policy_eval_common import (
+    PREDICTION_COLUMNS,
+    first_non_null,
+    max_binary,
+    add_episode_day_since_insertion,
+    fill_missing_counterfactual_predictions,
+)
 from panel_run_config import add_panel_argument, resolve_panel_run
 
 
@@ -17,27 +25,8 @@ from panel_run_config import add_panel_argument, resolve_panel_run
 
 REPO_ROOT = Path(__file__).resolve().parent
 NUISANCE_MODEL_TYPE = "xgboost"
-NUISANCE_MODEL_DIR = (
-    REPO_ROOT / "artefacts" / "nuisance_models" / NUISANCE_MODEL_TYPE
-)
-
-POLICY_PANEL_PATH = (
-    REPO_ROOT
-    / "artefacts"
-    / "policy_interventions"
-    / "policy_intervention_panel_long.csv"
-)
-NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
-OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
-OUTDIR = REPO_ROOT / "artefacts" / "policy_eval" / "gformula"
-
-OUTPUT_PATHS = {
-    "summary": OUTDIR / "gformula_policy_outcomes_summary.csv",
-    "episodes": OUTDIR / "gformula_episode_predictions.csv",
-    "diagnostics": OUTDIR / "gformula_diagnostics.csv",
-    "current_practice": OUTDIR / "current_practice_gformula_episode_predictions.csv",
-    "metadata": OUTDIR / "gformula_run_metadata.json",
-}
+N_BOOTSTRAP = 1000
+REFIT_NUISANCE = False  # True: refit each bootstrap sample; False: reuse saved predictions.
 
 
 def configure_panel_run(panel_name):
@@ -63,15 +52,16 @@ def configure_panel_run(panel_name):
         "current_practice": (
             OUTDIR / "current_practice_gformula_episode_predictions.csv"
         ),
-        "metadata": OUTDIR / "gformula_run_metadata.json",
     }
     return paths
+
+
+configure_panel_run("real")
 
 CURRENT_PRACTICE_LABEL = "current_practice"
 ESTIMATOR_NAME = "plugin_gformula"
 PREDICTION_MODE = "observed_grid_plugin"
 POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS = 2
-CROSSFIT_FOLD_COL = "_crossfit_fold"
 
 EPISODE_ID_COL = "catheter_episode_id"
 POLICY_TYPE_COL = "policy_type"
@@ -94,21 +84,6 @@ ROW_JOIN_KEY_COLS = [
     "removed_in_period",
 ]
 
-PREDICTION_COLUMNS = [
-    "p_cauti_if_keep",
-    "p_cauti_if_remove",
-    "p_cauti_if_out",
-    "p_reinsertion_if_out",
-    "p_death_if_keep",
-    "p_death_if_remove",
-    "p_death_if_out",
-    "p_icu_exit_alive_if_keep",
-    "p_icu_exit_alive_if_remove",
-    "p_icu_exit_alive_if_out",
-    "p_no_event_if_keep",
-    "p_no_event_if_remove",
-    "p_no_event_if_out",
-]
 
 NUISANCE_COLUMNS = [
     *PREDICTION_COLUMNS,
@@ -159,20 +134,6 @@ MISSING_COUNTERFACTUAL_MESSAGE = (
 
 
 # Generic helpers
-
-
-def first_non_null(series):
-    # Return the first non-missing value
-    non_null = series.dropna()
-    return non_null.iloc[0] if len(non_null) else np.nan
-
-
-def max_binary(series):
-    # Return whether any binary value is present
-    numeric = pd.to_numeric(series, errors="coerce").fillna(0)
-    if numeric.empty:
-        return np.nan
-    return int(numeric.max() > 0)
 
 
 def cumulative_event_probability(probabilities):
@@ -244,142 +205,8 @@ def join_nuisance_predictions(policy_df, nuisance_df):
 
 # Target-policy state timeline
 
-def add_episode_day_since_insertion(df):
-    # Add episode day since catheter insertion
-    df = df.copy()
-    inserted = pd.to_datetime(df["inserted"], errors="coerce")
-    period_start = pd.to_datetime(df["period_start"], errors="coerce")
-    elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
-    df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
-    df.loc[df["episode_day_since_insertion"].lt(1), "episode_day_since_insertion"] = 1
-    return df
-
 
 # Counterfactual prediction rescoring
-
-def predict_fold_model(fold_model, features):
-    # Predict probabilities from one fold model
-    if fold_model["fallback"]:
-        return np.full(len(features), float(fold_model["fallback_probability"]), dtype=float)
-
-    retained_feature_cols = list(fold_model["retained_feature_cols"])
-    missing_features = sorted(set(retained_feature_cols) - set(features.columns))
-    if missing_features:
-        raise ValueError(
-            "Rescoring data are missing features retained by the fitted fold model: "
-            f"{missing_features}"
-        )
-    return fold_model["model"].predict_proba(
-        features.loc[:, retained_feature_cols].to_numpy(dtype=float)
-    )[:, 1]
-
-
-def rescore_state_action_predictions(
-    df,
-    payload,
-    state,
-    outcome,
-    output_col,
-    target_mask,
-    action_remove=None,
-):
-    # Rescore missing state-action predictions
-    if int(target_mask.sum()) == 0:
-        return df
-
-    models_key = "in_models" if state == "in" else "out_models"
-    x_cols_key = "x_cols_in" if state == "in" else "x_cols_out"
-    feature_cols = list(payload[x_cols_key])
-
-    fold_models = payload[models_key][outcome]["fold_models"]
-    # Predict probabilities from one fold model
-    for fold_model in fold_models:
-        fold = int(fold_model["fold"])
-        rows = target_mask & pd.to_numeric(
-            df[CROSSFIT_FOLD_COL],
-            errors="coerce",
-        ).eq(fold)
-        if int(rows.sum()) == 0:
-            continue
-        features = df.loc[rows, feature_cols].copy()
-        if state == "in":
-            action_col = payload["action_remove_col"]
-            features[action_col] = action_remove
-        # Predict probabilities from one fold model
-        df.loc[rows, output_col] = predict_fold_model(fold_model, features[feature_cols])
-        df.loc[rows, f"__rescored_{output_col}"] = True
-    return df
-
-
-def fill_missing_counterfactual_predictions(
-    df,
-    outcome_models_path,
-):
-    # Standardise prediction columns and track rescored values
-    df[PREDICTION_COLUMNS] = df[PREDICTION_COLUMNS].apply(
-        pd.to_numeric,
-        errors="coerce",
-    )
-    rescored_cols = {
-        f"__rescored_{col}": False
-        for col in PREDICTION_COLUMNS
-    }
-    df = pd.concat([df, pd.DataFrame(rescored_cols, index=df.index)], axis=1)
-
-    # Define every state-action prediction needed downstream
-    needed_specs = [
-        ("in", "cauti", "p_cauti_if_keep", 0),
-        ("in", "cauti", "p_cauti_if_remove", 1),
-        ("out", "cauti", "p_cauti_if_out", None),
-        ("out", "reinsertion", "p_reinsertion_if_out", None),
-        ("in", "death", "p_death_if_keep", 0),
-        ("in", "death", "p_death_if_remove", 1),
-        ("out", "death", "p_death_if_out", None),
-        ("in", "icu_exit_alive", "p_icu_exit_alive_if_keep", 0),
-        ("in", "icu_exit_alive", "p_icu_exit_alive_if_remove", 1),
-        ("out", "icu_exit_alive", "p_icu_exit_alive_if_out", None),
-        ("in", "no_event", "p_no_event_if_keep", 0),
-        ("in", "no_event", "p_no_event_if_remove", 1),
-        ("out", "no_event", "p_no_event_if_out", None),
-    ]
-
-    missing_before = {col: int(df[col].isna().sum()) for _, _, col, _ in needed_specs}
-
-    if not any(missing_before.values()):
-        return df, {
-            "outcome_models_used_for_rescoring": False,
-            "missing_prediction_counts_before_rescoring": missing_before,
-            "rescored_prediction_counts": {col: 0 for col in PREDICTION_COLUMNS},
-        }
-
-    # Load saved outcome model artefacts
-    payload = joblib.load(outcome_models_path)
-
-    # Rescore missing state-action predictions
-    for state, outcome, col, action_remove in needed_specs:
-        missing_mask = df[col].isna()
-        if int(missing_mask.sum()) == 0:
-            continue
-        # Rescore missing state-action predictions
-        df = rescore_state_action_predictions(
-            df,
-            payload,
-            state,
-            outcome,
-            col,
-            missing_mask,
-            action_remove,
-        )
-
-    rescored_counts = {
-        col: int(df[f"__rescored_{col}"].sum())
-        for col in PREDICTION_COLUMNS
-    }
-    return df, {
-        "outcome_models_used_for_rescoring": any(count > 0 for count in rescored_counts.values()),
-        "missing_prediction_counts_before_rescoring": missing_before,
-        "rescored_prediction_counts": rescored_counts,
-    }
 
 
 # Prediction selection and validation
@@ -684,7 +511,7 @@ def add_current_practice_comparisons(summary):
     )
 
 
-# Diagnostics and metadata
+# Diagnostics
 
 def prediction_bounds(df, col):
     # Summarise prediction bounds for one column
@@ -794,65 +621,6 @@ def build_diagnostics(row_df, episode_df):
     return pd.DataFrame(rows)
 
 
-def metadata_payload(
-    output_paths,
-    row_df,
-    episode_df,
-    rescore_metadata,
-):
-    # Build run metadata
-    return {
-        "estimator": ESTIMATOR_NAME,
-        "nuisance_model_type": NUISANCE_MODEL_TYPE,
-        "prediction_mode": PREDICTION_MODE,
-        "current_practice_comparator_type": "model_based_plugin_observed_regime",
-        "input_paths": {
-            "policy_panel": str(POLICY_PANEL_PATH),
-            "nuisance_predictions": str(NUISANCE_PREDICTIONS_PATH),
-            "outcome_models": str(OUTCOME_MODELS_PATH),
-        },
-        "output_paths": {key: str(value) for key, value in output_paths.items()},
-        "required_prediction_columns": PREDICTION_COLUMNS,
-        "number_of_policies": int(row_df["policy_name"].nunique()),
-        "number_of_episodes": int(row_df[EPISODE_ID_COL].nunique()),
-        "number_of_complete_prediction_episodes": int(episode_df["prediction_complete"].astype(bool).sum()),
-        "target_policy_timing_source": pec.TARGET_POLICY_TIMING_SOURCE,
-        "target_policy_timeline_helper": pec.TARGET_POLICY_TIMELINE_HELPER,
-        "target_policy_timeline_semantics": pec.TARGET_POLICY_TIMELINE_SEMANTICS,
-        "duration_semantics": {
-            "period_duration_days": "period_end - period_start in days",
-            "catheter_exposure_days": "sum of period_duration_days where policy_catheter_state == in",
-            "max_reasonable_period_duration_days": pec.MAX_REASONABLE_PERIOD_DURATION_DAYS,
-            "n_long_period_duration_rows": int(
-                row_df["period_duration_long_flag"].sum()
-            ),
-        },
-        "catheter_count_semantics": {
-            "expected_catheter_in_intervals": (
-                "count of policy-implied catheter-in interval rows on the observed grid; "
-                "not necessarily one row per patient-day because transition days may be "
-                "split into in and out intervals"
-            ),
-            "expected_catheter_exposure_days": (
-                "sum of period_duration_days where policy_catheter_state == in; "
-                "preferred exposure measure for interpretation"
-            ),
-        },
-        "icu_exit_alive_definition": (
-            "max(icu_exit_alive_in_period == 1); death and ICU exit alive are "
-            "mutually exclusive terminal events in the source panel"
-        ),
-        "rescoring": rescore_metadata,
-        "methodological_limitations": [
-            "Plug-in estimates depend on the fitted nuisance outcome models.",
-            "The implementation uses the observed patient-day covariate grid.",
-            "The implementation does not simulate future time-varying covariates under each policy.",
-            "The implementation does not model absorbing terminal state propagation beyond observed rows.",
-            "The implementation is not IPW, AIPW, DML, DR-Learner, TMLE, or LTMLE.",
-        ],
-    }
-
-
 # Console summary and main
 
 def print_console_summary(
@@ -861,12 +629,10 @@ def print_console_summary(
     episode_df,
     output_paths,
 ):
-    # Print a concise run summary
     print()
     print("--- G-FORMULA POLICY EVALUATION COMPLETE ---")
     print(f"Policy-intervention panel: {POLICY_PANEL_PATH}")
     print(f"Nuisance model type: {NUISANCE_MODEL_TYPE}")
-    print(f"Nuisance predictions: {NUISANCE_PREDICTIONS_PATH}")
     print(f"Number of policies: {row_df['policy_name'].nunique():,}")
     print(f"Number of patients: {row_df['subject_id'].nunique():,}")
     print(f"Number of episodes: {row_df[EPISODE_ID_COL].nunique():,}")
@@ -885,37 +651,22 @@ def print_console_summary(
         print(f"Saved {label}: {path}")
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Evaluate fixed-day policies with the plug-in g-formula."
     )
     add_panel_argument(parser)
-    return parser.parse_args()
+    parser.add_argument("--refit-nuisance", action="store_true", default=REFIT_NUISANCE,
+                        help="Refit outcome models in each bootstrap sample; default: REFIT_NUISANCE setting.")
+    return parser.parse_args(argv)
 
 
-def main():
-    args = parse_args()
-    configure_panel_run(args.panel)
-
-    # Create the output directory
-    OUTDIR.mkdir(exist_ok=True, parents=True)
-
-    # Load and validate the policy panel
-    policy_df = load_policy_panel(POLICY_PANEL_PATH)
-    # Load and validate the nuisance predictions
-    nuisance_df = load_nuisance_predictions(NUISANCE_PREDICTIONS_PATH)
-    nuisance_df, rescore_metadata = fill_missing_counterfactual_predictions(
-        nuisance_df,
-        OUTCOME_MODELS_PATH,
-    )
+def evaluate_policy_episodes(policy_df, nuisance_df):
     model_feature_cols = [
         "episode_index",
         *pec.baseline_model_feature_columns(nuisance_df.columns),
     ]
-    nuisance_df.drop(
-        columns=model_feature_cols,
-        inplace=True,
-    )
+    nuisance_df = nuisance_df.drop(columns=model_feature_cols)
 
     # Join nuisance scores to policy rows
     joined_df = join_nuisance_predictions(policy_df, nuisance_df)
@@ -939,6 +690,31 @@ def main():
     current_episode_df = add_observed_crude_episode_outcomes(current_episode_df, current_rows)
 
     combined_episode_df = pd.concat([episode_df, current_episode_df], ignore_index=True, sort=False)
+    return combined_episode_df, row_df, current_rows, current_episode_df
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    paths = configure_panel_run(args.panel)
+    OUTDIR.mkdir(exist_ok=True, parents=True)
+    policy_df = load_policy_panel(POLICY_PANEL_PATH)
+    policy_df["subject_id"] = policy_df.subject_id.astype(str)
+    refit_panel = None
+    if args.refit_nuisance:
+        nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
+        refit_panel = nuisance.load_panel(paths.panel_path)
+        subjects = pd.Index(sorted(refit_panel.subject_id.unique()), name="subject_id")
+        nuisance_df, _ = bootstrap.refit_nuisance_predictions(
+            refit_panel, subjects, np.ones(len(subjects), dtype=int), "gformula",
+        )
+    else:
+        nuisance_df = load_nuisance_predictions(NUISANCE_PREDICTIONS_PATH)
+        nuisance_df = fill_missing_counterfactual_predictions(nuisance_df, OUTCOME_MODELS_PATH)
+    nuisance_df["subject_id"] = nuisance_df.subject_id.astype(str)
+    combined_episode_df, row_df, current_rows, current_episode_df = evaluate_policy_episodes(
+        policy_df, nuisance_df,
+    )
+
     # Build policy-level summary estimates
     summary_df = build_policy_summary(combined_episode_df, PREDICTION_MODE)
     # Build diagnostic rows for policy outputs
@@ -955,13 +731,13 @@ def main():
     pec.save_report_df(diagnostics_df, OUTPUT_PATHS["diagnostics"])
     # Save current-practice episode data at full precision
     current_episode_df.to_csv(OUTPUT_PATHS["current_practice"], index=False)
-    pec.save_json(
-        metadata_payload(OUTPUT_PATHS, row_df, combined_episode_df, rescore_metadata),
-        OUTPUT_PATHS["metadata"],
-    )
 
-    # Print a concise run summary
     print_console_summary(summary_df, row_df, combined_episode_df, OUTPUT_PATHS)
+
+    bootstrap.run_bootstrap(
+        "gformula", combined_episode_df, policy_df, evaluate_policy_episodes, OUTDIR,
+        N_BOOTSTRAP, refit_panel=refit_panel,
+    )
 
 
 if __name__ == "__main__":

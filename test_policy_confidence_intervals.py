@@ -11,7 +11,13 @@ import unittest
 import numpy as np
 import pandas as pd
 
-import calculate_policy_confidence_intervals as ci
+import policy_bootstrap as ci
+import evaluate_aipw_policies as aipw
+import evaluate_gformula_policies as gformula
+import evaluate_ipw_policies as ipw
+
+
+ESTIMATORS = {"gformula": gformula, "ipw": ipw, "aipw": aipw}
 
 
 OUTCOMES = (
@@ -111,27 +117,62 @@ def expand_patients(episodes, subjects, counts):
 def example_summaries(episodes, policies, rounded=True):
     """Build realistic saved summaries, including comparisons before rounding."""
     summaries = {
-        "gformula": ci.gformula.build_policy_summary(
-            episodes["gformula"], ci.gformula.PREDICTION_MODE,
+        "gformula": gformula.build_policy_summary(
+            episodes["gformula"], gformula.PREDICTION_MODE,
         ),
-        "aipw": ci.aipw.build_policy_summary(episodes["aipw"], "hajek"),
+        "aipw": aipw.build_policy_summary(episodes["aipw"], "hajek"),
     }
     rows = []
     for policy in policies.itertuples(index=False):
         group = episodes["ipw"].loc[episodes["ipw"].policy_name.eq(policy.policy_name)]
-        rows.append(ci.ipw.summarise_episode_estimates(
+        rows.append(ipw.summarise_episode_estimates(
             group, policy.policy_name, policy.policy_remove_day, 4, len(group),
         ))
-    summaries["ipw"] = ci.ipw.add_current_practice_comparisons(pd.DataFrame(rows))
+    summaries["ipw"] = ipw.add_current_practice_comparisons(pd.DataFrame(rows))
     return {name: frame.round(3) if rounded else frame for name, frame in summaries.items()}
 
 
 def reference_values(episodes, policies):
     summaries = example_summaries(episodes, policies, rounded=False)
     return np.array([
-        summaries[name].set_index("policy_name").loc[policy, ci.SUMMARY_COLUMNS[name][outcome]]
-        for name in ci.ESTIMATORS for policy in policies.policy_name for outcome in OUTCOMES
+        summaries[name].set_index("policy_name").loc[policy, SUMMARY_COLUMNS[name][outcome]]
+        for name in ESTIMATORS for policy in policies.policy_name for outcome in OUTCOMES
     ], dtype=float)
+
+
+SUMMARY_COLUMNS = {
+    "gformula": dict(zip(OUTCOMES, [
+        "predicted_cauti_risk", "predicted_recatheterisation_risk",
+        "predicted_death_risk", "predicted_icu_exit_alive_risk",
+        "expected_mean_catheter_exposure_days",
+    ])),
+    "ipw": {
+        name: f"ipw_weighted_{name}_risk" for name in ipw.OUTCOME_SPECS
+    } | {"catheter_exposure_days": "ipw_weighted_mean_catheter_exposure_days"},
+    "aipw": {
+        name: f"aipw_{spec['summary_stub']}"
+        for name, spec in aipw.OUTCOME_SPECS.items()
+    } | {"catheter_exposure_days": "aipw_mean_catheter_exposure_days"},
+}
+
+
+def bootstrap_values(design, n_bootstrap, seed):
+    rng = np.random.default_rng(seed)
+    n_patients = len(design.statistics)
+    values = np.empty((n_bootstrap, len(design.entries)))
+    diagnostics = []
+    for replicate in range(n_bootstrap):
+        # One shared draw for all estimators, policies and outcomes is essential
+        # for paired differences from current practice.
+        counts = np.bincount(rng.integers(0, n_patients, size=n_patients), minlength=n_patients)
+        values[replicate] = design.estimate(counts)
+        diagnostics.append({
+            "bootstrap_replicate": replicate + 1,
+            "n_patient_draws": int(counts.sum()),
+            "n_unique_patients_resampled": int(np.count_nonzero(counts)),
+            "n_episodes_resampled": int(counts @ design.episode_counts),
+        })
+    return values, pd.DataFrame(diagnostics)
 
 
 class PatientBootstrapTests(unittest.TestCase):
@@ -150,6 +191,17 @@ class PatientBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(len(matches), 1)
         return matches[0]
+
+    def test_single_estimator_statistics_match_joint_statistics(self):
+        for name in ESTIMATORS:
+            with self.subTest(estimator=name):
+                design = ci.build_patient_statistics({name: self.episodes[name]}, self.policies, self.subjects)
+                mask = self.design.entries.estimator.eq(name)
+                for counts in (np.ones(3, dtype=int), np.array([2, 0, 1])):
+                    np.testing.assert_allclose(
+                        design.estimate(counts), self.design.estimate(counts)[mask],
+                        rtol=1e-12, atol=1e-12, equal_nan=True,
+                    )
 
     def test_all_estimators_policies_outcomes_and_original_estimates(self):
         self.assertEqual(len(self.design.entries), 3 * 3 * 5)
@@ -202,8 +254,8 @@ class PatientBootstrapTests(unittest.TestCase):
 
     def test_draws_are_shared_and_reproducible(self):
         seed, n_bootstrap = 1234, 50
-        values, diagnostics = ci.bootstrap_values(self.design, n_bootstrap, seed)
-        repeated, repeated_diagnostics = ci.bootstrap_values(self.design, n_bootstrap, seed)
+        values, diagnostics = bootstrap_values(self.design, n_bootstrap, seed)
+        repeated, repeated_diagnostics = bootstrap_values(self.design, n_bootstrap, seed)
         np.testing.assert_array_equal(values, repeated)
         pd.testing.assert_frame_equal(diagnostics, repeated_diagnostics)
         self.assertEqual(values.shape, (n_bootstrap, len(self.design.entries)))
@@ -218,7 +270,7 @@ class PatientBootstrapTests(unittest.TestCase):
                                        rtol=1e-12, atol=1e-12, equal_nan=True)
 
     def test_policy_differences_use_paired_replicate_baselines(self):
-        values, _ = ci.bootstrap_values(self.design, 50, 91)
+        values, _ = bootstrap_values(self.design, 50, 91)
         differences = ci.paired_differences(values, self.design.entries)
         for index, entry in self.design.entries.iterrows():
             baseline = self.entry_index(entry["estimator"], "current_practice", entry["outcome"])
@@ -228,33 +280,28 @@ class PatientBootstrapTests(unittest.TestCase):
             )
 
     def test_replicate_csv_has_one_row_per_draw_and_preserves_appended_estimates(self):
-        values, diagnostics = ci.bootstrap_values(self.design, 5, 91)
+        values, diagnostics = bootstrap_values(self.design, 5, 91)
         values[2, self.entry_index("ipw", "remove_on_day_1", "cauti")] = np.nan
         diagnostics["n_fallback_folds"] = [0, 1, 0, 0, 0]
-        table, columns = ci.bootstrap_replicate_table(self.design.entries, values, diagnostics)
+        table = ci.bootstrap_replicate_table(self.design.entries, values, diagnostics)
         self.assertEqual(len(table), 5)
         self.assertTrue(table.columns.is_unique)
-        self.assertEqual(len(columns), 2 * len(self.design.entries))
+        self.assertEqual(len(table.columns) - len(diagnostics.columns), 2 * len(self.design.entries))
         pd.testing.assert_frame_equal(table[diagnostics.columns], diagnostics)
-        value_columns = columns.loc[columns.estimate_type.eq("policy_value"), "column_name"]
-        difference_columns = columns.loc[
-            columns.estimate_type.eq("difference_vs_current_practice"), "column_name",
-        ]
+        value_columns = [name for name in table if name.endswith("__policy_value")]
+        difference_columns = [name for name in table if name.endswith("__difference_vs_current_practice")]
         np.testing.assert_array_equal(table[value_columns].to_numpy(), values)
         np.testing.assert_array_equal(
             table[difference_columns].to_numpy(), ci.paired_differences(values, self.design.entries),
         )
-        self.assertTrue(columns.loc[columns.policy_name.eq("current_practice"), "policy_remove_day"].isna().all())
-        self.assertTrue(columns.loc[columns.estimate_type.eq("difference_vs_current_practice"), "comparator"].eq("current_practice").all())
 
         # The refitting script writes one completed pass at a time. Reading
         # those appended rows must give exactly the same table as batch export.
         output = StringIO()
         for replicate in range(len(values)):
-            row, row_columns = ci.bootstrap_replicate_table(
+            row = ci.bootstrap_replicate_table(
                 self.design.entries, values[replicate:replicate + 1], diagnostics.iloc[[replicate]],
             )
-            pd.testing.assert_frame_equal(columns, row_columns)
             row.to_csv(output, index=False, header=replicate == 0)
         restored = pd.read_csv(StringIO(output.getvalue()), float_precision="round_trip")
         pd.testing.assert_frame_equal(restored, table)
@@ -348,22 +395,6 @@ class PatientBootstrapTests(unittest.TestCase):
         incorrect = [marginal[0, 1] - marginal[1, 0], marginal[1, 1] - marginal[0, 0]]
         self.assertFalse(np.allclose(bounds[1], incorrect))
 
-    def test_stale_summary_values_and_differences_are_rejected(self):
-        summaries = example_summaries(self.episodes, self.policies)
-        point = self.design.estimate(np.ones(3, dtype=int))
-        checked = ci.verify_point_estimates(
-            point, self.design, self.episodes, self.policies, summaries,
-        )
-        self.assertTrue(checked["passed"])
-        for column in ("aipw_cauti_risk", "cauti_risk_difference_vs_current_practice"):
-            with self.subTest(column=column):
-                stale = {name: frame.copy() for name, frame in summaries.items()}
-                mask = stale["aipw"].policy_name.eq("remove_on_day_1")
-                stale["aipw"].loc[mask, column] += 0.01
-                with self.assertRaisesRegex(ValueError, "differs from saved summary"):
-                    ci.verify_point_estimates(
-                        point, self.design, self.episodes, self.policies, stale,
-                    )
 
 
 

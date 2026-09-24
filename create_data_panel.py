@@ -27,8 +27,8 @@ LOOKBACK_DURATION = pd.Timedelta(hours=24)
 POST_REMOVE_RISK_PERIODS = 2
 
 # Define temperature normalisation
-FAHRENHEIT_UNITS = {"F", "DEG F", "DEGREES F", "°F", "° F"}
-CELSIUS_UNIT = "°C"
+FAHRENHEIT_UNITS = {"F", "DEG F", "DEGREES F", "Â°F", "Â° F"}
+CELSIUS_UNIT = "Â°C"
 TEMP_F_ITEMID = 223761
 TEMP_C_ITEMID = 223762
 
@@ -505,15 +505,6 @@ def validate_cauti_risk_set(panel, episode_keys):
 
 
 def build_base_panel(catheterised):
-    # Require episode-level terminal metadata
-    required_endpoint_cols = {"episode_end_time", "episode_end_reason"}
-    missing_endpoint_cols = required_endpoint_cols - set(catheterised.columns)
-    if missing_endpoint_cols:
-        raise ValueError(
-            "Catheter episodes are missing terminal metadata: "
-            f"{sorted(missing_endpoint_cols)}"
-        )
-
     # Collect panel rows
     rows = []
 
@@ -1347,7 +1338,7 @@ def aggregate_itemid_covariates(panel, itemid_to_label):
     return panel, retention_log
 
 
-# Modelling panel and feature metadata
+# Modelling panel and feature dictionary
 
 
 def detect_covariate_itemids(columns):

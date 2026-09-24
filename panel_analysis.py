@@ -19,7 +19,6 @@ STEP1_TOP_SHAP_FEATURES_FILE = STEP1_DIR / "top_shap_features.csv"
 
 DP = 3
 KEEP_STATS = {"mean"}
-MIN_N_PER_GROUP = 20
 LATE_REMOVAL_DAY_THRESHOLD = 7
 AGE_THRESHOLD = 60
 TOP_N_COVARIATES = 20
@@ -67,7 +66,6 @@ def detect_covariate_cols(columns, keep_stats):
 
 # Coerce a set of columns to numeric, handling TRUE/FALSE strings
 def coerce_numeric(df, cols):
-    # Coerce numeric
     for col in cols:
         if df[col].dtype == object:
             df[col] = df[col].replace({
@@ -127,7 +125,7 @@ def cliffs_delta(x1, x0):
 
 # Apply Benjamini-Hochberg correction to a list/series of p-values
 def p_adjust_bh(pvalues):
-    # Calculate adjust BH
+
     p = pd.to_numeric(pvalues, errors="coerce")
     out = pd.Series(np.nan, index=p.index, dtype=float)
     valid = p.dropna().sort_values()
@@ -255,9 +253,9 @@ def build_episode_level_table(
     cauti_binary_feature,
     cauti_continuous_feature,
     reinsertion_feature,
+    include_age_split=False,
 ):
     # Collapse panel periods down to one row per episode
-    # Build episode level table
     d = df.sort_values(EPISODE_KEYS + ["period_end"]).copy()
 
     in_rows = d.loc[d[STATE_COL] == "in"].copy()
@@ -338,6 +336,10 @@ def build_episode_level_table(
         axis=1,
     ).reset_index()
 
+    if include_age_split:
+        age = pd.to_numeric(out["age"], errors="coerce")
+        out["age_ge_episode_median"] = age.ge(age.median()).astype("int8")
+
     numeric_cols = [
         "age",
         "catheter_days",
@@ -406,7 +408,6 @@ def binary_group_test(
     outcome_col,
     test_name,
 ):
-    # Convert group test
     tmp = df[[exposure_col, outcome_col]].copy()
     tmp[exposure_col] = pd.to_numeric(tmp[exposure_col], errors="coerce")
     tmp[outcome_col] = pd.to_numeric(tmp[outcome_col], errors="coerce")
@@ -486,7 +487,7 @@ def top_covariate_screen(
         })
 
     out = pd.DataFrame(rows)
-    # Calculate adjust BH
+
     out["mannwhitney_p_adj_bh"] = p_adjust_bh(out["mannwhitney_p"])
     out = out.sort_values(["mannwhitney_p_adj_bh", "mannwhitney_p", "covariate"]).head(top_n).reset_index(drop=True)
     return out
@@ -552,7 +553,6 @@ def describe_selected_covariates(
 
 def save_csv(df, path, round_dp=None, sci_cols=None):
     # Apply output formatting only at save time
-    # Save CSV
     out = df.copy()
     if round_dp is not None:
         numeric_cols = out.select_dtypes(include=[np.number]).columns
@@ -582,8 +582,7 @@ def plot_event_rates(cauti_period, reinsertion_period, outdir):
 
 
 # Run the merged panel diagnostics and supervisor-facing descriptive/inferential analysis
-def main():
-    # Run the script workflow
+def main(include_age_split=False):
     RESULTS_DIR.mkdir(exist_ok=True, parents=True)
 
     # Load and standardise the panel
@@ -608,7 +607,6 @@ def main():
         TIME_COL, PERIODS_COL, INTERVAL_COL, ACTION_COL, DECISION_ROW_COL, Y_CAUTI, Y_REINS,
         LAST_PERIOD_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
     ] + cov_cols
-    # Coerce numeric
     coerce_numeric(df, numeric_cols)
 
     # Create a few derived panel features
@@ -648,14 +646,12 @@ def main():
 
     # Save the main overview tables
     cohort_overview, state_overview, event_overview, risk_set_summary = build_overview_tables(df)
-    # Save CSV
     for name, table in [
         ("01_cohort_overview.csv", cohort_overview),
         ("02_state_overview.csv", state_overview),
         ("03_event_overview.csv", event_overview),
         ("04_risk_set_summary.csv", risk_set_summary),
     ]:
-        # Save CSV
         save_csv(table, RESULTS_DIR / name, round_dp=DP)
 
     # Summarise event rates by period in state
@@ -671,9 +667,7 @@ def main():
         .agg(rows="count", events="sum", event_rate="mean")
         .reset_index()
     )
-    # Save CSV
     save_csv(cauti_period, RESULTS_DIR / "05_cauti_event_rates_by_state_and_period.csv", round_dp=DP)
-    # Save CSV
     save_csv(reinsertion_period, RESULTS_DIR / "06_reinsertion_event_rates_by_period.csv", round_dp=DP)
 
     # Reuse these row subsets across later outputs
@@ -696,7 +690,6 @@ def main():
         ("reinsertion", "reinsertion_fit_rows"),
     ]
     available_cols = set(df.columns)
-    # Save CSV
     save_csv(
         pd.concat(
             [
@@ -726,8 +719,8 @@ def main():
         cauti_binary_feature=cauti_binary_feature,
         cauti_continuous_feature=cauti_continuous_feature,
         reinsertion_feature=reinsertion_feature,
+        include_age_split=include_age_split,
     )
-    # Save CSV
     save_csv(episode_df, RESULTS_DIR / "08_episode_level_analysis_table.csv", round_dp=DP)
 
     # Run the episode-level hypothesis tests
@@ -768,7 +761,20 @@ def main():
             ),
         ]
     ])
-    # Calculate adjust BH
+    if include_age_split:
+        age_tests = pd.DataFrame([
+            binary_group_test(
+                episode_df, "age_ge_episode_median", outcome,
+                f"Age >= episode median by {label} episode",
+            )
+            for outcome, label in (
+                ("late_removal_episode", "late removal"),
+                ("cauti_episode", "CAUTI"),
+                ("reinsertion_episode", "reinsertion"),
+            )
+        ])
+        episode_tests = pd.concat([age_tests, episode_tests], ignore_index=True)
+
     episode_tests["p_value_adj_bh"] = p_adjust_bh(episode_tests["p_value"])
     episode_tests_export = episode_tests.copy()
     episode_test_numeric_cols = episode_tests_export.select_dtypes(include=[np.number]).columns
@@ -790,7 +796,6 @@ def main():
         ],
         ignore_index=True,
     )
-    # Save CSV
     save_csv(
         top_signals,
         RESULTS_DIR / "10_top_univariable_covariate_signals.csv",
@@ -804,8 +809,6 @@ def main():
     print(f"Outputs saved to: {RESULTS_DIR}")
     print(f"Number of covariates analysed: {len(cov_cols)}")
     print(f"Late removal threshold: period >= {LATE_REMOVAL_DAY_THRESHOLD}")
-    
-# Run the script workflow
+
 if __name__ == "__main__":
-    # Run the script workflow
     main()

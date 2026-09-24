@@ -2,30 +2,15 @@
 # Audit duplicate episode-day rows in the catheter panel
 
 from pathlib import Path
-import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
+from policy_eval_common import add_episode_day_since_insertion
 
 
 REPO_ROOT = Path(__file__).resolve().parent
 INPUT_PATH = REPO_ROOT / "data" / "modelling_panel.csv"
 OUTDIR = REPO_ROOT / "artefacts" / "diagnostics" / "duplicate_episode_days"
-
-
-def add_episode_day_since_insertion(df):
-    # Count whole days since catheter insertion
-    df = df.copy()
-
-    inserted = pd.to_datetime(df["inserted"], errors="coerce")
-    period_start = pd.to_datetime(df["period_start"], errors="coerce")
-
-    # Treat the insertion date as episode day one
-    elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
-    df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
-    df.loc[df["episode_day_since_insertion"] < 1, "episode_day_since_insertion"] = 1
-
-    return df
 
 
 def main():

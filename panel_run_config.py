@@ -59,12 +59,7 @@ def resolve_panel_run(repo_root, panel_name):
             artefact_root=repo_root / "artefacts",
         )
 
-    try:
-        panel_filename, run_directory = VALIDATION_PANELS[panel_name]
-    except KeyError as error:
-        raise ValueError(
-            f"Unknown panel {panel_name!r}; expected one of {PANEL_CHOICES}"
-        ) from error
+    panel_filename, run_directory = VALIDATION_PANELS[panel_name]
 
     validation_root = (
         repo_root / "artefacts" / "validation" / VALIDATION_DIRNAME

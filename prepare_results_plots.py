@@ -164,20 +164,11 @@ def plot_policy_tradeoff(aipw, outdir):
 
 def build_estimator_comparison(g, ipw, aipw, outcome):
     # Build the long table used for estimator comparison plots
-    if outcome == "cauti":
-        cols = {
-            "gformula": "predicted_cauti_risk_pct",
-            "ipw": "ipw_weighted_cauti_risk_pct",
-            "aipw": "aipw_cauti_risk_pct",
-        }
-    elif outcome == "recatheterisation":
-        cols = {
-            "gformula": "predicted_recatheterisation_risk_pct",
-            "ipw": "ipw_weighted_recatheterisation_risk_pct",
-            "aipw": "aipw_recatheterisation_risk_pct",
-        }
-    else:
-        raise ValueError("outcome must be 'cauti' or 'recatheterisation'")
+    cols = {
+        "gformula": f"predicted_{outcome}_risk_pct",
+        "ipw": f"ipw_weighted_{outcome}_risk_pct",
+        "aipw": f"aipw_{outcome}_risk_pct",
+    }
 
     parts = []
     for method, df, col in [

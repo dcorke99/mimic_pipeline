@@ -9,6 +9,12 @@ import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
+import policy_bootstrap as bootstrap
+import fit_nuisance_models as nuisance
+from policy_eval_common import (
+    first_non_null,
+    max_binary,
+)
 from panel_run_config import add_panel_argument, resolve_panel_run
 
 
@@ -16,28 +22,8 @@ from panel_run_config import add_panel_argument, resolve_panel_run
 
 REPO_ROOT = Path(__file__).resolve().parent
 NUISANCE_MODEL_TYPE = "xgboost"
-NUISANCE_MODEL_DIR = (
-    REPO_ROOT / "artefacts" / "nuisance_models" / NUISANCE_MODEL_TYPE
-)
-
-POLICY_PANEL_PATH = (
-    REPO_ROOT
-    / "artefacts"
-    / "policy_interventions"
-    / "policy_intervention_panel_long.csv"
-)
-NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
-OUTDIR = REPO_ROOT / "artefacts" / "policy_eval" / "ipw"
-
-OUTPUT_PATHS = {
-    "summary": OUTDIR / "ipw_policy_outcomes_summary.csv",
-    "episodes": OUTDIR / "ipw_policy_episode_outcomes.csv",
-    "weight_diagnostics": OUTDIR / "ipw_weight_diagnostics.csv",
-    "support_diagnostics": OUTDIR / "ipw_policy_support_diagnostics.csv",
-    "clipping_sensitivity": OUTDIR / "ipw_clipping_sensitivity.csv",
-    "current_practice": OUTDIR / "current_practice_episode_outcomes.csv",
-    "metadata": OUTDIR / "ipw_run_metadata.json",
-}
+N_BOOTSTRAP = 1000
+REFIT_NUISANCE = False  # True: refit each bootstrap sample; False: reuse saved predictions.
 
 
 def configure_panel_run(panel_name):
@@ -62,9 +48,11 @@ def configure_panel_run(panel_name):
         "support_diagnostics": OUTDIR / "ipw_policy_support_diagnostics.csv",
         "clipping_sensitivity": OUTDIR / "ipw_clipping_sensitivity.csv",
         "current_practice": OUTDIR / "current_practice_episode_outcomes.csv",
-        "metadata": OUTDIR / "ipw_run_metadata.json",
     }
     return paths
+
+
+configure_panel_run("real")
 
 CLIP_LOWER = 0.01
 CLIP_UPPER = 0.99
@@ -127,20 +115,6 @@ OUTCOME_SPECS = {
 
 
 # Generic helpers
-
-
-def first_non_null(series):
-    # Return the first non-missing value
-    non_null = series.dropna()
-    return non_null.iloc[0] if len(non_null) else np.nan
-
-
-def max_binary(series):
-    # Return whether any binary value is present
-    numeric = pd.to_numeric(series, errors="coerce").fillna(0)
-    if numeric.empty:
-        return np.nan
-    return int(numeric.max() > 0)
 
 
 def weighted_mean(values, weights):
@@ -625,7 +599,7 @@ def inverse_support_ess(support):
     return effective_sample_size(1.0 / valid)
 
 
-def support_diagnostic_row(df, label, metadata):
+def support_diagnostic_row(df, label, policy_labels):
     # Build one support diagnostic row
     applicable = df["policy_applicable"]
     support = pd.to_numeric(df.loc[applicable, "policy_support"], errors="coerce")
@@ -633,7 +607,7 @@ def support_diagnostic_row(df, label, metadata):
     valid = support.loc[finite]
     # Calculate inverse-support effective sample size
     row = {
-        **metadata,
+        **policy_labels,
         "group": label,
         "n_applicable_rows": int(applicable.sum()),
         "mean_policy_support": float(valid.mean()) if len(valid) else np.nan,
@@ -659,12 +633,12 @@ def build_support_diagnostics(df):
     policy_cols = ["policy_name", "policy_remove_day"]
     # Build one support diagnostic row
     for policy_values, policy_df in df.groupby(policy_cols, dropna=False, sort=False):
-        metadata = {
+        policy_labels = {
             "policy_name": policy_values[0],
             "policy_remove_day": policy_values[1],
         }
         # Build one support diagnostic row
-        rows.append(support_diagnostic_row(policy_df, "all", metadata))
+        rows.append(support_diagnostic_row(policy_df, "all", policy_labels))
 
         # Summarise support within each cross-fit fold
         for fold_value, fold_df in policy_df.groupby(
@@ -676,7 +650,7 @@ def build_support_diagnostics(df):
                 support_diagnostic_row(
                     fold_df,
                     f"{CROSSFIT_FOLD_COL}={fold_value}",
-                    metadata,
+                    policy_labels,
                 )
             )
     return pd.DataFrame(rows)
@@ -1002,70 +976,6 @@ def build_clipping_sensitivity(
     return pd.DataFrame(rows)
 
 
-def metadata_payload(
-    output_paths,
-    joined_df,
-    episode_all,
-    policy_episode_df,
-):
-    # Build run metadata
-    return {
-        "estimator": "sequential_ipw",
-        "nuisance_model_type": NUISANCE_MODEL_TYPE,
-        "current_practice_comparator_type": "observed_weight_one",
-        "clipping_bounds": {"clip_lower": CLIP_LOWER, "clip_upper": CLIP_UPPER},
-        "input_paths": {
-            "policy_panel": str(POLICY_PANEL_PATH),
-            "nuisance_predictions": str(NUISANCE_PREDICTIONS_PATH),
-        },
-        "output_paths": {key: str(value) for key, value in output_paths.items()},
-        "number_of_policies": int(joined_df["policy_name"].nunique()),
-        "number_of_patients": int(joined_df["subject_id"].nunique()),
-        "number_of_policy_episode_rows": int(len(episode_all)),
-        "number_of_adherent_policy_episode_rows": int(len(policy_episode_df)),
-        "target_policy_timeline_reconstructed_in_script": False,
-        "target_policy_timing_source": pec.TARGET_POLICY_TIMING_SOURCE,
-        "target_policy_timeline_helper": pec.TARGET_POLICY_TIMELINE_HELPER,
-        "target_policy_timeline_semantics": pec.TARGET_POLICY_TIMELINE_SEMANTICS,
-        "duration_semantics": {
-            "period_duration_days": "period_end - period_start in days",
-            "catheter_exposure_days": "sum of period_duration_days where catheter_state == in",
-            "max_reasonable_period_duration_days": pec.MAX_REASONABLE_PERIOD_DURATION_DAYS,
-            "n_long_period_duration_rows": int(
-                joined_df["period_duration_long_flag"].sum()
-            ),
-        },
-        "catheter_count_semantics": {
-            "observed_catheter_in_intervals": (
-                "count of observed catheter-in interval rows on the observed grid; "
-                "not necessarily one row per patient-day because transition days may be "
-                "split into in and out intervals"
-            ),
-            "observed_catheter_exposure_days": (
-                "sum of period_duration_days where catheter_state == in; "
-                "preferred exposure measure for interpretation"
-            ),
-        },
-        "icu_exit_alive_definition": (
-            "max(icu_exit_alive_in_period == 1); death and ICU exit alive are "
-            "mutually exclusive terminal events in the source panel"
-        ),
-        "overlap_flag_thresholds": {
-            "low_adherence_threshold": pec.LOW_ADHERENCE_THRESHOLD,
-            "low_ess_min": pec.LOW_ESS_MIN,
-            "low_ess_fraction": pec.LOW_ESS_FRACTION,
-            "low_support_pct_below_0_05_threshold": pec.LOW_SUPPORT_PCT_BELOW_005_THRESHOLD,
-            "extreme_weight_p99_threshold": pec.EXTREME_WEIGHT_P99_THRESHOLD,
-            "extreme_weight_max_threshold": pec.EXTREME_WEIGHT_MAX_THRESHOLD,
-        },
-        "methodological_limitations": [
-            "This script estimates IPW values only.",
-            "It does not run g-formula, AIPW, DML, DR-Learner, TMLE, or LTMLE.",
-            "Uncertainty intervals are not calculated.",
-        ],
-    }
-
-
 # Main
 
 def print_summary(
@@ -1074,7 +984,6 @@ def print_summary(
     current_practice_episode_df,
     output_paths,
 ):
-    # Print a concise run summary
     n_policies = int(episode_all["policy_name"].nunique())
     zero_adherent = (
         episode_all.groupby("policy_name")["episode_adherent_to_policy"].sum().loc[lambda s: s == 0].index.tolist()
@@ -1084,7 +993,6 @@ def print_summary(
     print("--- IPW POLICY EVALUATION COMPLETE ---")
     print(f"Policy-intervention panel: {POLICY_PANEL_PATH}")
     print(f"Nuisance model type: {NUISANCE_MODEL_TYPE}")
-    print(f"Nuisance predictions: {NUISANCE_PREDICTIONS_PATH}")
     print(f"Candidate policies: {n_policies:,}")
     print(f"Current-practice episodes: {len(current_practice_episode_df):,}")
     print(f"Adherent target-policy episode rows: {len(policy_episode_df):,}")
@@ -1094,60 +1002,52 @@ def print_summary(
         print(f"Saved {label}: {path}")
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Evaluate fixed-day policies with sequential IPW."
     )
     add_panel_argument(parser)
-    return parser.parse_args()
+    parser.add_argument("--refit-nuisance", action="store_true", default=REFIT_NUISANCE,
+                        help="Refit propensity models in each bootstrap sample; default: REFIT_NUISANCE setting.")
+    return parser.parse_args(argv)
 
 
-def main():
-    args = parse_args()
-    configure_panel_run(args.panel)
-
-    # Create the output directory
-    OUTDIR.mkdir(exist_ok=True, parents=True)
-
-    # Load and validate the policy panel
-    policy_df = load_policy_panel(POLICY_PANEL_PATH)
-    # Load and validate the nuisance predictions
-    nuisance_df = load_nuisance_predictions(NUISANCE_PREDICTIONS_PATH)
-
-    # Join nuisance scores to policy rows
+def evaluate_policy_episodes(policy_df, nuisance_df):
     joined_df = join_nuisance_predictions(policy_df, nuisance_df)
     joined_df = pec.add_period_duration_days(joined_df, context="joined IPW policy rows")
     joined_df = pec.add_observed_icu_exit_alive_period(joined_df)
-    # Add row-level IPW quantities
     joined_df = add_ipw_row_quantities(joined_df, CLIP_LOWER, CLIP_UPPER)
-    # Add cumulative policy-adherence flags
     joined_df = add_adherence(joined_df)
-
-    # Build support diagnostic output
-    support_diagnostics_df = build_support_diagnostics(joined_df)
-    # Build adherent policy-episode outcomes
     episode_all, policy_episode_df = build_policy_episode_panel(joined_df)
-    # Order episode-level output columns
     episode_all = order_episode_columns(episode_all)
-    # Order episode-level output columns
     policy_episode_df = order_episode_columns(policy_episode_df)
+    current = build_current_practice_episode_panel(nuisance_df, policy_df)
+    episodes = pd.concat([current, policy_episode_df], ignore_index=True, sort=False)
+    return episodes, joined_df, episode_all, current
 
-    if policy_episode_df.empty:
-        raise ValueError(
-            "No target policies have adherent episodes after IPW adherence "
-            "assessment. Support and weight diagnostics cannot produce policy estimates."
+
+def main(argv=None):
+    args = parse_args(argv)
+    paths = configure_panel_run(args.panel)
+    OUTDIR.mkdir(exist_ok=True, parents=True)
+    policy_df = load_policy_panel(POLICY_PANEL_PATH)
+    policy_df["subject_id"] = policy_df.subject_id.astype(str)
+    refit_panel = None
+    if args.refit_nuisance:
+        nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
+        refit_panel = nuisance.load_panel(paths.panel_path)
+        subjects = pd.Index(sorted(refit_panel.subject_id.unique()), name="subject_id")
+        nuisance_df, _ = bootstrap.refit_nuisance_predictions(
+            refit_panel, subjects, np.ones(len(subjects), dtype=int), "ipw",
         )
-
-    # Build observed current-practice episode outcomes
-    current_practice_episode_df = build_current_practice_episode_panel(
-        nuisance_df,
-        policy_df,
+    else:
+        nuisance_df = load_nuisance_predictions(NUISANCE_PREDICTIONS_PATH)
+    nuisance_df["subject_id"] = nuisance_df.subject_id.astype(str)
+    output_episode_df, joined_df, episode_all, current_practice_episode_df = evaluate_policy_episodes(
+        policy_df, nuisance_df,
     )
-    output_episode_df = pd.concat(
-        [current_practice_episode_df, policy_episode_df],
-        ignore_index=True,
-        sort=False,
-    )
+    policy_episode_df = output_episode_df.loc[~output_episode_df.policy_name.eq(CURRENT_PRACTICE_LABEL)]
+    support_diagnostics_df = build_support_diagnostics(joined_df)
 
     # Build policy-level summary estimates
     summary_df = build_policy_summary(
@@ -1175,17 +1075,17 @@ def main():
     pec.save_report_df(support_diagnostics_df, OUTPUT_PATHS["support_diagnostics"])
     pec.save_report_df(clipping_sensitivity_df, OUTPUT_PATHS["clipping_sensitivity"])
     current_practice_episode_df.to_csv(OUTPUT_PATHS["current_practice"], index=False)
-    pec.save_json(
-        metadata_payload(OUTPUT_PATHS, joined_df, episode_all, policy_episode_df),
-        OUTPUT_PATHS["metadata"],
-    )
 
-    # Print a concise run summary
     print_summary(
         episode_all,
         policy_episode_df,
         current_practice_episode_df,
         OUTPUT_PATHS,
+    )
+
+    bootstrap.run_bootstrap(
+        "ipw", output_episode_df, policy_df, evaluate_policy_episodes, OUTDIR,
+        N_BOOTSTRAP, refit_panel=refit_panel,
     )
 
 
