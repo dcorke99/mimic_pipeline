@@ -1,5 +1,4 @@
 # Fit propensity and outcome nuisance models for policy evaluation
-import argparse
 from pathlib import Path
 import re
 
@@ -22,7 +21,6 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 import policy_eval_common as pec
-from panel_run_config import add_panel_argument, resolve_panel_run
 
 
 # Configuration
@@ -35,16 +33,31 @@ MODEL_TYPES = (
     "lightgbm",
     "mlp",
 )
-MODEL_TYPE = "xgboost"
+MODEL_TYPE = "xgboost"  # Set to "all" to fit every learner in MODEL_TYPES.
 
 REPO_ROOT = Path(__file__).resolve().parent
-INDIR = REPO_ROOT / "data"
-NUISANCE_ROOT = REPO_ROOT / "artefacts" / "nuisance_models"
+
+# Leave ONE dataset block uncommented, matching the evaluators.
+# Real data
+INFILE = REPO_ROOT / "data/modelling_panel.csv"
+NUISANCE_ROOT = REPO_ROOT / "artefacts/nuisance_models"
+
+# Semi-synthetic: measured confounding
+# INFILE = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
+# NUISANCE_ROOT = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/nuisance_models"
+
+# Semi-synthetic: confounder omitted
+# INFILE = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
+# NUISANCE_ROOT = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/nuisance_models"
+
+# Semi-synthetic: randomised actions
+# INFILE = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
+# NUISANCE_ROOT = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/nuisance_models"
+
 MODEL_OUTPUT_NAME = MODEL_TYPE
 OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 
-INFILE = INDIR / "modelling_panel.csv"
-COVARIATE_DICT_FILE = INDIR / "covariate_dictionary.csv"
+COVARIATE_DICT_FILE = REPO_ROOT / "data/covariate_dictionary.csv"
 NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
 PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
 CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
@@ -205,6 +218,18 @@ ALL_SCORE_COLS = [
 # Support functions
 
 
+def save_nuisance_report(df, path):
+    # Format mixed text/numeric summaries as well as numeric metric columns.
+    out = df.copy()
+    for col in out.select_dtypes(include=["object"]).columns:
+        out[col] = out[col].map(
+            lambda value: f"{value:.5f}"
+            if isinstance(value, (float, np.floating)) and pd.notna(value)
+            else value
+        )
+    pec.save_report_df(out, path, decimals=5)
+
+
 def configure_model_run(model_type):
     # Set the active learner and its model-specific output paths
     global MODEL_TYPE, MODEL_OUTPUT_NAME, OUTDIR
@@ -218,17 +243,6 @@ def configure_model_run(model_type):
     PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
     CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
     CONSTANT_FEATURES_FILE = OUTDIR / "constant_features_by_fold.csv"
-
-
-def configure_panel_run(panel_name):
-    # Route the source panel and every fitted-model artefact together
-    global INFILE, NUISANCE_ROOT, MODEL_COMPARISON_FILE
-    paths = resolve_panel_run(REPO_ROOT, panel_name)
-    INFILE = paths.panel_path
-    NUISANCE_ROOT = paths.artefact_root / "nuisance_models"
-    MODEL_COMPARISON_FILE = NUISANCE_ROOT / "nuisance_model_comparison.csv"
-    configure_model_run(MODEL_TYPE)
-    return paths
 
 
 def binary_values(series):
@@ -1384,11 +1398,11 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
     ]
     # Calculate binary metrics
     summary = scalar_binary_metrics(evaluation_df, ACTION_COL, PROPENSITY_SCORE_COL)
-    pec.save_report_df(
+    save_nuisance_report(
         propensity_summary_rows(df, eligible_mask, feature_cols, summary),
         OUTDIR / "propensity_summary.csv",
     )
-    pec.save_report_df(
+    save_nuisance_report(
         calibration_table(
             evaluation_df,
             ACTION_COL,
@@ -1654,22 +1668,22 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols):
 
     in_summary = pd.DataFrame(in_summary_rows)
     out_summary = pd.DataFrame(out_summary_rows)
-    pec.save_report_df(in_summary, OUTDIR / "in_outcome_summary.csv")
-    pec.save_report_df(out_summary, OUTDIR / "out_outcome_summary.csv")
-    pec.save_report_df(
+    save_nuisance_report(in_summary, OUTDIR / "in_outcome_summary.csv")
+    save_nuisance_report(out_summary, OUTDIR / "out_outcome_summary.csv")
+    save_nuisance_report(
         pd.concat(in_calibration_tables, ignore_index=True),
         OUTDIR / "in_outcome_calibration.csv",
     )
-    pec.save_report_df(
+    save_nuisance_report(
         pd.concat(out_calibration_tables, ignore_index=True),
         OUTDIR / "out_outcome_calibration.csv",
     )
     # Save factual IN outcome diagnostics by observed action
-    pec.save_report_df(
+    save_nuisance_report(
         pd.DataFrame(in_action_summary_rows),
         OUTDIR / "in_outcome_action_summary.csv",
     )
-    pec.save_report_df(
+    save_nuisance_report(
         pd.concat(in_action_calibration_tables, ignore_index=True),
         OUTDIR / "in_outcome_action_calibration.csv",
     )
@@ -1679,7 +1693,7 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols):
         pd.concat(importance_tables, ignore_index=True),
         covariate_dict,
     )
-    pec.save_report_df(importance_df, OUTDIR / "outcome_top_model_features.csv")
+    save_nuisance_report(importance_df, OUTDIR / "outcome_top_model_features.csv")
 
     joblib.dump(
         {
@@ -1745,25 +1759,22 @@ def build_nuisance_model_comparison():
         fold_metrics = pd.read_csv(model_folder / "fold_performance_metrics.csv")
         model_type = propensity_summary["model_type"]
 
-        def propensity_value(metric):
-            return pd.to_numeric(propensity_summary[metric])
-
         folder_rows = [{
             "model_type": model_type,
             "model_folder": model_folder.name,
             "model_group": "propensity",
             "outcome": "removal",
             "risk_set": "all IN rows",
-            "n": propensity_value("n"),
-            "events": propensity_value("events"),
-            "prevalence": propensity_value("prevalence"),
-            "auc": propensity_value("auc"),
-            "average_precision": propensity_value("average_precision"),
-            "brier": propensity_value("brier"),
-            "calibration_intercept": propensity_value("calibration_intercept"),
-            "calibration_slope": propensity_value("calibration_slope"),
+            "n": pd.to_numeric(propensity_summary["n"]),
+            "events": pd.to_numeric(propensity_summary["events"]),
+            "prevalence": pd.to_numeric(propensity_summary["prevalence"]),
+            "auc": pd.to_numeric(propensity_summary["auc"]),
+            "average_precision": pd.to_numeric(propensity_summary["average_precision"]),
+            "brier": pd.to_numeric(propensity_summary["brier"]),
+            "calibration_intercept": pd.to_numeric(propensity_summary["calibration_intercept"]),
+            "calibration_slope": pd.to_numeric(propensity_summary["calibration_slope"]),
             **{
-                metric: propensity_value(metric)
+                metric: pd.to_numeric(propensity_summary[metric])
                 for metric in propensity_tail_metrics
             },
         }]
@@ -1821,7 +1832,7 @@ def build_nuisance_model_comparison():
         comparison = comparison.sort_values(
             ["model_group", "outcome", "model_type", "model_folder"]
         ).reset_index(drop=True)
-    pec.save_report_df(comparison, MODEL_COMPARISON_FILE)
+    save_nuisance_report(comparison, MODEL_COMPARISON_FILE)
     return comparison
 
 
@@ -1870,7 +1881,7 @@ def run_nuisance_model(model_type):
     df = add_grouped_crossfit_folds(df)
 
     # Save fold diagnostics
-    pec.save_report_df(
+    save_nuisance_report(
         crossfit_fold_summary(df),
         OUTDIR / "crossfit_fold_summary.csv",
     )
@@ -1893,7 +1904,7 @@ def run_nuisance_model(model_type):
         in_feature_cols,
         out_feature_cols,
     )
-    pec.save_report_df(
+    save_nuisance_report(
         constant_features_by_fold(
             propensity_fold_models,
             in_models,
@@ -1906,26 +1917,26 @@ def run_nuisance_model(model_type):
     validate_exported_probabilities(df)
 
     # Save combined performance metrics
-    pec.save_report_df(
+    save_nuisance_report(
         performance_metrics_rows(propensity_summary, in_summary, out_summary),
         PERFORMANCE_METRICS_FILE,
     )
-    pec.save_report_df(
+    save_nuisance_report(
         fold_performance_metrics(df),
         OUTDIR / "fold_performance_metrics.csv",
     )
 
     production_predictions = df[ALL_SCORE_COLS].copy()
     subgroup_performance, subgroup_calibration = nuisance_subgroup_diagnostics(df)
-    pec.save_report_df(
+    save_nuisance_report(
         subgroup_performance,
         OUTDIR / "nuisance_subgroup_performance.csv",
     )
-    pec.save_report_df(
+    save_nuisance_report(
         subgroup_calibration,
         OUTDIR / "nuisance_subgroup_calibration.csv",
     )
-    pec.save_report_df(
+    save_nuisance_report(
         nuisance_learning_curves(
             df,
             remove_feature_cols,
@@ -1948,29 +1959,10 @@ def run_nuisance_model(model_type):
     )
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Fit cross-fitted nuisance models for one source panel."
-    )
-    add_panel_argument(parser)
-    parser.add_argument(
-        "--model-type",
-        choices=("all", *MODEL_TYPES),
-        default="xgboost",
-        help=(
-            "Nuisance learner to fit. The default is the selected production "
-            "learner, xgboost; use 'all' only for a model-comparison run."
-        ),
-    )
-    return parser.parse_args()
-
-
 def main():
-    args = parse_args()
-    paths = configure_panel_run(args.panel)
-    print(f"[PANEL] {paths.panel_name}: {paths.panel_path}", flush=True)
+    print(f"[PANEL] {INFILE}", flush=True)
 
-    model_types = MODEL_TYPES if args.model_type == "all" else (args.model_type,)
+    model_types = MODEL_TYPES if MODEL_TYPE == "all" else (MODEL_TYPE,)
     for model_type in model_types:
         run_nuisance_model(model_type)
 

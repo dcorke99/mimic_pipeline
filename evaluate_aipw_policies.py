@@ -2,7 +2,6 @@
 # Evaluate catheter-removal policies with AIPW estimates
 
 
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -11,15 +10,13 @@ import pandas as pd
 import policy_eval_common as pec
 import policy_bootstrap as bootstrap
 import fit_nuisance_models as nuisance
+from build_policy_intervention_panels import read_policy_panel
 from policy_eval_common import (
     CROSSFIT_FOLD_COL,
     PREDICTION_COLUMNS,
-    first_non_null,
-    max_binary,
     add_episode_day_since_insertion,
     fill_missing_counterfactual_predictions,
 )
-from panel_run_config import add_panel_argument, resolve_panel_run
 
 
 # Paths and constants
@@ -30,35 +27,42 @@ N_BOOTSTRAP = 1000
 REFIT_NUISANCE = False  # True: refit each bootstrap sample; False: reuse saved predictions.
 
 
-def configure_panel_run(panel_name):
-    # Resolve mutually consistent policy, nuisance, model, and evaluator paths
-    global NUISANCE_MODEL_DIR, POLICY_PANEL_PATH, NUISANCE_PREDICTIONS_PATH
-    global OUTCOME_MODELS_PATH, OUTDIR, OUTPUT_PATHS
-    paths = resolve_panel_run(REPO_ROOT, panel_name)
-    NUISANCE_MODEL_DIR = (
-        paths.artefact_root / "nuisance_models" / NUISANCE_MODEL_TYPE
-    )
-    POLICY_PANEL_PATH = (
-        paths.artefact_root
-        / "policy_interventions"
-        / "policy_intervention_panel_long.csv"
-    )
-    NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
-    OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
-    OUTDIR = paths.artefact_root / "policy_eval" / "aipw"
-    OUTPUT_PATHS = {
-        "summary": OUTDIR / "aipw_policy_outcomes_summary.csv",
-        "episodes": OUTDIR / "aipw_policy_episode_scores.csv",
-        "support_diagnostics": OUTDIR / "aipw_policy_support_diagnostics.csv",
-        "weight_diagnostics": OUTDIR / "aipw_weight_diagnostics.csv",
-        "residual_diagnostics": OUTDIR / "aipw_residual_diagnostics.csv",
-        "clipping_sensitivity": OUTDIR / "aipw_clipping_sensitivity.csv",
-        "current_practice": OUTDIR / "current_practice_aipw_episode_scores.csv",
-    }
-    return paths
+# Leave ONE dataset block uncommented, then use Run Python File in VS Code.
+# Real data
+PANEL_PATH = REPO_ROOT / "data/modelling_panel.csv"
+POLICY_PANEL_PATH = REPO_ROOT / "artefacts/policy_interventions/policy_intervention_panel_long.csv"
+NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/nuisance_models" / NUISANCE_MODEL_TYPE
+OUTDIR = REPO_ROOT / "artefacts/policy_eval/aipw"
 
+# Semi-synthetic: measured confounding
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_eval/aipw"
 
-configure_panel_run("real")
+# Semi-synthetic: confounder omitted
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_eval/aipw"
+
+# Semi-synthetic: randomised actions
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_eval/aipw"
+
+NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
+OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
+OUTPUT_PATHS = {
+    "summary": OUTDIR / "aipw_policy_outcomes_summary.csv",
+    "episodes": OUTDIR / "aipw_policy_episode_scores.csv",
+    "support_diagnostics": OUTDIR / "aipw_policy_support_diagnostics.csv",
+    "weight_diagnostics": OUTDIR / "aipw_weight_diagnostics.csv",
+    "residual_diagnostics": OUTDIR / "aipw_residual_diagnostics.csv",
+    "clipping_sensitivity": OUTDIR / "aipw_clipping_sensitivity.csv",
+    "current_practice": OUTDIR / "current_practice_aipw_episode_scores.csv",
+}
 
 CLIP_LOWER = 0.01
 CLIP_UPPER = 0.99
@@ -183,16 +187,11 @@ def cumulative_event_probability(probabilities):
     return float(1.0 - np.prod(1.0 - probs.to_numpy(dtype=float)))
 
 
-def valid_weight_series(weights):
-    # Return positive finite weights
-    weights = pd.to_numeric(weights, errors="coerce")
-    return weights[weights.notna() & np.isfinite(weights) & weights.gt(0)]
-
-
 def effective_sample_size(weights):
     # Calculate the effective sample size
     # Return positive finite weights
-    weights = valid_weight_series(weights)
+    weights = pd.to_numeric(weights, errors="coerce")
+    weights = weights[np.isfinite(weights) & weights.gt(0)]
     if weights.empty:
         return np.nan
     sum_weights = float(weights.sum())
@@ -200,17 +199,9 @@ def effective_sample_size(weights):
     return float((sum_weights ** 2) / sum_squared_weights) if sum_squared_weights > 0 else np.nan
 
 
-def bound_probability_estimate(value):
-    # Bound a final probability-scale estimate while retaining missing values
-    if pd.isna(value):
-        return np.nan
-    return float(np.clip(float(value), 0.0, 1.0))
-
-
 def load_policy_panel(path):
     # Load and validate the policy panel
-    df = pd.read_csv(path, low_memory=False)
-    df.columns = df.columns.str.strip()
+    df = read_policy_panel(path)
     if df["policy_name"].dropna().empty:
         raise ValueError("Policy panel contains no policy_name values.")
     if df["policy_remove_day"].isna().any():
@@ -430,17 +421,11 @@ def product_components_by_episode(df, component_col):
     )
 
 
-def add_observed_outcomes_to_rows(df):
-    # Validate and copy the mutually exclusive ICU-exit-alive outcome
-    df = pec.add_observed_icu_exit_alive_period(df)
-    df["_icu_exit_alive_period"] = df["observed_icu_exit_alive_in_period"]
-    return df
-
-
 def build_policy_episode_scores(df):
     # Collapse row scores to policy-episode scores
     # Add observed outcomes to rows
-    df = add_observed_outcomes_to_rows(df)
+    df = pec.add_observed_icu_exit_alive_period(df)
+    df["_icu_exit_alive_period"] = df["observed_icu_exit_alive_in_period"]
     df["_applicable_int"] = df["policy_applicable"].astype(int)
     df["_matched_applicable_int"] = (
         df["policy_applicable"] & df["policy_matches_observed_action_today"].eq(1)
@@ -525,7 +510,7 @@ def build_policy_episode_scores(df):
             group_cols,
             as_index=False,
             dropna=False,
-        )[col].agg(first_non_null)
+        )[col].first()
         episode_df = episode_df.merge(values, on=group_cols, how="left")
 
     for outcome_name, spec in OUTCOME_SPECS.items():
@@ -542,13 +527,10 @@ def build_policy_episode_scores(df):
             if outcome_name == "icu_exit_alive"
             else spec["period_outcome"]
         )
-        observed_values = df.groupby(
-            group_cols,
-            as_index=False,
-            dropna=False,
-        )[period_col].agg(max_binary)
-        observed_values = observed_values.rename(
-            columns={period_col: spec["observed"]}
+        observed_values = (
+            pd.to_numeric(df[period_col], errors="coerce").gt(0)
+            .groupby([df[col] for col in group_cols], dropna=False)
+            .max().astype(int).reset_index(name=spec["observed"])
         )
         episode_df = episode_df.merge(
             observed_values,
@@ -700,7 +682,8 @@ def build_current_practice_rows(nuisance_df, policy_df):
 def build_current_practice_episode_scores(current_rows):
     # Build episode scores for current practice
     # Add observed outcomes to rows
-    df = add_observed_outcomes_to_rows(current_rows)
+    df = pec.add_observed_icu_exit_alive_period(current_rows)
+    df["_icu_exit_alive_period"] = df["observed_icu_exit_alive_in_period"]
     df["_catheter_in_row_int"] = df["catheter_state"].astype("string").str.lower().eq("in").astype(int)
     df["_policy_catheter_in_row_int"] = df["policy_catheter_state"].astype("string").str.lower().eq("in").astype(int)
     df["_observed_catheter_exposure_days"] = df["_catheter_in_row_int"] * pd.to_numeric(
@@ -727,7 +710,7 @@ def build_current_practice_episode_scores(current_rows):
             group_cols,
             as_index=False,
             dropna=False,
-        )[col].agg(first_non_null)
+        )[col].first()
         episode_df = episode_df.merge(values, on=group_cols, how="left")
     for outcome_name, spec in OUTCOME_SPECS.items():
         if outcome_name == "catheter_exposure_days":
@@ -742,13 +725,10 @@ def build_current_practice_episode_scores(current_rows):
             if outcome_name == "icu_exit_alive"
             else spec["period_outcome"]
         )
-        observed_values = df.groupby(
-            group_cols,
-            as_index=False,
-            dropna=False,
-        )[period_col].agg(max_binary)
-        observed_values = observed_values.rename(
-            columns={period_col: spec["observed"]}
+        observed_values = (
+            pd.to_numeric(df[period_col], errors="coerce").gt(0)
+            .groupby([df[col] for col in group_cols], dropna=False)
+            .max().astype(int).reset_index(name=spec["observed"])
         )
         episode_df = episode_df.merge(
             observed_values,
@@ -809,7 +789,7 @@ def policy_summary_row(
         else pd.Series(dtype=float)
     )
     # Return positive finite weights
-    positive_residual_weights = valid_weight_series(residual_weight_all)
+    positive_residual_weights = residual_weight_all[np.isfinite(residual_weight_all) & residual_weight_all.gt(0)]
     residual_weight_ess = effective_sample_size(positive_residual_weights)
     n_total = int(len(policy_df))
     n_complete = int(len(complete_df))
@@ -908,9 +888,9 @@ def policy_summary_row(
                 "plugin_expected_mean_catheter_in_interval_rows"
             ]
         else:
-            bounded_ht_value = bound_probability_estimate(ht_value)
-            bounded_hajek_value = bound_probability_estimate(hajek_value)
-            bounded_selected_value = bound_probability_estimate(selected_value)
+            bounded_ht_value = float(np.clip(ht_value, 0.0, 1.0))
+            bounded_hajek_value = float(np.clip(hajek_value, 0.0, 1.0))
+            bounded_selected_value = float(np.clip(selected_value, 0.0, 1.0))
             row[f"plugin_predicted_{summary_stub}"] = mean_plugin
             row[f"aipw_ht_{summary_stub}"] = bounded_ht_value
             row[f"aipw_hajek_{summary_stub}"] = bounded_hajek_value
@@ -1037,9 +1017,11 @@ def build_weight_diagnostics(episode_df):
         if policy_name == CURRENT_PRACTICE_LABEL:
             continue
         # Return positive finite weights
-        residual_weights = valid_weight_series(policy_df[RESIDUAL_WEIGHT_COL])
+        residual_weights = pd.to_numeric(policy_df[RESIDUAL_WEIGHT_COL], errors="coerce")
+        residual_weights = residual_weights[np.isfinite(residual_weights) & residual_weights.gt(0)]
         # Return positive finite weights
-        raw_episode_weights = valid_weight_series(policy_df[WEIGHT_COL])
+        raw_episode_weights = pd.to_numeric(policy_df[WEIGHT_COL], errors="coerce")
+        raw_episode_weights = raw_episode_weights[np.isfinite(raw_episode_weights) & raw_episode_weights.gt(0)]
         n_total = int(len(policy_df))
         n_adherent = int(policy_df["episode_adherent_to_policy"].eq(1).sum())
         pct_adherent = n_adherent / n_total if n_total else np.nan
@@ -1104,7 +1086,7 @@ def build_residual_diagnostics(
             errors="coerce",
         ).fillna(0.0)
         # Return positive finite weights
-        positive_residual_weights = valid_weight_series(residual_weight_all)
+        positive_residual_weights = residual_weight_all[np.isfinite(residual_weight_all) & residual_weight_all.gt(0)]
         residual_weight_ess = effective_sample_size(positive_residual_weights)
         valid_residual_weight = residual_weight.notna() & np.isfinite(residual_weight)
         weight_sum = float(residual_weight.loc[valid_residual_weight].sum())
@@ -1135,10 +1117,10 @@ def build_residual_diagnostics(
             )
             selected_value = ht_value if residual_normalisation == "ht" else hajek_value
             is_probability = outcome_name != "catheter_exposure_days"
-            bounded_ht_value = bound_probability_estimate(ht_value) if is_probability else ht_value
-            bounded_hajek_value = bound_probability_estimate(hajek_value) if is_probability else hajek_value
+            bounded_ht_value = float(np.clip(ht_value, 0.0, 1.0)) if is_probability else ht_value
+            bounded_hajek_value = float(np.clip(hajek_value, 0.0, 1.0)) if is_probability else hajek_value
             bounded_selected_value = (
-                bound_probability_estimate(selected_value) if is_probability else selected_value
+                float(np.clip(selected_value, 0.0, 1.0)) if is_probability else selected_value
             )
             # Calculate the effective sample size
             rows.append({
@@ -1199,7 +1181,7 @@ def build_clipping_sensitivity(
             errors="coerce",
         ).fillna(0.0)
         # Return positive finite weights
-        valid_default = valid_weight_series(default_weights)
+        valid_default = default_weights[np.isfinite(default_weights) & default_weights.gt(0)]
         p99 = float(valid_default.quantile(0.99)) if len(valid_default) else np.nan
         # Build one policy summary row
         for rule, weights, support_low, support_high, upper in [
@@ -1220,7 +1202,8 @@ def build_clipping_sensitivity(
                 residual_normalisation,
                 "__sensitivity_weight",
             )
-            valid_weights = valid_weight_series(weights)
+            numeric_weights = pd.to_numeric(weights, errors="coerce")
+            valid_weights = numeric_weights[np.isfinite(numeric_weights) & numeric_weights.gt(0)]
             weight_ess = effective_sample_size(valid_weights)
             rows.append({
                 "policy_name": policy_name,
@@ -1341,20 +1324,10 @@ def print_console_summary(summary_df, row_df, episode_df, output_paths):
         print(f"Saved {label}: {path}")
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Evaluate fixed-day policies with AIPW."
-    )
-    add_panel_argument(parser)
-    parser.add_argument("--refit-nuisance", action="store_true", default=REFIT_NUISANCE,
-                        help="Refit propensity and outcome models in each bootstrap sample; default: REFIT_NUISANCE setting.")
-    return parser.parse_args(argv)
-
-
 def evaluate_policy_episodes(policy_df, nuisance_df):
     model_feature_cols = [
         "episode_index",
-        *pec.baseline_model_feature_columns(nuisance_df.columns),
+        *[col for col in nuisance_df if col == "age" or col.startswith(("itemid_", "sex_", "ethnicity_"))],
     ]
     nuisance_df = nuisance_df.drop(columns=model_feature_cols)
     # Join nuisance scores to policy rows
@@ -1382,16 +1355,14 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
     return episode_df, row_df, current_episode_df
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    paths = configure_panel_run(args.panel)
+def main():
     OUTDIR.mkdir(exist_ok=True, parents=True)
     policy_df = load_policy_panel(POLICY_PANEL_PATH)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
     refit_panel = None
-    if args.refit_nuisance:
+    if REFIT_NUISANCE:
         nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
-        refit_panel = nuisance.load_panel(paths.panel_path)
+        refit_panel = nuisance.load_panel(PANEL_PATH)
         subjects = pd.Index(sorted(refit_panel.subject_id.unique()), name="subject_id")
         nuisance_df, _ = bootstrap.refit_nuisance_predictions(
             refit_panel, subjects, np.ones(len(subjects), dtype=int), "aipw",

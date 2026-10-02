@@ -11,7 +11,6 @@ pipeline.
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -27,10 +26,11 @@ from build_policy_intervention_panels import (
 
 
 # Paths and reproducibility
+# Running this script writes all three validation datasets.
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_SOURCE_PANEL = REPO_ROOT / "data" / "modelling_panel.csv"
-DEFAULT_OUTPUT_DIR = (
+SOURCE_PANEL = REPO_ROOT / "data" / "modelling_panel.csv"
+OUTPUT_DIR = (
     REPO_ROOT
     / "artefacts"
     / "validation"
@@ -113,36 +113,6 @@ ORACLE_ONLY_PREFIXES = (
     "dgp_",
     "z_dgp_",
 )
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Create sequential-trajectory semi-synthetic measured-confounding panels "
-            "and separate oracle truth files."
-        )
-    )
-    parser.add_argument(
-        "--source-panel",
-        type=Path,
-        default=DEFAULT_SOURCE_PANEL,
-        help="Existing real modelling panel to copy without modifying.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Separate directory for validation panels and oracle files.",
-    )
-    parser.add_argument(
-        "--write-randomised-action",
-        action="store_true",
-        help=(
-            "Also write a negative-control panel whose action probability is "
-            "constant and independent of the selected confounders."
-        ),
-    )
-    return parser.parse_args()
 
 
 def expit(linear_predictor):
@@ -504,7 +474,7 @@ def build_truth_table(
     true_mu_remove,
     true_mu_out,
     observed_probability,
-    randomised_truth=None,
+    randomised_truth,
 ):
     preferred_identifiers = [
         "subject_id",
@@ -552,43 +522,42 @@ def build_truth_table(
     truth["true_mu_out"] = true_mu_out
     truth["true_mu_observed_action"] = observed_probability
 
-    if randomised_truth is not None:
-        randomised_panel = randomised_truth["panel"]
-        randomised_states = (
-            randomised_panel[STATE_COL].astype("string").str.strip().str.lower()
-        )
-        for column in [
-            "removed",
-            STATE_COL,
-            "episode_index",
-            PERIODS_COL,
-            CAUTI_RISK_COL,
-            REINSERTION_RISK_COL,
-        ]:
-            truth[f"{column}_randomised"] = randomised_panel[column].to_numpy()
-        truth["dgp_action_eligible_randomised"] = randomised_states.eq("in").astype(
-            np.int8
-        )
-        truth["dgp_outcome_at_risk_randomised"] = normalise_binary(
-            randomised_panel[CAUTI_RISK_COL], CAUTI_RISK_COL
-        )
-        for z_col in randomised_truth["z_values"].columns:
-            truth[f"z_dgp_{z_col.removeprefix('z_')}_randomised"] = randomised_truth[
-                "z_values"
-            ][z_col].to_numpy(dtype=float)
-        truth["true_propensity_remove_randomised"] = randomised_truth["propensity"]
-        truth["synthetic_action_randomised"] = normalise_binary(
-            randomised_panel[ACTION_COL], ACTION_COL
-        ).to_numpy(dtype=np.int8)
-        truth["synthetic_outcome_randomised"] = normalise_binary(
-            randomised_panel[OUTCOME_COL], OUTCOME_COL
-        ).to_numpy(dtype=np.int8)
-        truth["true_mu_keep_randomised"] = randomised_truth["mu_keep"]
-        truth["true_mu_remove_randomised"] = randomised_truth["mu_remove"]
-        truth["true_mu_out_randomised"] = randomised_truth["mu_out"]
-        truth["true_mu_observed_action_randomised"] = randomised_truth[
-            "observed_probability"
-        ]
+    randomised_panel = randomised_truth["panel"]
+    randomised_states = (
+        randomised_panel[STATE_COL].astype("string").str.strip().str.lower()
+    )
+    for column in [
+        "removed",
+        STATE_COL,
+        "episode_index",
+        PERIODS_COL,
+        CAUTI_RISK_COL,
+        REINSERTION_RISK_COL,
+    ]:
+        truth[f"{column}_randomised"] = randomised_panel[column].to_numpy()
+    truth["dgp_action_eligible_randomised"] = randomised_states.eq("in").astype(
+        np.int8
+    )
+    truth["dgp_outcome_at_risk_randomised"] = normalise_binary(
+        randomised_panel[CAUTI_RISK_COL], CAUTI_RISK_COL
+    )
+    for z_col in randomised_truth["z_values"].columns:
+        truth[f"z_dgp_{z_col.removeprefix('z_')}_randomised"] = randomised_truth[
+            "z_values"
+        ][z_col].to_numpy(dtype=float)
+    truth["true_propensity_remove_randomised"] = randomised_truth["propensity"]
+    truth["synthetic_action_randomised"] = normalise_binary(
+        randomised_panel[ACTION_COL], ACTION_COL
+    ).to_numpy(dtype=np.int8)
+    truth["synthetic_outcome_randomised"] = normalise_binary(
+        randomised_panel[OUTCOME_COL], OUTCOME_COL
+    ).to_numpy(dtype=np.int8)
+    truth["true_mu_keep_randomised"] = randomised_truth["mu_keep"]
+    truth["true_mu_remove_randomised"] = randomised_truth["mu_remove"]
+    truth["true_mu_out_randomised"] = randomised_truth["mu_out"]
+    truth["true_mu_observed_action_randomised"] = randomised_truth[
+        "observed_probability"
+    ]
     return truth
 
 
@@ -795,7 +764,7 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
     return oracle
 
 
-def build_coefficients_table(action_intercept, randomised_action_intercept=None):
+def build_coefficients_table(action_intercept, randomised_action_intercept):
     rows = [
         {
             "mechanism": "observational_action",
@@ -834,13 +803,12 @@ def build_coefficients_table(action_intercept, randomised_action_intercept=None)
         "coefficient": TREATMENT_LOG_ODDS_EFFECT,
         "notes": "known conditional causal log-odds effect; negative is protective",
     })
-    if randomised_action_intercept is not None:
-        rows.append({
-            "mechanism": "randomised_action",
-            "term": "intercept",
-            "coefficient": randomised_action_intercept,
-            "notes": "constant randomised assignment probability; all confounder coefficients are zero",
-        })
+    rows.append({
+        "mechanism": "randomised_action",
+        "term": "intercept",
+        "coefficient": randomised_action_intercept,
+        "notes": "constant randomised assignment probability; all confounder coefficients are zero",
+    })
     return pd.DataFrame(rows)
 
 
@@ -1075,19 +1043,6 @@ def assert_no_oracle_columns(panel, panel_name):
         )
 
 
-def output_paths(output_dir, include_randomised):
-    paths = {
-        "primary_panel": output_dir / PRIMARY_PANEL_FILENAME,
-        "omitted_panel": output_dir / OMITTED_PANEL_FILENAME,
-        "truth": output_dir / TRUTH_FILENAME,
-        "oracle_policy_values": output_dir / ORACLE_POLICY_FILENAME,
-        "coefficients": output_dir / COEFFICIENTS_FILENAME,
-    }
-    if include_randomised:
-        paths["randomised_panel"] = output_dir / RANDOMISED_PANEL_FILENAME
-    return paths
-
-
 def assert_output_safety(source_path, paths):
     source_resolved = source_path.resolve()
     for label, path in paths.items():
@@ -1096,10 +1051,16 @@ def assert_output_safety(source_path, paths):
 
 
 def main():
-    args = parse_args()
-    source_path = args.source_panel.resolve()
-    output_dir = args.output_dir.resolve()
-    paths = output_paths(output_dir, args.write_randomised_action)
+    source_path = SOURCE_PANEL.resolve()
+    output_dir = OUTPUT_DIR.resolve()
+    paths = {
+        "primary_panel": output_dir / PRIMARY_PANEL_FILENAME,
+        "omitted_panel": output_dir / OMITTED_PANEL_FILENAME,
+        "randomised_panel": output_dir / RANDOMISED_PANEL_FILENAME,
+        "truth": output_dir / TRUTH_FILENAME,
+        "oracle_policy_values": output_dir / ORACLE_POLICY_FILENAME,
+        "coefficients": output_dir / COEFFICIENTS_FILENAME,
+    }
     assert_output_safety(
         source_path,
         paths,
@@ -1150,51 +1111,46 @@ def main():
     primary_panel = attach_synthetic_outcome(primary_trajectory, synthetic_outcome)
     omitted_panel = make_omitted_confounder_panel(primary_panel)
 
-    randomised_panel = None
-    randomised_propensity = None
-    randomised_action_intercept = None
-    randomised_truth = None
-    if args.write_randomised_action:
-        (
-            randomised_trajectory,
-            randomised_propensity,
-            randomised_action_intercept,
-        ) = generate_sequential_trajectory(
-            source_panel,
-            z_values,
-            standardisation,
-            randomised_action_rng,
-            randomised=True,
-            target_prevalence=target_action_prevalence,
-        )
-        randomised_z_values = apply_standardisation(
-            randomised_trajectory, standardisation
-        )
-        (
-            randomised_mu_keep,
-            randomised_mu_remove,
-            randomised_mu_out,
-        ) = outcome_potential_probabilities(randomised_z_values)
-        randomised_outcome, randomised_observed_probability = generate_outcome(
-            randomised_trajectory,
-            randomised_trajectory[ACTION_COL].to_numpy(dtype=np.int8),
-            randomised_mu_keep,
-            randomised_mu_remove,
-            randomised_mu_out,
-            outcome_uniform,
-        )
-        randomised_panel = attach_synthetic_outcome(
-            randomised_trajectory, randomised_outcome
-        )
-        randomised_truth = {
-            "panel": randomised_panel,
-            "propensity": randomised_propensity,
-            "z_values": randomised_z_values,
-            "mu_keep": randomised_mu_keep,
-            "mu_remove": randomised_mu_remove,
-            "mu_out": randomised_mu_out,
-            "observed_probability": randomised_observed_probability,
-        }
+    (
+        randomised_trajectory,
+        randomised_propensity,
+        randomised_action_intercept,
+    ) = generate_sequential_trajectory(
+        source_panel,
+        z_values,
+        standardisation,
+        randomised_action_rng,
+        randomised=True,
+        target_prevalence=target_action_prevalence,
+    )
+    randomised_z_values = apply_standardisation(
+        randomised_trajectory, standardisation
+    )
+    (
+        randomised_mu_keep,
+        randomised_mu_remove,
+        randomised_mu_out,
+    ) = outcome_potential_probabilities(randomised_z_values)
+    randomised_outcome, randomised_observed_probability = generate_outcome(
+        randomised_trajectory,
+        randomised_trajectory[ACTION_COL].to_numpy(dtype=np.int8),
+        randomised_mu_keep,
+        randomised_mu_remove,
+        randomised_mu_out,
+        outcome_uniform,
+    )
+    randomised_panel = attach_synthetic_outcome(
+        randomised_trajectory, randomised_outcome
+    )
+    randomised_truth = {
+        "panel": randomised_panel,
+        "propensity": randomised_propensity,
+        "z_values": randomised_z_values,
+        "mu_keep": randomised_mu_keep,
+        "mu_remove": randomised_mu_remove,
+        "mu_out": randomised_mu_out,
+        "observed_probability": randomised_observed_probability,
+    }
 
     truth = build_truth_table(
         primary_panel,
@@ -1217,9 +1173,8 @@ def main():
     # All safety checks run before any validation output is written.
     assert_primary_integrity(source_panel, primary_panel)
     assert_no_oracle_columns(omitted_panel, "omitted-confounder estimator-input panel")
-    if randomised_panel is not None:
-        assert_primary_integrity(source_panel, randomised_panel)
-        assert_no_oracle_columns(randomised_panel, "randomised estimator-input panel")
+    assert_primary_integrity(source_panel, randomised_panel)
+    assert_no_oracle_columns(randomised_panel, "randomised estimator-input panel")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     primary_panel.to_csv(paths["primary_panel"], index=False)
@@ -1227,8 +1182,7 @@ def main():
     truth.to_csv(paths["truth"], index=False)
     oracle_policy_values.to_csv(paths["oracle_policy_values"], index=False)
     coefficients.to_csv(paths["coefficients"], index=False)
-    if randomised_panel is not None:
-        randomised_panel.to_csv(paths["randomised_panel"], index=False)
+    randomised_panel.to_csv(paths["randomised_panel"], index=False)
 
     print("Semi-synthetic validation files created:")
     for label, path in paths.items():

@@ -13,10 +13,10 @@ import pandas as pd
 import policy_bootstrap as bootstrap
 import policy_eval_common as pec
 import fit_nuisance_models as nuisance
+import build_policy_intervention_panels as policies
 import evaluate_ipw_policies as ipw
 import evaluate_aipw_policies as aipw
 import evaluate_gformula_policies as gformula
-from panel_run_config import resolve_panel_run
 from test_policy_confidence_intervals import SUMMARY_COLUMNS
 
 ESTIMATORS = {"ipw": ipw, "gformula": gformula, "aipw": aipw}
@@ -181,6 +181,36 @@ class RefitBootstrapTests(unittest.TestCase):
         self.assertTrue(scores.loc[nonrisk, "p_cauti_if_out"].eq(0).all())
         self.assertTrue(scores.loc[nonrisk, "p_cauti_if_keep"].notna().all())
 
+    def test_compact_policy_csv_preserves_timing_and_estimates(self):
+        panel = self.panel.copy()
+        # Split a removal day into two intervals: only the first can receive
+        # the target removal action, even when observed removal is later.
+        extra = panel.iloc[[0]].copy()
+        midpoint = str(pd.Timestamp(extra.period_start.iloc[0]) + pd.Timedelta(hours=12))
+        panel.loc[0, "period_end"] = midpoint
+        panel.loc[0, "removed_in_period"] = 0
+        panel.loc[0, "observed_action"] = "keep"
+        extra["period_start"] = midpoint
+        panel = pd.concat([panel, extra], ignore_index=True)
+        base = policies.add_stable_ids_and_decision_flag(panel[policies.POLICY_INPUT_COLS].copy())
+        base = policies.add_policy_episode_day(base)
+        original = policies.build_long_policy_panel(base, [1, 2, 5])
+        scores, _ = bootstrap.refit_nuisance_predictions(
+            panel, self.subjects, np.ones(len(self.subjects), dtype=int), "aipw",
+        )
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "policies.csv"
+            original.to_csv(path, columns=policies.POLICY_OUTPUT_COLS, index=False)
+            self.assertEqual(len(pd.read_csv(path, nrows=0).columns), 14)
+            restored = policies.read_policy_panel(path)
+            restored["subject_id"] = restored.subject_id.astype(str)
+            pd.testing.assert_frame_equal(restored[original.columns], original, check_dtype=False)
+            for name, module in ESTIMATORS.items():
+                with self.subTest(estimator=name):
+                    before = module.evaluate_policy_episodes(original, scores)[0]
+                    after = module.evaluate_policy_episodes(restored, scores)[0]
+                    pd.testing.assert_frame_equal(after, before, check_dtype=False)
+
     def test_evaluator_entry_points_support_both_modes_and_validation(self):
         expected = {"bootstrap_replicate_estimates.csv", "policy_value_confidence_intervals.csv",
                     "policy_difference_confidence_intervals.csv"}
@@ -190,38 +220,62 @@ class RefitBootstrapTests(unittest.TestCase):
         full_scores = full_scores.drop(columns=[c for c in full_scores if c.startswith("__rescored_")])
         with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
             root = Path(temporary)
-            for panel_name in ("real", "validation", "validation-omitted", "validation-randomised"):
-                paths = resolve_panel_run(root, panel_name)
-                paths.panel_path.parent.mkdir(parents=True, exist_ok=True)
-                self.panel.to_csv(paths.panel_path, index=False)
-                policy_path = paths.artefact_root / "policy_interventions" / "policy_intervention_panel_long.csv"
+            validation = root / "artefacts/validation/semi_synthetic_measured_confounding"
+            datasets = [
+                ("real", root / "data/modelling_panel.csv", root / "artefacts"),
+                ("validation", validation / "semi_synthetic_panel.csv", validation / "pipeline_runs/semi_synthetic_with_confounding"),
+                ("validation-omitted", validation / "semi_synthetic_panel_confounder_omitted.csv", validation / "pipeline_runs/confounder_omitted"),
+                ("validation-randomised", validation / "semi_synthetic_panel_randomised_action.csv", validation / "pipeline_runs/randomised_action"),
+            ]
+            for panel_name, panel_path, artefact_root in datasets:
+                panel_path.parent.mkdir(parents=True, exist_ok=True)
+                self.panel.to_csv(panel_path, index=False)
+                policy_path = artefact_root / "policy_interventions" / "policy_intervention_panel_long.csv"
                 policy_path.parent.mkdir(parents=True, exist_ok=True)
-                self.policy_rows.to_csv(policy_path, index=False)
-                prediction_path = paths.artefact_root / "nuisance_models" / "logistic_regression" / "nuisance_predictions.csv"
+                with patch.multiple(policies, INPUT_PATH=panel_path, OUTDIR=policy_path.parent,
+                                    LONG_OUTPUT_PATH=policy_path,
+                                    QA_OUTPUT_PATH=policy_path.parent / "policy_intervention_panel_qa.csv",
+                                    POLICY_DAYS=[1, 2]):
+                    policies.main()
+                self.assertEqual(pd.read_csv(policy_path, nrows=0).columns.tolist(), policies.POLICY_OUTPUT_COLS)
+                prediction_path = artefact_root / "nuisance_models" / "logistic_regression" / "nuisance_predictions.csv"
                 prediction_path.parent.mkdir(parents=True, exist_ok=True)
                 for name, module in ESTIMATORS.items():
-                    with self.subTest(panel=panel_name, estimator=name), \
-                         patch.object(module, "REPO_ROOT", root), \
-                         patch.object(module, "NUISANCE_MODEL_TYPE", "logistic_regression"), \
-                         patch.object(module, "N_BOOTSTRAP", 2):
+                    output_root = artefact_root / "policy_eval" / name
+                    settings = {
+                        "PANEL_PATH": panel_path,
+                        "POLICY_PANEL_PATH": policy_path,
+                        "NUISANCE_MODEL_DIR": prediction_path.parent,
+                        "NUISANCE_PREDICTIONS_PATH": prediction_path,
+                        "OUTDIR": output_root,
+                        "OUTPUT_PATHS": {key: output_root / path.name for key, path in module.OUTPUT_PATHS.items()},
+                        "NUISANCE_MODEL_TYPE": "logistic_regression",
+                        "N_BOOTSTRAP": 2,
+                        "REFIT_NUISANCE": False,
+                    }
+                    if name != "ipw":
+                        settings["OUTCOME_MODELS_PATH"] = prediction_path.parent / "outcome_models.pkl"
+                    with self.subTest(panel=panel_name, estimator=name), patch.multiple(module, **settings):
                         full_scores.to_csv(prediction_path, index=False)
                         with patch.object(nuisance, "fit_crossfit_fold_model", side_effect=AssertionError("fixed mode must not refit")):
-                            module.main(["--panel", panel_name])
+                            module.main()
                         prediction_path.unlink()
                         # Refit mode must work without any saved predictions/models.
-                        module.main(["--panel", panel_name, "--refit-nuisance"])
+                        with patch.object(module, "REFIT_NUISANCE", True):
+                            module.main()
                         for mode in ("fixed", "refit"):
                             outdir = module.OUTDIR / "confidence_intervals" / mode
-                            self.assertEqual({p.name for p in outdir.iterdir()}, expected)
-                            draws = pd.read_csv(outdir / "bootstrap_replicate_estimates.csv")
+                            self.assertEqual({p.name for p in outdir.iterdir()}, {f"{name}_{filename}" for filename in expected})
+                            draws = pd.read_csv(outdir / f"{name}_bootstrap_replicate_estimates.csv")
                             self.assertEqual(draws.bootstrap_replicate.tolist(), [1, 2])
-                            intervals = pd.read_csv(outdir / "policy_value_confidence_intervals.csv")
+                            self.assertTrue(draws.columns.is_unique)
+                            self.assertFalse(any(column.startswith(f"{name}__") for column in draws))
+                            intervals = pd.read_csv(outdir / f"{name}_policy_value_confidence_intervals.csv")
                             self.assertEqual(set(intervals.estimator), {name})
                             self.assertEqual(len(intervals), 15)
-                            differences = pd.read_csv(outdir / "policy_difference_confidence_intervals.csv")
+                            differences = pd.read_csv(outdir / f"{name}_policy_difference_confidence_intervals.csv")
                             current = differences.loc[differences.policy_name.eq("current_practice")]
                             np.testing.assert_allclose(current[["point_estimate", "ci_lower", "ci_upper"]], 0)
-                    module.configure_panel_run("real")
             self.assertFalse(list(root.rglob("*.json")))
             self.assertFalse(list(root.rglob("*.pkl")))
 

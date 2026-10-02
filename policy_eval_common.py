@@ -23,16 +23,6 @@ def save_report_df(df, path, decimals=3):
     out.to_csv(path, index=False, float_format=f"%.{decimals}f")
 
 
-def baseline_model_feature_columns(columns):
-    # Return baseline and chart covariates in their existing order
-    return [
-        column
-        for column in columns
-        if column == "age"
-        or str(column).startswith(("itemid_", "sex_", "ethnicity_"))
-    ]
-
-
 def add_period_duration_days(
     df,
     *,
@@ -363,20 +353,6 @@ PREDICTION_COLUMNS = [
     "p_no_event_if_remove",
     "p_no_event_if_out",
 ]
-
-
-def first_non_null(series):
-    # Return the first non-missing value
-    non_null = series.dropna()
-    return non_null.iloc[0] if len(non_null) else np.nan
-
-
-def max_binary(series):
-    # Return whether any binary value is present
-    numeric = pd.to_numeric(series, errors="coerce").fillna(0)
-    if numeric.empty:
-        return np.nan
-    return int(numeric.max() > 0)
 
 
 def add_episode_day_since_insertion(df):

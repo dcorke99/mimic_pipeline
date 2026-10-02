@@ -280,19 +280,22 @@ class PatientBootstrapTests(unittest.TestCase):
             )
 
     def test_replicate_csv_has_one_row_per_draw_and_preserves_appended_estimates(self):
-        values, diagnostics = bootstrap_values(self.design, 5, 91)
-        values[2, self.entry_index("ipw", "remove_on_day_1", "cauti")] = np.nan
+        design = ci.build_patient_statistics({"ipw": self.episodes["ipw"]}, self.policies, self.subjects)
+        values, diagnostics = bootstrap_values(design, 5, 91)
+        values[2, design.entries.policy_name.eq("remove_on_day_1") & design.entries.outcome.eq("cauti")] = np.nan
         diagnostics["n_fallback_folds"] = [0, 1, 0, 0, 0]
-        table = ci.bootstrap_replicate_table(self.design.entries, values, diagnostics)
+        table = ci.bootstrap_replicate_table(design.entries, values, diagnostics)
         self.assertEqual(len(table), 5)
         self.assertTrue(table.columns.is_unique)
-        self.assertEqual(len(table.columns) - len(diagnostics.columns), 2 * len(self.design.entries))
+        self.assertIn("remove_on_day_1__cauti__policy_value", table)
+        self.assertFalse(any(column.startswith("ipw__") for column in table))
+        self.assertEqual(len(table.columns) - len(diagnostics.columns), 2 * len(design.entries))
         pd.testing.assert_frame_equal(table[diagnostics.columns], diagnostics)
         value_columns = [name for name in table if name.endswith("__policy_value")]
         difference_columns = [name for name in table if name.endswith("__difference_vs_current_practice")]
         np.testing.assert_array_equal(table[value_columns].to_numpy(), values)
         np.testing.assert_array_equal(
-            table[difference_columns].to_numpy(), ci.paired_differences(values, self.design.entries),
+            table[difference_columns].to_numpy(), ci.paired_differences(values, design.entries),
         )
 
         # The refitting script writes one completed pass at a time. Reading
@@ -300,7 +303,7 @@ class PatientBootstrapTests(unittest.TestCase):
         output = StringIO()
         for replicate in range(len(values)):
             row = ci.bootstrap_replicate_table(
-                self.design.entries, values[replicate:replicate + 1], diagnostics.iloc[[replicate]],
+                design.entries, values[replicate:replicate + 1], diagnostics.iloc[[replicate]],
             )
             row.to_csv(output, index=False, header=replicate == 0)
         restored = pd.read_csv(StringIO(output.getvalue()), float_precision="round_trip")

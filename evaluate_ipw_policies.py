@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-# Evaluate catheter-removal policies with sequential IPW estimates
-
-
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -11,11 +6,7 @@ import pandas as pd
 import policy_eval_common as pec
 import policy_bootstrap as bootstrap
 import fit_nuisance_models as nuisance
-from policy_eval_common import (
-    first_non_null,
-    max_binary,
-)
-from panel_run_config import add_panel_argument, resolve_panel_run
+from build_policy_intervention_panels import read_policy_panel
 
 
 # Paths and constants
@@ -26,33 +17,40 @@ N_BOOTSTRAP = 1000
 REFIT_NUISANCE = False  # True: refit each bootstrap sample; False: reuse saved predictions.
 
 
-def configure_panel_run(panel_name):
-    # Resolve mutually consistent policy, nuisance, and evaluator paths
-    global NUISANCE_MODEL_DIR, POLICY_PANEL_PATH, NUISANCE_PREDICTIONS_PATH
-    global OUTDIR, OUTPUT_PATHS
-    paths = resolve_panel_run(REPO_ROOT, panel_name)
-    NUISANCE_MODEL_DIR = (
-        paths.artefact_root / "nuisance_models" / NUISANCE_MODEL_TYPE
-    )
-    POLICY_PANEL_PATH = (
-        paths.artefact_root
-        / "policy_interventions"
-        / "policy_intervention_panel_long.csv"
-    )
-    NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
-    OUTDIR = paths.artefact_root / "policy_eval" / "ipw"
-    OUTPUT_PATHS = {
-        "summary": OUTDIR / "ipw_policy_outcomes_summary.csv",
-        "episodes": OUTDIR / "ipw_policy_episode_outcomes.csv",
-        "weight_diagnostics": OUTDIR / "ipw_weight_diagnostics.csv",
-        "support_diagnostics": OUTDIR / "ipw_policy_support_diagnostics.csv",
-        "clipping_sensitivity": OUTDIR / "ipw_clipping_sensitivity.csv",
-        "current_practice": OUTDIR / "current_practice_episode_outcomes.csv",
-    }
-    return paths
+# Leave ONE dataset block uncommented, then use Run Python File in VS Code.
+# Real data
+PANEL_PATH = REPO_ROOT / "data/modelling_panel.csv"
+POLICY_PANEL_PATH = REPO_ROOT / "artefacts/policy_interventions/policy_intervention_panel_long.csv"
+NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/nuisance_models" / NUISANCE_MODEL_TYPE
+OUTDIR = REPO_ROOT / "artefacts/policy_eval/ipw"
 
+# Semi-synthetic: measured confounding
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_eval/ipw"
 
-configure_panel_run("real")
+# Semi-synthetic: confounder omitted
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_eval/ipw"
+
+# Semi-synthetic: randomised actions
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_eval/ipw"
+
+NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
+OUTPUT_PATHS = {
+    "summary": OUTDIR / "ipw_policy_outcomes_summary.csv",
+    "episodes": OUTDIR / "ipw_policy_episode_outcomes.csv",
+    "weight_diagnostics": OUTDIR / "ipw_weight_diagnostics.csv",
+    "support_diagnostics": OUTDIR / "ipw_policy_support_diagnostics.csv",
+    "clipping_sensitivity": OUTDIR / "ipw_clipping_sensitivity.csv",
+    "current_practice": OUTDIR / "current_practice_episode_outcomes.csv",
+}
 
 CLIP_LOWER = 0.01
 CLIP_UPPER = 0.99
@@ -133,16 +131,11 @@ def weighted_mean(values, weights):
     return float(np.sum(values.loc[valid] * weights.loc[valid]) / np.sum(weights.loc[valid]))
 
 
-def valid_weight_series(weights):
-    # Return positive finite weights
-    weights = pd.to_numeric(weights, errors="coerce")
-    return weights[weights.notna() & np.isfinite(weights) & (weights > 0)]
-
-
 def effective_sample_size(weights):
     # Calculate the effective sample size
     # Return positive finite weights
-    weights = valid_weight_series(weights)
+    weights = pd.to_numeric(weights, errors="coerce")
+    weights = weights[np.isfinite(weights) & weights.gt(0)]
     if weights.empty:
         return np.nan
     sum_weights = float(weights.sum())
@@ -154,8 +147,7 @@ def effective_sample_size(weights):
 
 def load_policy_panel(path):
     # Load and validate the policy panel
-    df = pd.read_csv(path, low_memory=False)
-    df.columns = df.columns.str.strip()
+    df = read_policy_panel(path)
 
     validate_policy_panel(df)
     return df
@@ -375,7 +367,7 @@ def build_policy_episode_panel(df):
     df = add_episode_level_flags(df)
     group_cols = ["policy_name", "policy_remove_day", EPISODE_ID_COL]
     aggregations = {
-        POLICY_TYPE_COL: first_non_null,
+        POLICY_TYPE_COL: "first",
         "episode_adherent_to_policy": "max",
         "_applicable_int": "sum",
         "_matched_applicable_int": "sum",
@@ -388,10 +380,11 @@ def build_policy_episode_panel(df):
     }
 
     for col in EPISODE_FIRST_COLS:
-        aggregations[col] = first_non_null
+        aggregations[col] = "first"
 
     for episode_col, period_col in OUTCOME_SPECS.values():
-        aggregations[period_col] = max_binary
+        df[period_col] = pd.to_numeric(df[period_col], errors="coerce").gt(0).astype(int)
+        aggregations[period_col] = "max"
 
     for risk_col in ["at_risk_cauti", "at_risk_reinsertion"]:
         aggregations[risk_col] = "sum"
@@ -515,9 +508,10 @@ def build_current_practice_episode_panel(nuisance_df, policy_df):
         "_catheter_exposure_days": "sum",
     }
     for col in EPISODE_FIRST_COLS:
-        aggregations[col] = first_non_null
+        aggregations[col] = "first"
     for episode_col, period_col in OUTCOME_SPECS.values():
-        aggregations[period_col] = max_binary
+        nuisance_df[period_col] = pd.to_numeric(nuisance_df[period_col], errors="coerce").gt(0).astype(int)
+        aggregations[period_col] = "max"
     for risk_col in ["at_risk_cauti", "at_risk_reinsertion"]:
         aggregations[risk_col] = "sum"
 
@@ -664,7 +658,8 @@ def weight_diagnostic_row(
 ):
     # Build one weight diagnostic row
     # Return positive finite weights
-    weights = valid_weight_series(adherent_df[WEIGHT_COL]) if WEIGHT_COL in adherent_df.columns else pd.Series(dtype=float)
+    weights = pd.to_numeric(adherent_df[WEIGHT_COL], errors="coerce") if WEIGHT_COL in adherent_df.columns else pd.Series(dtype=float)
+    weights = weights[np.isfinite(weights) & weights.gt(0)]
     n_total = int(len(episode_all))
     n_adherent = int(episode_all["episode_adherent_to_policy"].eq(1).sum())
     n_non_adherent = int(n_total - n_adherent)
@@ -722,15 +717,6 @@ def build_weight_diagnostics(episode_all, policy_episode_df):
     return pd.DataFrame(rows)
 
 
-def available_outcome_columns(df):
-    # List available episode outcome columns
-    return {
-        outcome_name: episode_col
-        for outcome_name, (episode_col, _) in OUTCOME_SPECS.items()
-        if episode_col in df.columns
-    }
-
-
 def summarise_episode_estimates(
     episode_df,
     policy_name,
@@ -741,7 +727,7 @@ def summarise_episode_estimates(
 ):
     # Summarise episode-level estimates
     weights = pd.to_numeric(episode_df[weight_col], errors="coerce") if weight_col in episode_df.columns else pd.Series(dtype=float)
-    valid_weights = valid_weight_series(weights)
+    valid_weights = weights[np.isfinite(weights) & weights.gt(0)]
     row = {
         "policy_name": policy_name,
         "policy_remove_day": policy_remove_day,
@@ -760,7 +746,9 @@ def summarise_episode_estimates(
     }
 
     # Calculate a weighted mean
-    for outcome_name, episode_col in available_outcome_columns(episode_df).items():
+    for outcome_name, (episode_col, _) in OUTCOME_SPECS.items():
+        if episode_col not in episode_df.columns:
+            continue
         unweighted = pd.to_numeric(episode_df[episode_col], errors="coerce").mean()
         # Calculate a weighted mean
         weighted = weighted_mean(episode_df[episode_col], weights)
@@ -872,7 +860,8 @@ def clipping_estimate_row(
 ):
     # Build one clipping-sensitivity row
     # Return positive finite weights
-    valid_weights = valid_weight_series(weights)
+    numeric_weights = pd.to_numeric(weights, errors="coerce")
+    valid_weights = numeric_weights[np.isfinite(numeric_weights) & numeric_weights.gt(0)]
     # Calculate the effective sample size
     row = {
         "policy_name": policy_name,
@@ -887,7 +876,9 @@ def clipping_estimate_row(
         "effective_sample_size": effective_sample_size(weights),
     }
     # Calculate a weighted mean
-    for outcome_name, episode_col in available_outcome_columns(episode_df).items():
+    for outcome_name, (episode_col, _) in OUTCOME_SPECS.items():
+        if episode_col not in episode_df.columns:
+            continue
         # Calculate a weighted mean
         weighted = weighted_mean(episode_df[episode_col], weights)
         row[f"ipw_weighted_{outcome_name}_risk"] = weighted
@@ -926,7 +917,7 @@ def build_clipping_sensitivity(
         default_weights = pd.to_numeric(episode_df[WEIGHT_COL], errors="coerce")
         unclipped_weights = pd.to_numeric(episode_df[UNCLIPPED_WEIGHT_COL], errors="coerce")
         # Return positive finite weights
-        valid_default = valid_weight_series(default_weights)
+        valid_default = default_weights[np.isfinite(default_weights) & default_weights.gt(0)]
         p99 = float(valid_default.quantile(0.99)) if len(valid_default) else np.nan
 
         # Build one clipping-sensitivity row
@@ -1002,16 +993,6 @@ def print_summary(
         print(f"Saved {label}: {path}")
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Evaluate fixed-day policies with sequential IPW."
-    )
-    add_panel_argument(parser)
-    parser.add_argument("--refit-nuisance", action="store_true", default=REFIT_NUISANCE,
-                        help="Refit propensity models in each bootstrap sample; default: REFIT_NUISANCE setting.")
-    return parser.parse_args(argv)
-
-
 def evaluate_policy_episodes(policy_df, nuisance_df):
     joined_df = join_nuisance_predictions(policy_df, nuisance_df)
     joined_df = pec.add_period_duration_days(joined_df, context="joined IPW policy rows")
@@ -1026,16 +1007,14 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
     return episodes, joined_df, episode_all, current
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    paths = configure_panel_run(args.panel)
+def main():
     OUTDIR.mkdir(exist_ok=True, parents=True)
     policy_df = load_policy_panel(POLICY_PANEL_PATH)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
     refit_panel = None
-    if args.refit_nuisance:
+    if REFIT_NUISANCE:
         nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
-        refit_panel = nuisance.load_panel(paths.panel_path)
+        refit_panel = nuisance.load_panel(PANEL_PATH)
         subjects = pd.Index(sorted(refit_panel.subject_id.unique()), name="subject_id")
         nuisance_df, _ = bootstrap.refit_nuisance_predictions(
             refit_panel, subjects, np.ones(len(subjects), dtype=int), "ipw",

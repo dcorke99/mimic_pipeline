@@ -110,7 +110,7 @@ class PatientStatistics:
         np.divide(totals[:, 2], totals[:, 3], out=correction, where=totals[:, 3] > 0)
         values[is_aipw] += correction[is_aipw]
         risk = is_aipw & self.entries.outcome.ne("catheter_exposure_days").to_numpy()
-        # Match bound_probability_estimate: clip the final AIPW aggregate only.
+        # Clip the final AIPW aggregate only.
         values[risk] = np.clip(values[risk], 0.0, 1.0)
         return values
 
@@ -188,7 +188,7 @@ def paired_differences(values, entries):
 def bootstrap_replicate_table(entries, values, diagnostics):
     """One row per draw, with adjacent policy values and paired differences."""
     columns = [
-        f"{row.estimator}__{row.policy_name}__{row.outcome}__{estimate_type}"
+        f"{row.policy_name}__{row.outcome}__{estimate_type}"
         for row in entries.itertuples(index=False)
         for estimate_type in ("policy_value", "difference_vs_current_practice")
     ]
@@ -254,15 +254,15 @@ def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstra
         values[replicate] = draw_design.estimate(counts)
         bootstrap_replicate_table(
             design.entries, values[replicate:replicate + 1], pd.DataFrame([diagnostic]),
-        ).to_csv(output / "bootstrap_replicate_estimates.csv", index=False,
+        ).to_csv(output / f"{estimator}_bootstrap_replicate_estimates.csv", index=False, float_format="%.4f",
                  mode="w" if replicate == 0 else "a", header=replicate == 0)
 
     interval_table(design.entries, point, values, len(subjects)).to_csv(
-        output / "policy_value_confidence_intervals.csv", index=False,
+        output / f"{estimator}_policy_value_confidence_intervals.csv", index=False, float_format="%.4f",
     )
     differences = interval_table(
         design.entries, paired_differences(point, design.entries),
         paired_differences(values, design.entries), len(subjects),
     )
     differences["comparator"] = CURRENT_PRACTICE
-    differences.to_csv(output / "policy_difference_confidence_intervals.csv", index=False)
+    differences.to_csv(output / f"{estimator}_policy_difference_confidence_intervals.csv", index=False, float_format="%.4f")

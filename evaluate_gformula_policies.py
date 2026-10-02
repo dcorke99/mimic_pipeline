@@ -2,7 +2,6 @@
 # Evaluate catheter-removal policies with plug-in g-formula estimates
 
 
-import argparse
 from pathlib import Path
 
 import numpy as np
@@ -11,14 +10,12 @@ import pandas as pd
 import policy_eval_common as pec
 import policy_bootstrap as bootstrap
 import fit_nuisance_models as nuisance
+from build_policy_intervention_panels import read_policy_panel
 from policy_eval_common import (
     PREDICTION_COLUMNS,
-    first_non_null,
-    max_binary,
     add_episode_day_since_insertion,
     fill_missing_counterfactual_predictions,
 )
-from panel_run_config import add_panel_argument, resolve_panel_run
 
 
 # Paths and constants
@@ -29,34 +26,41 @@ N_BOOTSTRAP = 1000
 REFIT_NUISANCE = False  # True: refit each bootstrap sample; False: reuse saved predictions.
 
 
-def configure_panel_run(panel_name):
-    # Resolve mutually consistent policy, nuisance, model, and evaluator paths
-    global NUISANCE_MODEL_DIR, POLICY_PANEL_PATH, NUISANCE_PREDICTIONS_PATH
-    global OUTCOME_MODELS_PATH, OUTDIR, OUTPUT_PATHS
-    paths = resolve_panel_run(REPO_ROOT, panel_name)
-    NUISANCE_MODEL_DIR = (
-        paths.artefact_root / "nuisance_models" / NUISANCE_MODEL_TYPE
-    )
-    POLICY_PANEL_PATH = (
-        paths.artefact_root
-        / "policy_interventions"
-        / "policy_intervention_panel_long.csv"
-    )
-    NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
-    OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
-    OUTDIR = paths.artefact_root / "policy_eval" / "gformula"
-    OUTPUT_PATHS = {
-        "summary": OUTDIR / "gformula_policy_outcomes_summary.csv",
-        "episodes": OUTDIR / "gformula_episode_predictions.csv",
-        "diagnostics": OUTDIR / "gformula_diagnostics.csv",
-        "current_practice": (
-            OUTDIR / "current_practice_gformula_episode_predictions.csv"
-        ),
-    }
-    return paths
+# Leave ONE dataset block uncommented, then use Run Python File in VS Code.
+# Real data
+PANEL_PATH = REPO_ROOT / "data/modelling_panel.csv"
+POLICY_PANEL_PATH = REPO_ROOT / "artefacts/policy_interventions/policy_intervention_panel_long.csv"
+NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/nuisance_models" / NUISANCE_MODEL_TYPE
+OUTDIR = REPO_ROOT / "artefacts/policy_eval/gformula"
 
+# Semi-synthetic: measured confounding
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_eval/gformula"
 
-configure_panel_run("real")
+# Semi-synthetic: confounder omitted
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_eval/gformula"
+
+# Semi-synthetic: randomised actions
+# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
+# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_interventions/policy_intervention_panel_long.csv"
+# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/nuisance_models" / NUISANCE_MODEL_TYPE
+# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_eval/gformula"
+
+NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
+OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
+OUTPUT_PATHS = {
+    "summary": OUTDIR / "gformula_policy_outcomes_summary.csv",
+    "episodes": OUTDIR / "gformula_episode_predictions.csv",
+    "diagnostics": OUTDIR / "gformula_diagnostics.csv",
+    "current_practice": (
+        OUTDIR / "current_practice_gformula_episode_predictions.csv"
+    ),
+}
 
 CURRENT_PRACTICE_LABEL = "current_practice"
 ESTIMATOR_NAME = "plugin_gformula"
@@ -148,8 +152,7 @@ def cumulative_event_probability(probabilities):
 
 def load_policy_panel(path):
     # Load and validate the policy panel
-    df = pd.read_csv(path, low_memory=False)
-    df.columns = df.columns.str.strip()
+    df = read_policy_panel(path)
     # Validate policy-panel structure
     validate_policy_panel(df)
     pec.validate_resolved_target_policy_timeline(
@@ -157,13 +160,6 @@ def load_policy_panel(path):
         episode_id_col=EPISODE_ID_COL,
         context=str(path),
     )
-    return df
-
-
-def load_nuisance_predictions(path):
-    # Load and validate the nuisance predictions
-    df = pd.read_csv(path, low_memory=False)
-    df.columns = df.columns.str.strip()
     return df
 
 
@@ -383,7 +379,9 @@ def add_observed_crude_episode_outcomes(episode_df, row_df):
         ("observed_any_death", "death_in_period"),
         ("observed_icu_exit_alive", "observed_icu_exit_alive_in_period"),
     ]
-    aggs = {source: max_binary for _, source in outcome_cols}
+    for _, source in outcome_cols:
+        row_df[source] = pd.to_numeric(row_df[source], errors="coerce").gt(0).astype(int)
+    aggs = {source: "max" for _, source in outcome_cols}
     crude = row_df.groupby([EPISODE_ID_COL], as_index=False, dropna=False).agg(aggs)
     crude = crude.rename(columns={source: target for target, source in outcome_cols})
     return episode_df.merge(crude, on=EPISODE_ID_COL, how="left")
@@ -413,7 +411,7 @@ def build_episode_predictions(row_df):
             group_cols,
             as_index=False,
             dropna=False,
-        )[col].agg(first_non_null)
+        )[col].first()
         base = base.merge(values, on=group_cols, how="left")
 
     for episode_col, row_col in EPISODE_PREDICTION_SPECS.items():
@@ -528,11 +526,10 @@ def prediction_bounds(df, col):
 def build_diagnostics(row_df, episode_df):
     # Build diagnostic rows for policy outputs
     rows = []
-    # Return the first non-missing value
     for policy_name, policy_df in row_df.groupby("policy_name", dropna=False, sort=False):
         policy_episode_df = episode_df.loc[episode_df["policy_name"].eq(policy_name)]
-        # Return the first non-missing value
-        policy_remove_day = first_non_null(policy_df["policy_remove_day"])
+        removal_days = policy_df["policy_remove_day"].dropna()
+        policy_remove_day = removal_days.iloc[0] if len(removal_days) else np.nan
         numeric_remove_day = pd.to_numeric(pd.Series([policy_remove_day]), errors="coerce").iloc[0]
         if pd.notna(numeric_remove_day):
             too_many_policy_in = policy_episode_df["expected_catheter_in_intervals"].gt(numeric_remove_day)
@@ -562,10 +559,10 @@ def build_diagnostics(row_df, episode_df):
             if fixed_day_policy
             else pd.NA
         )
-        # Return the first non-missing value
+        policy_types = policy_df[POLICY_TYPE_COL].dropna()
         row = {
             "policy_name": policy_name,
-            POLICY_TYPE_COL: first_non_null(policy_df[POLICY_TYPE_COL]),
+            POLICY_TYPE_COL: policy_types.iloc[0] if len(policy_types) else np.nan,
             "policy_remove_day": policy_remove_day,
             "n_rows": int(len(policy_df)),
             "n_episodes": int(policy_df[EPISODE_ID_COL].nunique()),
@@ -651,20 +648,10 @@ def print_console_summary(
         print(f"Saved {label}: {path}")
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Evaluate fixed-day policies with the plug-in g-formula."
-    )
-    add_panel_argument(parser)
-    parser.add_argument("--refit-nuisance", action="store_true", default=REFIT_NUISANCE,
-                        help="Refit outcome models in each bootstrap sample; default: REFIT_NUISANCE setting.")
-    return parser.parse_args(argv)
-
-
 def evaluate_policy_episodes(policy_df, nuisance_df):
     model_feature_cols = [
         "episode_index",
-        *pec.baseline_model_feature_columns(nuisance_df.columns),
+        *[col for col in nuisance_df if col == "age" or col.startswith(("itemid_", "sex_", "ethnicity_"))],
     ]
     nuisance_df = nuisance_df.drop(columns=model_feature_cols)
 
@@ -693,22 +680,21 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
     return combined_episode_df, row_df, current_rows, current_episode_df
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    paths = configure_panel_run(args.panel)
+def main():
     OUTDIR.mkdir(exist_ok=True, parents=True)
     policy_df = load_policy_panel(POLICY_PANEL_PATH)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
     refit_panel = None
-    if args.refit_nuisance:
+    if REFIT_NUISANCE:
         nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
-        refit_panel = nuisance.load_panel(paths.panel_path)
+        refit_panel = nuisance.load_panel(PANEL_PATH)
         subjects = pd.Index(sorted(refit_panel.subject_id.unique()), name="subject_id")
         nuisance_df, _ = bootstrap.refit_nuisance_predictions(
             refit_panel, subjects, np.ones(len(subjects), dtype=int), "gformula",
         )
     else:
-        nuisance_df = load_nuisance_predictions(NUISANCE_PREDICTIONS_PATH)
+        nuisance_df = pd.read_csv(NUISANCE_PREDICTIONS_PATH, low_memory=False)
+        nuisance_df.columns = nuisance_df.columns.str.strip()
         nuisance_df = fill_missing_counterfactual_predictions(nuisance_df, OUTCOME_MODELS_PATH)
     nuisance_df["subject_id"] = nuisance_df.subject_id.astype(str)
     combined_episode_df, row_df, current_rows, current_episode_df = evaluate_policy_episodes(
