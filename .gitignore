@@ -10,6 +10,9 @@ artefacts/
 *.hdf5
 *.feather
 
+# Powershelll run scripts
+*.ps1
+
 # Python cache
 __pycache__/
 *.pyc
