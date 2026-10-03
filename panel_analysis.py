@@ -9,11 +9,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # Config
-DATA_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\modelling_panel.csv")
-RESULTS_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artefacts\panel_analysis")
-COVARIATE_DICT_FILE = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\data\covariate_dictionary.csv")
+REPO_ROOT = Path(__file__).resolve().parent
+DATA_FILE = REPO_ROOT / "data" / "modelling_panel.csv"
+RESULTS_DIR = REPO_ROOT / "artefacts" / "panel_analysis"
+COVARIATE_DICT_FILE = REPO_ROOT / "data" / "covariate_dictionary.csv"
 
-STEP1_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\mimic_pipeline\artefacts\step1")
+STEP1_DIR = REPO_ROOT / "artefacts" / "step1"
 STEP1_TOP_MODEL_FEATURES_FILE = STEP1_DIR / "top_model_features.csv"
 STEP1_TOP_SHAP_FEATURES_FILE = STEP1_DIR / "top_shap_features.csv"
 
@@ -84,9 +85,7 @@ def load_step1_top_features(path):
     out["model"] = out["model"].astype(str).str.strip().str.lower()
     out["feature"] = out["feature"].astype(str).str.strip()
 
-    sort_cols = [c for c in ["model", "rank", "feature"] if c in out.columns]
-    if sort_cols:
-        out = out.sort_values(sort_cols).reset_index(drop=True)
+    out = out.sort_values(["model", "rank", "feature"]).reset_index(drop=True)
 
     return out
 
@@ -96,10 +95,7 @@ def get_step1_feature_names(step1_features, model_name):
     # Get step1 feature names
     tmp = step1_features[step1_features["model"] == model_name].copy()
 
-    if "rank" in tmp.columns:
-        tmp = tmp.sort_values(["rank", "feature"])
-    else:
-        tmp = tmp.sort_values(["feature"])
+    tmp = tmp.sort_values(["rank", "feature"])
 
     feature_names = []
     seen = set()

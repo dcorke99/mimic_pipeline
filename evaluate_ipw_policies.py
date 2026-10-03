@@ -14,33 +14,14 @@ from build_policy_intervention_panels import read_policy_panel
 REPO_ROOT = Path(__file__).resolve().parent
 NUISANCE_MODEL_TYPE = "xgboost"
 N_BOOTSTRAP = 1000
-REFIT_NUISANCE = False  # True: refit each bootstrap sample; False: reuse saved predictions.
+REFIT_NUISANCE = False  # Single-panel mode; main() runs both fixed and refit modes.
 
 
-# Leave ONE dataset block uncommented, then use Run Python File in VS Code.
-# Real data
+# Initial paths for direct single-panel calls; main() configures all four panels.
 PANEL_PATH = REPO_ROOT / "data/modelling_panel.csv"
 POLICY_PANEL_PATH = REPO_ROOT / "artefacts/policy_interventions/policy_intervention_panel_long.csv"
 NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/nuisance_models" / NUISANCE_MODEL_TYPE
 OUTDIR = REPO_ROOT / "artefacts/policy_eval/ipw"
-
-# Semi-synthetic: measured confounding
-# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
-# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_interventions/policy_intervention_panel_long.csv"
-# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/nuisance_models" / NUISANCE_MODEL_TYPE
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_eval/ipw"
-
-# Semi-synthetic: confounder omitted
-# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
-# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_interventions/policy_intervention_panel_long.csv"
-# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/nuisance_models" / NUISANCE_MODEL_TYPE
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_eval/ipw"
-
-# Semi-synthetic: randomised actions
-# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
-# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_interventions/policy_intervention_panel_long.csv"
-# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/nuisance_models" / NUISANCE_MODEL_TYPE
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_eval/ipw"
 
 NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
 OUTPUT_PATHS = {
@@ -658,7 +639,7 @@ def weight_diagnostic_row(
 ):
     # Build one weight diagnostic row
     # Return positive finite weights
-    weights = pd.to_numeric(adherent_df[WEIGHT_COL], errors="coerce") if WEIGHT_COL in adherent_df.columns else pd.Series(dtype=float)
+    weights = pd.to_numeric(adherent_df[WEIGHT_COL], errors="coerce")
     weights = weights[np.isfinite(weights) & weights.gt(0)]
     n_total = int(len(episode_all))
     n_adherent = int(episode_all["episode_adherent_to_policy"].eq(1).sum())
@@ -726,7 +707,7 @@ def summarise_episode_estimates(
     weight_col=WEIGHT_COL,
 ):
     # Summarise episode-level estimates
-    weights = pd.to_numeric(episode_df[weight_col], errors="coerce") if weight_col in episode_df.columns else pd.Series(dtype=float)
+    weights = pd.to_numeric(episode_df[weight_col], errors="coerce")
     valid_weights = weights[np.isfinite(weights) & weights.gt(0)]
     row = {
         "policy_name": policy_name,
@@ -747,8 +728,6 @@ def summarise_episode_estimates(
 
     # Calculate a weighted mean
     for outcome_name, (episode_col, _) in OUTCOME_SPECS.items():
-        if episode_col not in episode_df.columns:
-            continue
         unweighted = pd.to_numeric(episode_df[episode_col], errors="coerce").mean()
         # Calculate a weighted mean
         weighted = weighted_mean(episode_df[episode_col], weights)
@@ -758,36 +737,34 @@ def summarise_episode_estimates(
         row[f"ipw_weighted_{outcome_name}_risk_pct"] = weighted * 100 if pd.notna(weighted) else np.nan
 
     # Calculate a weighted mean
-    if "observed_catheter_in_intervals" in episode_df.columns:
-        unweighted_rows = pd.to_numeric(
-            episode_df["observed_catheter_in_intervals"],
-            errors="coerce",
-        ).mean()
-        # Calculate a weighted mean
-        weighted_rows = weighted_mean(episode_df["observed_catheter_in_intervals"], weights)
-        row["unweighted_mean_catheter_in_intervals"] = (
-            float(unweighted_rows) if pd.notna(unweighted_rows) else np.nan
-        )
-        row["ipw_weighted_mean_catheter_in_intervals"] = weighted_rows
-        row["unweighted_mean_catheter_in_interval_rows"] = row[
-            "unweighted_mean_catheter_in_intervals"
-        ]
-        row["ipw_weighted_mean_catheter_in_interval_rows"] = row[
-            "ipw_weighted_mean_catheter_in_intervals"
-        ]
+    unweighted_rows = pd.to_numeric(
+        episode_df["observed_catheter_in_intervals"],
+        errors="coerce",
+    ).mean()
+    # Calculate a weighted mean
+    weighted_rows = weighted_mean(episode_df["observed_catheter_in_intervals"], weights)
+    row["unweighted_mean_catheter_in_intervals"] = (
+        float(unweighted_rows) if pd.notna(unweighted_rows) else np.nan
+    )
+    row["ipw_weighted_mean_catheter_in_intervals"] = weighted_rows
+    row["unweighted_mean_catheter_in_interval_rows"] = row[
+        "unweighted_mean_catheter_in_intervals"
+    ]
+    row["ipw_weighted_mean_catheter_in_interval_rows"] = row[
+        "ipw_weighted_mean_catheter_in_intervals"
+    ]
 
     # Calculate a weighted mean
-    if "observed_catheter_exposure_days" in episode_df.columns:
-        unweighted_exposure = pd.to_numeric(
-            episode_df["observed_catheter_exposure_days"],
-            errors="coerce",
-        ).mean()
-        # Calculate a weighted mean
-        weighted_exposure = weighted_mean(episode_df["observed_catheter_exposure_days"], weights)
-        row["unweighted_mean_catheter_exposure_days"] = (
-            float(unweighted_exposure) if pd.notna(unweighted_exposure) else np.nan
-        )
-        row["ipw_weighted_mean_catheter_exposure_days"] = weighted_exposure
+    unweighted_exposure = pd.to_numeric(
+        episode_df["observed_catheter_exposure_days"],
+        errors="coerce",
+    ).mean()
+    # Calculate a weighted mean
+    weighted_exposure = weighted_mean(episode_df["observed_catheter_exposure_days"], weights)
+    row["unweighted_mean_catheter_exposure_days"] = (
+        float(unweighted_exposure) if pd.notna(unweighted_exposure) else np.nan
+    )
+    row["ipw_weighted_mean_catheter_exposure_days"] = weighted_exposure
 
     return row
 
@@ -877,29 +854,25 @@ def clipping_estimate_row(
     }
     # Calculate a weighted mean
     for outcome_name, (episode_col, _) in OUTCOME_SPECS.items():
-        if episode_col not in episode_df.columns:
-            continue
         # Calculate a weighted mean
         weighted = weighted_mean(episode_df[episode_col], weights)
         row[f"ipw_weighted_{outcome_name}_risk"] = weighted
         row[f"ipw_weighted_{outcome_name}_risk_pct"] = weighted * 100 if pd.notna(weighted) else np.nan
     # Calculate a weighted mean
-    if "observed_catheter_in_intervals" in episode_df.columns:
-        # Calculate a weighted mean
-        row["ipw_weighted_mean_catheter_in_intervals"] = weighted_mean(
-            episode_df["observed_catheter_in_intervals"],
-            weights,
-        )
-        row["ipw_weighted_mean_catheter_in_interval_rows"] = row[
-            "ipw_weighted_mean_catheter_in_intervals"
-        ]
     # Calculate a weighted mean
-    if "observed_catheter_exposure_days" in episode_df.columns:
-        # Calculate a weighted mean
-        row["ipw_weighted_mean_catheter_exposure_days"] = weighted_mean(
-            episode_df["observed_catheter_exposure_days"],
-            weights,
-        )
+    row["ipw_weighted_mean_catheter_in_intervals"] = weighted_mean(
+        episode_df["observed_catheter_in_intervals"],
+        weights,
+    )
+    row["ipw_weighted_mean_catheter_in_interval_rows"] = row[
+        "ipw_weighted_mean_catheter_in_intervals"
+    ]
+    # Calculate a weighted mean
+    # Calculate a weighted mean
+    row["ipw_weighted_mean_catheter_exposure_days"] = weighted_mean(
+        episode_df["observed_catheter_exposure_days"],
+        weights,
+    )
     return row
 
 
@@ -1007,7 +980,7 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
     return episodes, joined_df, episode_all, current
 
 
-def main():
+def run_panel_estimation():
     OUTDIR.mkdir(exist_ok=True, parents=True)
     policy_df = load_policy_panel(POLICY_PANEL_PATH)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
@@ -1066,6 +1039,34 @@ def main():
         "ipw", output_episode_df, policy_df, evaluate_policy_episodes, OUTDIR,
         N_BOOTSTRAP, refit_panel=refit_panel,
     )
+
+
+def main():
+    global PANEL_PATH, POLICY_PANEL_PATH, NUISANCE_MODEL_DIR, NUISANCE_PREDICTIONS_PATH
+    global OUTDIR, OUTPUT_PATHS, REFIT_NUISANCE
+
+    output_filenames = {key: path.name for key, path in OUTPUT_PATHS.items()}
+    for panel_name, panel_path, nuisance_root in nuisance.PANEL_RUNS:
+        artefact_root = nuisance_root.parent
+        output_root = artefact_root / "policy_eval/ipw"
+        PANEL_PATH = panel_path
+        POLICY_PANEL_PATH = artefact_root / "policy_interventions/policy_intervention_panel_long.csv"
+        NUISANCE_MODEL_DIR = nuisance_root / NUISANCE_MODEL_TYPE
+        NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
+        nuisance.configure_panel_run(panel_path, nuisance_root)
+        nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
+        for refit in (
+            False,  # Fixed bootstrap.
+            # True,   # Refit bootstrap: comment out this line to disable.
+        ):
+            REFIT_NUISANCE = refit
+            OUTDIR = output_root / "refit_nuisance" if refit else output_root
+            OUTPUT_PATHS = {
+                key: OUTDIR / filename for key, filename in output_filenames.items()
+            }
+            mode = "refit" if refit else "fixed"
+            print(f"[PANEL] {panel_name}; estimator=ipw; nuisance={mode}", flush=True)
+            run_panel_estimation()
 
 
 if __name__ == "__main__":

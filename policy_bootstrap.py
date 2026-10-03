@@ -43,17 +43,22 @@ def refit_nuisance_predictions(panel, subjects, counts, estimator):
     ]
     # Each task shares the production training risk set and fold preprocessing.
     tasks = []
+    initial_columns = {}
     if estimator != "gformula":
         tasks.append(("in", "removal", nuisance.ACTION_COL, features))
-        scored[["p_remove_obs", "p_keep_obs"]] = np.nan
+        initial_columns.update({"p_remove_obs": np.nan, "p_keep_obs": np.nan})
     if estimator != "ipw":
         tasks.extend(("in", outcome, target, [*features, nuisance.ACTION_COL])
                      for outcome, target in nuisance.IN_OUTCOMES.items())
         tasks.extend(("out", outcome, target, features)
                      for outcome, target in nuisance.OUT_OUTCOMES.items())
-        scored[pec.PREDICTION_COLUMNS] = np.nan
-        for column in pec.PREDICTION_COLUMNS:
-            scored[f"__rescored_{column}"] = False
+        initial_columns.update({column: np.nan for column in pec.PREDICTION_COLUMNS})
+        initial_columns.update({f"__rescored_{column}": False
+                                for column in pec.PREDICTION_COLUMNS})
+    scored = pd.concat([
+        scored.drop(columns=initial_columns, errors="ignore"),
+        pd.DataFrame(initial_columns, index=scored.index),
+    ], axis=1)
 
     fallback_folds = 0
     for state, outcome, target, feature_columns in tasks:

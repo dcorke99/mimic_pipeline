@@ -223,10 +223,7 @@ def check_aipw_ess_leq_adherent(
         ("aipw_summary", aipw_summary),
         ("aipw_weight_diagnostics", aipw_weight_diagnostics),
     ]:
-        if "residual_correction_effective_sample_size" in df.columns:
-            ess_col = "residual_correction_effective_sample_size"
-        else:
-            ess_col = "effective_sample_size"
+        ess_col = "residual_correction_effective_sample_size"
         target = df.loc[~df["policy_name"].eq(CURRENT_PRACTICE_LABEL)].copy()
         bad = pd.to_numeric(target[ess_col], errors="coerce").gt(
             pd.to_numeric(target["n_adherent_episodes"], errors="coerce") + tolerance
@@ -347,13 +344,11 @@ def check_no_missing_predictions(
 ):
     # Check no missing predictions
     checks = []
-    if "n_incomplete_prediction_episodes" in g_summary.columns:
-        checks.append(("gformula_summary_incomplete", int(pd.to_numeric(g_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
+    checks.append(("gformula_summary_incomplete", int(pd.to_numeric(g_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
     g_missing_cols = [col for col in g_diagnostics.columns if col.startswith("n_missing_")]
     for col in g_missing_cols:
         checks.append((f"gformula_diagnostics_{col}", int(pd.to_numeric(g_diagnostics[col], errors="coerce").fillna(0).sum())))
-    if "n_incomplete_prediction_episodes" in aipw_summary.columns:
-        checks.append(("aipw_summary_incomplete", int(pd.to_numeric(aipw_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
+    checks.append(("aipw_summary_incomplete", int(pd.to_numeric(aipw_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
     failures = [(name, value) for name, value in checks if value != 0]
     passed = bool(checks) and not failures
     detail = "all prediction-missing counters are zero"
@@ -373,10 +368,9 @@ def check_no_probabilities_outside_unit_interval(
     # Check no probabilities outside unit interval
     failures = []
     for col in ["n_predictions_below_0", "n_predictions_above_1"]:
-        if col in g_diagnostics.columns:
-            count = int(pd.to_numeric(g_diagnostics[col], errors="coerce").fillna(0).sum())
-            if count:
-                failures.append(f"gformula_diagnostics {col}={count}")
+        count = int(pd.to_numeric(g_diagnostics[col], errors="coerce").fillna(0).sum())
+        if count:
+            failures.append(f"gformula_diagnostics {col}={count}")
 
     out_of_bounds_cols = [col for col in aipw_summary.columns if col.endswith("_out_of_bounds") or "_out_of_bounds_" in col]
     # Convert a series to booleans

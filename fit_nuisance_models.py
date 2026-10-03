@@ -33,26 +33,22 @@ MODEL_TYPES = (
     "lightgbm",
     "mlp",
 )
-MODEL_TYPE = "xgboost"  # Set to "all" to fit every learner in MODEL_TYPES.
+MODEL_TYPE = "all"  # Set to "all" to fit every learner in MODEL_TYPES.
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Leave ONE dataset block uncommented, matching the evaluators.
-# Real data
-INFILE = REPO_ROOT / "data/modelling_panel.csv"
-NUISANCE_ROOT = REPO_ROOT / "artefacts/nuisance_models"
-
-# Semi-synthetic: measured confounding
-# INFILE = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
-# NUISANCE_ROOT = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/nuisance_models"
-
-# Semi-synthetic: confounder omitted
-# INFILE = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
-# NUISANCE_ROOT = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/nuisance_models"
-
-# Semi-synthetic: randomised actions
-# INFILE = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
-# NUISANCE_ROOT = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/nuisance_models"
+# Fit the selected learner(s) separately for all four panels.
+VALIDATION_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding"
+PANEL_RUNS = (
+    ("real", REPO_ROOT / "data/modelling_panel.csv", REPO_ROOT / "artefacts/nuisance_models"),
+    ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
+     VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),
+    ("confounder_omitted", VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
+     VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),
+    ("randomised_action", VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
+     VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"),
+)
+_, INFILE, NUISANCE_ROOT = PANEL_RUNS[0]
 
 MODEL_OUTPUT_NAME = MODEL_TYPE
 OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
@@ -230,6 +226,14 @@ def save_nuisance_report(df, path):
     pec.save_report_df(out, path, decimals=5)
 
 
+def configure_panel_run(input_path, nuisance_root):
+    global INFILE, NUISANCE_ROOT, MODEL_COMPARISON_FILE
+    INFILE = input_path
+    NUISANCE_ROOT = nuisance_root
+    MODEL_COMPARISON_FILE = NUISANCE_ROOT / "nuisance_model_comparison.csv"
+    configure_model_run(MODEL_TYPE)
+
+
 def configure_model_run(model_type):
     # Set the active learner and its model-specific output paths
     global MODEL_TYPE, MODEL_OUTPUT_NAME, OUTDIR
@@ -375,11 +379,7 @@ def split_constant_features(features):
         if non_missing.empty:
             reason = "all_missing"
         elif non_missing.nunique(dropna=True) == 1:
-            value = non_missing.iloc[0]
-            try:
-                numeric_value = float(value)
-            except (TypeError, ValueError):
-                numeric_value = np.nan
+            numeric_value = float(non_missing.iloc[0])
             if numeric_value == 0:
                 reason = "constant_zero"
             elif numeric_value == 1:
@@ -566,7 +566,7 @@ def add_feature_descriptions(feature_df, covariate_dict):
     # Add feature descriptions
     itemid_to_label = {}
     for row in covariate_dict.itertuples(index=False):
-        if hasattr(row, "itemid") and pd.notna(row.itemid):
+        if pd.notna(row.itemid):
             itemid_to_label[int(row.itemid)] = str(row.label)
 
     pattern = re.compile(r"^itemid_(\d+)__(.+?)(?:__missing)?$")
@@ -740,11 +740,7 @@ def assert_valid_predictions(df, row_mask, columns, context):
 
 def validate_exported_probabilities(df):
     # Validate exported probabilities
-    numeric_scores = df[ALL_SCORE_COLS].apply(pd.to_numeric, errors="coerce")
-    invalid_coercions = df[ALL_SCORE_COLS].notna() & numeric_scores.isna()
-    if invalid_coercions.any().any():
-        invalid = invalid_coercions.columns[invalid_coercions.any()].tolist()
-        raise ValueError(f"Non-numeric exported probabilities found: {invalid}")
+    numeric_scores = df[ALL_SCORE_COLS].apply(pd.to_numeric, errors="raise")
 
     present_values = numeric_scores.to_numpy(dtype=float)
     present_values = present_values[~np.isnan(present_values)]
@@ -1960,14 +1956,14 @@ def run_nuisance_model(model_type):
 
 
 def main():
-    print(f"[PANEL] {INFILE}", flush=True)
-
     model_types = MODEL_TYPES if MODEL_TYPE == "all" else (MODEL_TYPE,)
-    for model_type in model_types:
-        run_nuisance_model(model_type)
-
-    # Consolidate completed nuisance-model runs
-    build_nuisance_model_comparison()
+    for panel_name, input_path, nuisance_root in PANEL_RUNS:
+        configure_panel_run(input_path, nuisance_root)
+        print(f"[PANEL] {panel_name}: {INFILE}", flush=True)
+        for model_type in model_types:
+            run_nuisance_model(model_type)
+        # Keep comparisons within this panel's output directory.
+        build_nuisance_model_comparison()
 
 
 if __name__ == "__main__":

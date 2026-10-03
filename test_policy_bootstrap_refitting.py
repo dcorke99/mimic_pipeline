@@ -77,9 +77,25 @@ class RefitBootstrapTests(unittest.TestCase):
         )
         self.counts = np.ones(len(self.subjects), dtype=int)
         self.counts[:4] = [3, 0, 0, 1]
-        learner = patch.object(nuisance, "MODEL_TYPE", "logistic_regression")
+        # Refitting reconfigures global model paths; isolate those across tests.
+        names = ("MODEL_TYPE", "MODEL_OUTPUT_NAME", "INFILE", "NUISANCE_ROOT", "OUTDIR",
+                 "NUISANCE_PREDICTIONS_FILE", "PERFORMANCE_METRICS_FILE",
+                 "CROSSFIT_ROW_ASSIGNMENTS_FILE", "CONSTANT_FEATURES_FILE", "MODEL_COMPARISON_FILE")
+        settings = {name: getattr(nuisance, name) for name in names}
+        settings["MODEL_TYPE"] = "logistic_regression"
+        learner = patch.multiple(nuisance, **settings)
         learner.start()
         self.addCleanup(learner.stop)
+        for module in ESTIMATORS.values():
+            path_names = ("PANEL_PATH", "POLICY_PANEL_PATH", "NUISANCE_MODEL_DIR",
+                          "NUISANCE_PREDICTIONS_PATH", "OUTDIR", "OUTPUT_PATHS", "REFIT_NUISANCE")
+            paths = patch.multiple(module, **{name: getattr(module, name) for name in path_names})
+            paths.start()
+            self.addCleanup(paths.stop)
+        policy_names = ("INPUT_PATH", "OUTDIR", "LONG_OUTPUT_PATH", "QA_OUTPUT_PATH")
+        policy_paths = patch.multiple(policies, **{name: getattr(policies, name) for name in policy_names})
+        policy_paths.start()
+        self.addCleanup(policy_paths.stop)
 
     def test_each_needed_model_refits_without_patient_leakage(self):
         sample = nuisance.prepare_outcome_targets(self.panel.copy())
@@ -211,7 +227,62 @@ class RefitBootstrapTests(unittest.TestCase):
                     after = module.evaluate_policy_episodes(restored, scores)[0]
                     pd.testing.assert_frame_equal(after, before, check_dtype=False)
 
-    def test_evaluator_entry_points_support_both_modes_and_validation(self):
+    def test_all_panel_entry_points_generate_both_modes_without_overwrites(self):
+        full_scores, _ = bootstrap.refit_nuisance_predictions(
+            self.panel, self.subjects, np.ones(len(self.subjects), dtype=int), "aipw",
+        )
+        full_scores = full_scores.drop(columns=[c for c in full_scores if c.startswith("__rescored_")])
+        with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
+            root = Path(temporary)
+            panels = tuple((name, root / f"{name}.csv", root / name / "nuisance_models")
+                           for name, _, _ in nuisance.PANEL_RUNS)
+            for _, panel_path, nuisance_root in panels:
+                self.panel.to_csv(panel_path, index=False)
+                predictions = nuisance_root / "logistic_regression/nuisance_predictions.csv"
+                predictions.parent.mkdir(parents=True)
+                full_scores.to_csv(predictions, index=False)
+            with patch.object(nuisance, "PANEL_RUNS", panels), \
+                 patch.object(policies, "POLICY_DAYS", [1, 2]):
+                policies.main()
+                for name, module in ESTIMATORS.items():
+                    with self.subTest(estimator=name), \
+                         patch.object(module, "NUISANCE_MODEL_TYPE", "logistic_regression"), \
+                         patch.object(module, "N_BOOTSTRAP", 1), \
+                         patch.object(module, "run_panel_estimation", wraps=module.run_panel_estimation) as run:
+                        module.main()
+                        self.assertEqual(run.call_count, 8)
+                    self.assertEqual(module.PANEL_PATH, panels[-1][1])
+                    self.assertEqual(module.OUTDIR, panels[-1][2].parent / "policy_eval" / name / "refit_nuisance")
+                    self.assertTrue(module.REFIT_NUISANCE)
+                    for _, _, nuisance_root in panels:
+                        output = nuisance_root.parent / "policy_eval" / name
+                        for refit in (False, True):
+                            mode = "refit" if refit else "fixed"
+                            mode_output = output / "refit_nuisance" if refit else output
+                            for path in module.OUTPUT_PATHS.values():
+                                self.assertTrue((mode_output / path.name).is_file())
+                            intervals = mode_output / "confidence_intervals" / mode
+                            draws = pd.read_csv(intervals / f"{name}_bootstrap_replicate_estimates.csv")
+                            self.assertEqual(draws.bootstrap_replicate.tolist(), [1])
+                            values = pd.read_csv(intervals / f"{name}_policy_value_confidence_intervals.csv")
+                            self.assertEqual(len(values), 15)
+                            summary = pd.read_csv(mode_output / module.OUTPUT_PATHS["summary"].name)
+                            pd.testing.assert_series_equal(
+                                summary.policy_name.sort_values().reset_index(drop=True),
+                                pd.Series(["current_practice", "remove_on_day_1", "remove_on_day_2"], name="policy_name"),
+                            )
+
+    def test_batch_missing_input_raises_when_read(self):
+        with TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "absent.csv"
+            with patch.object(nuisance, "PANEL_RUNS", (("missing", missing, missing.parent / "nuisance_models"),)):
+                for module in ESTIMATORS.values():
+                    with patch.object(module, "run_panel_estimation", wraps=module.run_panel_estimation) as run:
+                        with self.assertRaisesRegex(FileNotFoundError, "policy_intervention_panel_long.csv"):
+                            module.main()
+                        run.assert_called_once()
+
+    def test_single_panel_entry_points_support_both_modes_and_validation(self):
         expected = {"bootstrap_replicate_estimates.csv", "policy_value_confidence_intervals.csv",
                     "policy_difference_confidence_intervals.csv"}
         full_scores, _ = bootstrap.refit_nuisance_predictions(
@@ -236,7 +307,7 @@ class RefitBootstrapTests(unittest.TestCase):
                                     LONG_OUTPUT_PATH=policy_path,
                                     QA_OUTPUT_PATH=policy_path.parent / "policy_intervention_panel_qa.csv",
                                     POLICY_DAYS=[1, 2]):
-                    policies.main()
+                    policies.run_panel()
                 self.assertEqual(pd.read_csv(policy_path, nrows=0).columns.tolist(), policies.POLICY_OUTPUT_COLS)
                 prediction_path = artefact_root / "nuisance_models" / "logistic_regression" / "nuisance_predictions.csv"
                 prediction_path.parent.mkdir(parents=True, exist_ok=True)
@@ -258,11 +329,11 @@ class RefitBootstrapTests(unittest.TestCase):
                     with self.subTest(panel=panel_name, estimator=name), patch.multiple(module, **settings):
                         full_scores.to_csv(prediction_path, index=False)
                         with patch.object(nuisance, "fit_crossfit_fold_model", side_effect=AssertionError("fixed mode must not refit")):
-                            module.main()
+                            module.run_panel_estimation()
                         prediction_path.unlink()
                         # Refit mode must work without any saved predictions/models.
                         with patch.object(module, "REFIT_NUISANCE", True):
-                            module.main()
+                            module.run_panel_estimation()
                         for mode in ("fixed", "refit"):
                             outdir = module.OUTDIR / "confidence_intervals" / mode
                             self.assertEqual({p.name for p in outdir.iterdir()}, {f"{name}_{filename}" for filename in expected})

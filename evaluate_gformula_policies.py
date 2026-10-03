@@ -23,33 +23,14 @@ from policy_eval_common import (
 REPO_ROOT = Path(__file__).resolve().parent
 NUISANCE_MODEL_TYPE = "xgboost"
 N_BOOTSTRAP = 1000
-REFIT_NUISANCE = False  # True: refit each bootstrap sample; False: reuse saved predictions.
+REFIT_NUISANCE = False  # Single-panel mode; main() runs both fixed and refit modes.
 
 
-# Leave ONE dataset block uncommented, then use Run Python File in VS Code.
-# Real data
+# Initial paths for direct single-panel calls; main() configures all four panels.
 PANEL_PATH = REPO_ROOT / "data/modelling_panel.csv"
 POLICY_PANEL_PATH = REPO_ROOT / "artefacts/policy_interventions/policy_intervention_panel_long.csv"
 NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/nuisance_models" / NUISANCE_MODEL_TYPE
 OUTDIR = REPO_ROOT / "artefacts/policy_eval/gformula"
-
-# Semi-synthetic: measured confounding
-# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
-# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_interventions/policy_intervention_panel_long.csv"
-# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/nuisance_models" / NUISANCE_MODEL_TYPE
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_eval/gformula"
-
-# Semi-synthetic: confounder omitted
-# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
-# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_interventions/policy_intervention_panel_long.csv"
-# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/nuisance_models" / NUISANCE_MODEL_TYPE
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_eval/gformula"
-
-# Semi-synthetic: randomised actions
-# PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
-# POLICY_PANEL_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_interventions/policy_intervention_panel_long.csv"
-# NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/nuisance_models" / NUISANCE_MODEL_TYPE
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_eval/gformula"
 
 NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
 OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
@@ -680,7 +661,7 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
     return combined_episode_df, row_df, current_rows, current_episode_df
 
 
-def main():
+def run_panel_estimation():
     OUTDIR.mkdir(exist_ok=True, parents=True)
     policy_df = load_policy_panel(POLICY_PANEL_PATH)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
@@ -724,6 +705,36 @@ def main():
         "gformula", combined_episode_df, policy_df, evaluate_policy_episodes, OUTDIR,
         N_BOOTSTRAP, refit_panel=refit_panel,
     )
+
+
+def main():
+    global PANEL_PATH, POLICY_PANEL_PATH, NUISANCE_MODEL_DIR, NUISANCE_PREDICTIONS_PATH
+    global OUTDIR, OUTPUT_PATHS, REFIT_NUISANCE
+    global OUTCOME_MODELS_PATH
+
+    output_filenames = {key: path.name for key, path in OUTPUT_PATHS.items()}
+    for panel_name, panel_path, nuisance_root in nuisance.PANEL_RUNS:
+        artefact_root = nuisance_root.parent
+        output_root = artefact_root / "policy_eval/gformula"
+        PANEL_PATH = panel_path
+        POLICY_PANEL_PATH = artefact_root / "policy_interventions/policy_intervention_panel_long.csv"
+        NUISANCE_MODEL_DIR = nuisance_root / NUISANCE_MODEL_TYPE
+        NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
+        OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
+        nuisance.configure_panel_run(panel_path, nuisance_root)
+        nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
+        for refit in (
+            False,  # Fixed bootstrap.
+            # True,   # Refit bootstrap: comment out this line to disable.
+        ):
+            REFIT_NUISANCE = refit
+            OUTDIR = output_root / "refit_nuisance" if refit else output_root
+            OUTPUT_PATHS = {
+                key: OUTDIR / filename for key, filename in output_filenames.items()
+            }
+            mode = "refit" if refit else "fixed"
+            print(f"[PANEL] {panel_name}; estimator=gformula; nuisance={mode}", flush=True)
+            run_panel_estimation()
 
 
 if __name__ == "__main__":

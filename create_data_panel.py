@@ -1,5 +1,6 @@
 # Standard-library utilities
 import re
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -12,7 +13,11 @@ import pandas as pd
 
 # Define pipeline directories
 REPO_ROOT = Path(__file__).resolve().parent
-MIMIC_DIR = Path(r"C:\Users\DavidUni\OneDrive - University of Reading\repos\Data\MIMIC-IV\mimic-iv-3.1")
+# Raw data lives outside the repository by default. Override with MIMIC_DIR
+# when it is stored elsewhere; relative overrides are based on REPO_ROOT.
+MIMIC_DIR = Path(os.environ.get("MIMIC_DIR") or REPO_ROOT.parent / "Data" / "MIMIC-IV" / "mimic-iv-3.1").expanduser()
+if not MIMIC_DIR.is_absolute():
+    MIMIC_DIR = REPO_ROOT / MIMIC_DIR
 DATA_DIR = REPO_ROOT / "data"
 CONFIG_DIR = REPO_ROOT / "config"
 

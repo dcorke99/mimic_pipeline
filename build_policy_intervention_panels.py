@@ -14,22 +14,9 @@ import policy_eval_common as pec
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Leave ONE dataset block uncommented, matching the evaluators.
-# Real data
+# Initial paths for direct single-panel calls; main() builds all four panels.
 INPUT_PATH = REPO_ROOT / "data/modelling_panel.csv"
 OUTDIR = REPO_ROOT / "artefacts/policy_interventions"
-
-# Semi-synthetic: measured confounding
-# INPUT_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel.csv"
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/semi_synthetic_with_confounding/policy_interventions"
-
-# Semi-synthetic: confounder omitted
-# INPUT_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_confounder_omitted.csv"
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/confounder_omitted/policy_interventions"
-
-# Semi-synthetic: randomised actions
-# INPUT_PATH = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/semi_synthetic_panel_randomised_action.csv"
-# OUTDIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding/pipeline_runs/randomised_action/policy_interventions"
 
 POLICY_DAYS = [1, 2, 3, 4, 5]
 LONG_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_long.csv"
@@ -296,7 +283,7 @@ def print_console_summary(
     print(f"Saved policy QA report: {qa_output_path}")
 
 
-def main():
+def run_panel():
     # Create the output directory
     OUTDIR.mkdir(exist_ok=True, parents=True)
 
@@ -329,6 +316,20 @@ def main():
         LONG_OUTPUT_PATH,
         QA_OUTPUT_PATH,
     )
+
+
+def main():
+    # Match the four panels and output roots used by nuisance fitting.
+    from fit_nuisance_models import PANEL_RUNS
+
+    global INPUT_PATH, OUTDIR, LONG_OUTPUT_PATH, QA_OUTPUT_PATH
+    for panel_name, input_path, nuisance_root in PANEL_RUNS:
+        INPUT_PATH = input_path
+        OUTDIR = nuisance_root.parent / "policy_interventions"
+        LONG_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_long.csv"
+        QA_OUTPUT_PATH = OUTDIR / "policy_intervention_panel_qa.csv"
+        print(f"[PANEL] {panel_name}: {INPUT_PATH}", flush=True)
+        run_panel()
 
 
 if __name__ == "__main__":

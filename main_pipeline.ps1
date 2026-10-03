@@ -1,9 +1,11 @@
-# .\.venv\Scripts\python.exe .\create_data_panel.py
-# .\.venv\Scripts\python.exe .\fit_nuisance_models.py
-# .\.venv\Scripts\python.exe .\build_policy_intervention_panels.py
-# Enable the real-data path block in each script for this pipeline.
-.\.venv\Scripts\python.exe .\evaluate_gformula_policies.py
-.\.venv\Scripts\python.exe .\evaluate_ipw_policies.py
-.\.venv\Scripts\python.exe .\evaluate_aipw_policies.py
-.\.venv\Scripts\python.exe .\audit_policy_evaluation_baseline.py
-.\.venv\Scripts\python.exe .\prepare_results_plots.py
+$Python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+
+# & $Python (Join-Path $PSScriptRoot 'create_data_panel.py')
+# & $Python (Join-Path $PSScriptRoot 'create_semi_synthetic_panel.py')
+# & $Python (Join-Path $PSScriptRoot 'fit_nuisance_models.py')
+# & $Python (Join-Path $PSScriptRoot 'build_policy_intervention_panels.py')
+& $Python (Join-Path $PSScriptRoot 'evaluate_gformula_policies.py')
+& $Python (Join-Path $PSScriptRoot 'evaluate_ipw_policies.py')
+& $Python (Join-Path $PSScriptRoot 'evaluate_aipw_policies.py')
+& $Python (Join-Path $PSScriptRoot 'audit_policy_evaluation_baseline.py')
+& $Python (Join-Path $PSScriptRoot 'prepare_results_plots.py')
