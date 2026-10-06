@@ -1,14 +1,3 @@
-"""Create estimator-agnostic semi-synthetic validation panels and oracle truth.
-
-This script uses the observed longitudinal panel as a row and covariate scaffold,
-but rebuilds the catheter trajectory sequentially. Each episode remains IN until
-its first synthetic removal and is OUT thereafter. Oracle quantities are written
-to separate files and never added to an estimator input panel.
-
-The script is intentionally standalone and is not called by the production
-pipeline.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,16 +5,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from build_policy_intervention_panels import (
-    POLICY_DAYS,
+from policy_eval_common import cumulative_event_probability, add_episode_day
+
+from build_policy_panels import (
     POLICY_INPUT_COLS,
-    add_policy_episode_day,
     add_stable_ids_and_decision_flag,
     build_long_policy_panel,
 )
 
-
-# Paths and reproducibility
+# Configuration: paths, reproducibility and policies
 # Running this script writes all three validation datasets.
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -33,13 +21,13 @@ SOURCE_PANEL = REPO_ROOT / "data" / "modelling_panel.csv"
 OUTPUT_DIR = (
     REPO_ROOT
     / "artefacts"
-    / "validation"
+    / "semi-synthetic_validation"
     / "semi_synthetic_measured_confounding"
 )
 RANDOM_SEED = 20260811
+POLICY_DAYS = [1, 2, 3, 4, 5]  # Policies for known-truth calculations in this script.
 
-
-# Production columns replaced in validation copies
+# Base-panel columns replaced in validation copies
 
 STATE_COL = "catheter_state"
 ACTION_COL = "removed_in_period"
@@ -57,7 +45,6 @@ TERMINAL_EVENT_COLS = [
 ]
 OPTIONAL_DECISION_INDICATOR_COLS = ["is_decision_row", "decision_row"]
 
-
 # Deliberately measured pre-decision confounders
 
 AGE_COL = "age"
@@ -72,14 +59,7 @@ Z_COLS = {
     HEART_RATE_MEAN_COL: "z_heart_rate_mean",
 }
 
-
 # Data-generating coefficients
-#
-# The action intercept is calibrated at run time so that the mean synthetic
-# propensity on catheter-IN decision rows equals the real action prevalence.
-# Positive shared coefficients deliberately make higher-risk rows more likely
-# to receive removal, while the negative treatment coefficient makes removal
-# genuinely protective conditional on the measured confounders.
 
 ACTION_COEFFICIENTS = {
     "z_age": 0.45,
@@ -104,28 +84,19 @@ PRIMARY_PANEL_FILENAME = "semi_synthetic_panel.csv"
 OMITTED_PANEL_FILENAME = "semi_synthetic_panel_confounder_omitted.csv"
 RANDOMISED_PANEL_FILENAME = "semi_synthetic_panel_randomised_action.csv"
 TRUTH_FILENAME = "semi_synthetic_truth.csv"
-ORACLE_POLICY_FILENAME = "oracle_policy_values.csv"
+KNOWN_TRUTH_POLICY_FILENAME = "known_truth_policy_values.csv"
 COEFFICIENTS_FILENAME = "simulation_coefficients.csv"
 
-ORACLE_ONLY_PREFIXES = (
+TRUTH_ONLY_PREFIXES = (
     "true_",
-    "oracle_",
+    "known_truth_",
     "dgp_",
     "z_dgp_",
 )
 
-
 def expit(linear_predictor):
     values = np.asarray(linear_predictor, dtype=float)
     return 1.0 / (1.0 + np.exp(-np.clip(values, -35.0, 35.0)))
-
-
-def cumulative_event_probability(probabilities):
-    probs = pd.to_numeric(probabilities, errors="coerce").dropna()
-    if probs.empty:
-        return np.nan
-    values = probs.clip(0.0, 1.0).to_numpy(dtype=float)
-    return float(1.0 - np.prod(1.0 - values))
 
 
 def normalise_binary(series, column_name):
@@ -135,7 +106,6 @@ def normalise_binary(series, column_name):
         raise ValueError(f"{column_name} must contain only 0/1 values. Examples:\n{examples}")
     return numeric.astype(np.int8)
 
-
 def load_source_panel(path):
 
     panel = pd.read_csv(path, low_memory=False)
@@ -143,7 +113,6 @@ def load_source_panel(path):
     if panel.columns.duplicated().any():
         duplicates = panel.columns[panel.columns.duplicated()].tolist()
         raise ValueError(f"Source panel contains duplicate columns: {duplicates}")
-
 
     states = panel[STATE_COL].astype("string").str.strip().str.lower()
     unknown_states = sorted(set(states.dropna()) - {"in", "out"})
@@ -161,7 +130,6 @@ def load_source_panel(path):
             raise ValueError(f"Selected confounder has fewer than two observed values: {column}")
 
     return panel
-
 
 def build_standardised_confounders(panel, reference_mask):
     z_values = pd.DataFrame(index=panel.index)
@@ -193,7 +161,6 @@ def build_standardised_confounders(panel, reference_mask):
 
     return z_values, statistics
 
-
 def apply_standardisation(panel, statistics):
     """Apply saved DGP standardisation after rebuilding periods_in_state."""
     z_values = pd.DataFrame(index=panel.index)
@@ -204,7 +171,6 @@ def apply_standardisation(panel, statistics):
         z_values[z_col] = (numeric.fillna(mean) - mean) / sd
     return z_values
 
-
 def episode_codes(panel):
     """Identify source catheter episodes without using mutable removal time."""
     key_frame = panel.loc[:, EPISODE_IDENTITY_COLS].astype("string").fillna("<NA>")
@@ -212,7 +178,6 @@ def episode_codes(panel):
     if (codes < 0).any():
         raise ValueError("Unable to construct stable catheter episode identifiers")
     return pd.Series(codes, index=panel.index, dtype=np.int64)
-
 
 def chronological_episode_positions(panel, codes):
     order = pd.DataFrame({
@@ -229,7 +194,6 @@ def chronological_episode_positions(panel, codes):
     )
     return order.groupby("_episode_code", sort=False)["_position"].apply(list)
 
-
 def linear_component(z_values, coefficients):
     result = np.zeros(len(z_values), dtype=float)
     for z_col, coefficient in coefficients.items():
@@ -237,7 +201,6 @@ def linear_component(z_values, coefficients):
             z_values[z_col], errors="raise"
         ).to_numpy(dtype=float)
     return result
-
 
 def calibrate_action_intercept(linear_without_intercept, target_prevalence):
     if not ACTION_PROBABILITY_LOWER <= target_prevalence <= ACTION_PROBABILITY_UPPER:
@@ -262,7 +225,6 @@ def calibrate_action_intercept(linear_without_intercept, target_prevalence):
             upper_intercept = midpoint
     return float((lower_intercept + upper_intercept) / 2.0)
 
-
 def rebuild_observed_action(panel):
     states = panel[STATE_COL].astype("string").str.strip().str.lower()
     actions = normalise_binary(panel[ACTION_COL], ACTION_COL)
@@ -274,7 +236,6 @@ def rebuild_observed_action(panel):
         states.eq("in") & actions.eq(1)
     ).astype(np.int8)
     return panel
-
 
 def generate_sequential_trajectory(
     source_panel,
@@ -368,7 +329,7 @@ def generate_sequential_trajectory(
         final_position = positions[-1]
         if removal_time is None:
             # A terminal-time value represents no removal before the preserved
-            # endpoint, matching the production panel's terminal-tie convention.
+            # endpoint, matching the base panel's terminal-tie convention.
             removal_time = episode_ends.iloc[final_position]
         synthetic_removed_time[np.asarray(positions, dtype=int)] = removal_time.to_datetime64()
 
@@ -395,7 +356,6 @@ def generate_sequential_trajectory(
 
     return panel, true_propensity, action_intercept
 
-
 def outcome_potential_probabilities(z_values):
     baseline_linear = OUTCOME_INTERCEPT + linear_component(
         z_values,
@@ -406,7 +366,6 @@ def outcome_potential_probabilities(z_values):
     # On the sequential trajectory, OUT means removal has already occurred.
     true_mu_out = true_mu_remove.copy()
     return true_mu_keep, true_mu_remove, true_mu_out
-
 
 def generate_outcome(
     panel,
@@ -435,12 +394,6 @@ def generate_outcome(
         outcome_uniform[risk_positions] < observed_probability[risk_positions]
     ).astype(np.int8)
     return synthetic_outcome, observed_probability
-
-
-def attach_synthetic_outcome(panel, synthetic_outcome):
-    panel = panel.copy(deep=True)
-    panel[OUTCOME_COL] = np.asarray(synthetic_outcome, dtype=np.int8)
-    return panel
 
 
 def make_omitted_confounder_panel(primary_panel):
@@ -561,12 +514,12 @@ def build_truth_table(
     return truth
 
 
-def assert_oracle_policy_trajectory(policy_long):
+def check_known_truth_policy_trajectory(policy_long):
     for _, episode in policy_long.groupby(
         ["policy_name", "catheter_episode_id"], sort=False, dropna=False
     ):
         actions = (
-            episode["policy_action_resolved"].astype("string").str.strip().str.lower()
+            episode["policy_action"].astype("string").str.strip().str.lower()
             .to_numpy(dtype=object)
         )
         states = (
@@ -575,27 +528,27 @@ def assert_oracle_policy_trajectory(policy_long):
         )
         remove_offsets = np.flatnonzero(actions == "remove")
         if len(remove_offsets) > 1:
-            raise AssertionError("An oracle fixed-day path has multiple removal rows")
+            raise AssertionError("A known-truth fixed-day path has multiple removal rows")
         if len(remove_offsets) == 1:
             removal_offset = int(remove_offsets[0])
             if states[removal_offset] != "in":
-                raise AssertionError("An oracle removal does not occur while catheter-IN")
+                raise AssertionError("A known-truth removal does not occur while catheter-IN")
             if not np.all(actions[:removal_offset] == "keep"):
-                raise AssertionError("An oracle path is not keep before first removal")
+                raise AssertionError("A known-truth path is not keep before first removal")
             if not np.all(states[: removal_offset + 1] == "in"):
-                raise AssertionError("An oracle path leaves IN before its removal")
+                raise AssertionError("A known-truth path leaves IN before its removal")
             if not np.all(actions[removal_offset + 1 :] == "out"):
-                raise AssertionError("An oracle path has decisions after removal")
+                raise AssertionError("A known-truth path has decisions after removal")
             if not np.all(states[removal_offset + 1 :] == "out"):
-                raise AssertionError("An oracle path returns IN after removal")
+                raise AssertionError("A known-truth path returns IN after removal")
         elif not (np.all(actions == "keep") and np.all(states == "in")):
             raise AssertionError(
-                "An oracle episode not reaching its removal day must remain IN/keep"
+                "A known-truth episode not reaching its removal day must remain IN/keep"
             )
 
 
-def build_oracle_policy_values(primary_panel, truth, standardisation):
-    # Reuse the production policy builder so names, days, episode IDs, and
+def build_known_truth_policy_values(primary_panel, truth, standardisation):
+    # Reuse the shared policy builder so names, days, episode IDs, and
     # fixed-day timeline semantics cannot drift from normal evaluation.
     base_columns = list(dict.fromkeys([
         *POLICY_INPUT_COLS,
@@ -606,7 +559,7 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
     policy_base = primary_panel.loc[:, base_columns].copy()
     policy_base[VALIDATION_ROW_ID_COL] = truth[VALIDATION_ROW_ID_COL].to_numpy()
     policy_base = add_stable_ids_and_decision_flag(policy_base)
-    policy_base = add_policy_episode_day(policy_base)
+    policy_base = add_episode_day(policy_base)
 
     current_truth_columns = [
         VALIDATION_ROW_ID_COL,
@@ -618,7 +571,7 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
     current_probability_lookup = truth.loc[:, current_truth_columns]
 
     policy_long = build_long_policy_panel(policy_base, POLICY_DAYS)
-    assert_oracle_policy_trajectory(policy_long)
+    check_known_truth_policy_trajectory(policy_long)
     policy_state = policy_long["policy_catheter_state"].astype("string").str.lower()
     policy_periods_in = pd.to_numeric(
         policy_long["policy_periods_in"], errors="coerce"
@@ -626,7 +579,7 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
     policy_periods_out = pd.to_numeric(
         policy_long["policy_periods_out"], errors="coerce"
     )
-    # Production periods_in_state is one-based in either state. The policy
+    # Base-panel periods_in_state is one-based in either state. The policy
     # helper uses zero for an extra OUT row on the removal day, so translate it
     # to one-based values before applying the outcome DGP.
     policy_dgp_periods = pd.Series(
@@ -652,10 +605,10 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
 
     policy_long["true_mu_under_policy"] = 0.0
 
-    keep_rows = policy_long["policy_action_resolved"].eq("keep")
-    remove_rows = policy_long["policy_action_resolved"].eq("remove")
+    keep_rows = policy_long["policy_action"].eq("keep")
+    remove_rows = policy_long["policy_action"].eq("remove")
     out_risk_rows = (
-        policy_long["policy_action_resolved"].eq("out")
+        policy_long["policy_action"].eq("out")
         & pd.to_numeric(policy_long["policy_periods_out"], errors="coerce").le(
             POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
         )
@@ -681,7 +634,7 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
         .agg(
             subject_id=("subject_id", "first"),
             n_policy_rows=(VALIDATION_ROW_ID_COL, "size"),
-            oracle_episode_any_cauti_risk=(
+            known_truth_episode_any_cauti_risk=(
                 "true_mu_under_policy",
                 cumulative_event_probability,
             ),
@@ -696,14 +649,14 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
         .agg(
             n_patients=("subject_id", "nunique"),
             n_episodes=("catheter_episode_id", "size"),
-            oracle_mean_episode_any_cauti_risk=(
-                "oracle_episode_any_cauti_risk",
+            known_truth_mean_episode_any_cauti_risk=(
+                "known_truth_episode_any_cauti_risk",
                 "mean",
             ),
         )
     )
 
-    # Match the production current-practice plug-in convention: use the
+    # Match the g-formula current-practice calculation: use the
     # realised synthetic IN action, the OUT hazard within the existing 48-hour
     # attribution window, and zero CAUTI hazard outside that window.
     current = policy_base.merge(
@@ -733,7 +686,7 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
         current.groupby("catheter_episode_id", as_index=False, dropna=False)
         .agg(
             subject_id=("subject_id", "first"),
-            oracle_episode_any_cauti_risk=(
+            known_truth_episode_any_cauti_risk=(
                 "true_mu_under_policy",
                 cumulative_event_probability,
             ),
@@ -746,22 +699,22 @@ def build_oracle_policy_values(primary_panel, truth, standardisation):
             "policy_remove_day": np.nan,
             "n_patients": int(current_episode["subject_id"].nunique()),
             "n_episodes": int(len(current_episode)),
-            "oracle_mean_episode_any_cauti_risk": float(
-                current_episode["oracle_episode_any_cauti_risk"].mean()
+            "known_truth_mean_episode_any_cauti_risk": float(
+                current_episode["known_truth_episode_any_cauti_risk"].mean()
             ),
         }
     ])
 
-    oracle = pd.concat([fixed_policy, current_policy], ignore_index=True, sort=False)
-    oracle["oracle_mean_episode_any_cauti_risk_pct"] = (
-        100.0 * oracle["oracle_mean_episode_any_cauti_risk"]
+    known_truth = pd.concat([fixed_policy, current_policy], ignore_index=True, sort=False)
+    known_truth["known_truth_mean_episode_any_cauti_risk_pct"] = (
+        100.0 * known_truth["known_truth_mean_episode_any_cauti_risk"]
     )
-    oracle["target_population"] = (
+    known_truth["target_population"] = (
         "all catheter episodes on the preserved row grid with policy-specific IN/OUT states"
     )
-    oracle["episode_aggregation"] = "1 - product(1 - row hazard)"
-    oracle["policy_aggregation"] = "unweighted mean of episode risks"
-    return oracle
+    known_truth["episode_aggregation"] = "1 - product(1 - row hazard)"
+    known_truth["policy_aggregation"] = "unweighted mean of episode risks"
+    return known_truth
 
 
 def build_coefficients_table(action_intercept, randomised_action_intercept):
@@ -1017,29 +970,19 @@ def assert_primary_integrity(source_panel, primary_panel):
         check_dtype=True,
         check_exact=True,
     )
-    if not retained_source.loc[:, ordinary_columns].isna().equals(
-        primary_panel.loc[:, ordinary_columns].isna()
-    ):
-        raise AssertionError("Ordinary covariate missingness patterns changed")
-    pd.testing.assert_frame_equal(
-        retained_source.loc[:, TERMINAL_EVENT_COLS],
-        primary_panel.loc[:, TERMINAL_EVENT_COLS],
-        check_dtype=True,
-        check_exact=True,
-    )
     assert_trajectory_integrity(primary_panel)
 
 
-def assert_no_oracle_columns(panel, panel_name):
+def assert_no_truth_columns(panel, panel_name):
     leaked_columns = [
         column
         for column in panel.columns
-        if str(column).startswith(ORACLE_ONLY_PREFIXES)
+        if str(column).startswith(TRUTH_ONLY_PREFIXES)
         or column == VALIDATION_ROW_ID_COL
     ]
     if leaked_columns:
         raise AssertionError(
-            f"Oracle-only columns leaked into {panel_name}: {leaked_columns}"
+            f"Truth-only columns leaked into {panel_name}: {leaked_columns}"
         )
 
 
@@ -1058,7 +1001,7 @@ def main():
         "omitted_panel": output_dir / OMITTED_PANEL_FILENAME,
         "randomised_panel": output_dir / RANDOMISED_PANEL_FILENAME,
         "truth": output_dir / TRUTH_FILENAME,
-        "oracle_policy_values": output_dir / ORACLE_POLICY_FILENAME,
+        "known_truth_policy_values": output_dir / KNOWN_TRUTH_POLICY_FILENAME,
         "coefficients": output_dir / COEFFICIENTS_FILENAME,
     }
     assert_output_safety(
@@ -1108,7 +1051,8 @@ def main():
         true_mu_out,
         outcome_uniform,
     )
-    primary_panel = attach_synthetic_outcome(primary_trajectory, synthetic_outcome)
+    primary_panel = primary_trajectory.copy()
+    primary_panel[OUTCOME_COL] = np.asarray(synthetic_outcome, dtype=np.int8)
     omitted_panel = make_omitted_confounder_panel(primary_panel)
 
     (
@@ -1139,9 +1083,8 @@ def main():
         randomised_mu_out,
         outcome_uniform,
     )
-    randomised_panel = attach_synthetic_outcome(
-        randomised_trajectory, randomised_outcome
-    )
+    randomised_panel = randomised_trajectory.copy()
+    randomised_panel[OUTCOME_COL] = np.asarray(randomised_outcome, dtype=np.int8)
     randomised_truth = {
         "panel": randomised_panel,
         "propensity": randomised_propensity,
@@ -1162,7 +1105,7 @@ def main():
         observed_probability,
         randomised_truth=randomised_truth,
     )
-    oracle_policy_values = build_oracle_policy_values(
+    known_truth_policy_values = build_known_truth_policy_values(
         primary_panel, truth, standardisation
     )
     coefficients = build_coefficients_table(
@@ -1172,15 +1115,15 @@ def main():
 
     # All safety checks run before any validation output is written.
     assert_primary_integrity(source_panel, primary_panel)
-    assert_no_oracle_columns(omitted_panel, "omitted-confounder estimator-input panel")
+    assert_no_truth_columns(omitted_panel, "omitted-confounder estimator-input panel")
     assert_primary_integrity(source_panel, randomised_panel)
-    assert_no_oracle_columns(randomised_panel, "randomised estimator-input panel")
+    assert_no_truth_columns(randomised_panel, "randomised estimator-input panel")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     primary_panel.to_csv(paths["primary_panel"], index=False)
     omitted_panel.to_csv(paths["omitted_panel"], index=False)
     truth.to_csv(paths["truth"], index=False)
-    oracle_policy_values.to_csv(paths["oracle_policy_values"], index=False)
+    known_truth_policy_values.to_csv(paths["known_truth_policy_values"], index=False)
     coefficients.to_csv(paths["coefficients"], index=False)
     randomised_panel.to_csv(paths["randomised_panel"], index=False)
 

@@ -22,7 +22,7 @@ IPW_COLUMNS = dict(zip(OUTCOMES, (
 AIPW_COLUMNS = {outcome: "plugin_" + column for outcome, column in GFORMULA_COLUMNS.items()}
 
 
-def refit_nuisance_predictions(panel, subjects, counts, estimator):
+def refit_nuisance_predictions(panel, subjects, counts, estimator, n_splits=5, model_type=None):
     """Refit on repeated patient rows, then score each sampled source row once.
 
     Original patient IDs keep all copies in the same cross-fit fold. Bootstrap
@@ -34,14 +34,14 @@ def refit_nuisance_predictions(panel, subjects, counts, estimator):
         panel = nuisance.prepare_outcome_targets(panel)
     multiplicity = counts[subjects.get_indexer(panel.subject_id)]
     sample = panel.loc[panel.index.repeat(multiplicity)].reset_index(drop=True)
-    sample = nuisance.add_grouped_crossfit_folds(sample)
+    sample = nuisance.add_grouped_crossfit_folds(sample, n_splits=n_splits)
     scored = sample.drop_duplicates("_source_row").set_index("_source_row").sort_index()
     features = [
         nuisance.TIME_COL, nuisance.PERIODS_COL,
         *[column for column in panel if column.startswith(("itemid_", "sex_", "ethnicity_"))],
         "age",
     ]
-    # Each task shares the production training risk set and fold preprocessing.
+    # Each task shares the full-model training risk set and fold preprocessing.
     tasks = []
     initial_columns = {}
     if estimator != "gformula":
@@ -64,12 +64,12 @@ def refit_nuisance_predictions(panel, subjects, counts, estimator):
     for state, outcome, target, feature_columns in tasks:
         risk = (sample.catheter_state.eq("in") if outcome == "removal"
                 else nuisance.outcome_risk_mask(sample, state, outcome))
-        for fold in range(nuisance.N_CROSSFIT_FOLDS):
+        for fold in range(n_splits):
             training = risk & sample[nuisance.CROSSFIT_FOLD_COL].ne(fold)
             held_out = scored.loc[scored[nuisance.CROSSFIT_FOLD_COL].eq(fold)]
             model = nuisance.fit_crossfit_fold_model(
                 sample.loc[training, feature_columns], sample.loc[training, target],
-                f"{state}_{outcome}", fold,
+                f"{state}_{outcome}", fold, model_type=model_type,
             )
             fallback_folds += int(model["fallback"])
             if outcome == "removal":
@@ -87,7 +87,7 @@ def refit_nuisance_predictions(panel, subjects, counts, estimator):
                 if action is not None:
                     inputs[nuisance.ACTION_COL] = action
                 prediction = nuisance.predict_crossfit_fold(model, inputs)
-                # Match production zeros outside the factual event risk set;
+                # Match full-model zeros outside the factual event risk set;
                 # counterfactual states still receive model predictions.
                 outside_risk = held_out.catheter_state.eq(state) & ~nuisance.outcome_risk_mask(
                     held_out, state, outcome,
@@ -223,7 +223,7 @@ def interval_table(entries, point, bootstrap, n_patients):
 
 
 def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstrap,
-                  refit_panel=None, seed=DEFAULT_SEED):
+                  refit_panel=None, seed=DEFAULT_SEED, refit_n_splits=5, model_type=None, panel_name=None):
     """Bootstrap one estimator, optionally rebuilding nuisance predictions."""
     baseline = episodes.loc[episodes.policy_name.eq(CURRENT_PRACTICE)]
     subjects = pd.Index(sorted(baseline.subject_id.unique()), name="subject_id")
@@ -236,10 +236,9 @@ def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstra
     values = np.empty((n_bootstrap, len(design.entries)))
     rng = np.random.default_rng(seed)
     mode = "refit" if refit_panel is not None else "fixed"
-    output = outdir / "confidence_intervals" / mode
+    output = outdir / "confidence_intervals"
     output.mkdir(parents=True, exist_ok=True)
     for replicate in range(n_bootstrap):
-        print(f"{estimator}: bootstrap {replicate + 1}/{n_bootstrap} ({mode})", flush=True)
         counts = np.bincount(
             rng.integers(0, len(subjects), size=len(subjects)), minlength=len(subjects),
         )
@@ -251,7 +250,9 @@ def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstra
             "n_episodes_resampled": int(counts @ design.episode_counts),
         }
         if refit_panel is not None:
-            scored, fallback_folds = refit_nuisance_predictions(refit_panel, subjects, counts, estimator)
+            scored, fallback_folds = refit_nuisance_predictions(
+                refit_panel, subjects, counts, estimator, n_splits=refit_n_splits, model_type=model_type,
+            )
             sampled_policies = policy_rows.loc[policy_rows.subject_id.isin(scored.subject_id)]
             sample_episodes = evaluate(sampled_policies, scored)[0]
             draw_design = build_patient_statistics({estimator: sample_episodes}, policies, subjects)
@@ -261,6 +262,14 @@ def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstra
             design.entries, values[replicate:replicate + 1], pd.DataFrame([diagnostic]),
         ).to_csv(output / f"{estimator}_bootstrap_replicate_estimates.csv", index=False, float_format="%.4f",
                  mode="w" if replicate == 0 else "a", header=replicate == 0)
+        completed = replicate + 1
+        if completed % 25 == 0 or completed == n_bootstrap:
+            print(
+                f"[BOOTSTRAP] model={model_type or nuisance.MODEL_TYPE}; "
+                f"panel={panel_name or outdir.parent.parent.name}; estimator={estimator}; "
+                f"bootstrap={mode}; completed={completed}/{n_bootstrap}",
+                flush=True,
+            )
 
     interval_table(design.entries, point, values, len(subjects)).to_csv(
         output / f"{estimator}_policy_value_confidence_intervals.csv", index=False, float_format="%.4f",

@@ -15,7 +15,6 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import GroupKFold
-from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
@@ -31,14 +30,13 @@ MODEL_TYPES = (
     "random_forest",
     "xgboost",
     "lightgbm",
-    "mlp",
 )
 MODEL_TYPE = "all"  # Set to "all" to fit every learner in MODEL_TYPES.
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Fit the selected learner(s) separately for all four panels.
-VALIDATION_DIR = REPO_ROOT / "artefacts/validation/semi_synthetic_measured_confounding"
+# Panels to process in this script only; comment out entries to skip them.
+VALIDATION_DIR = REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding"
 PANEL_RUNS = (
     ("real", REPO_ROOT / "data/modelling_panel.csv", REPO_ROOT / "artefacts/nuisance_models"),
     ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
@@ -85,6 +83,7 @@ TOP_FEATURES_TO_SAVE = 15
 CALIBRATION_BINS = 10
 N_CROSSFIT_FOLDS = 5
 CROSSFIT_FOLD_COL = "_crossfit_fold"
+RUN_LEARNING_CURVES = True
 LEARNING_CURVE_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
 FALLBACK_PRIOR_EVENTS = 1.0
 FALLBACK_PRIOR_NON_EVENTS = 1.0
@@ -129,18 +128,6 @@ LEARNER_CONFIGURATIONS = {
         "random_state": SEED,
         "n_jobs": 1,
     },
-    "mlp": {
-        "hidden_layer_sizes": (100,),
-        "activation": "relu",
-        "solver": "adam",
-        "alpha": 0.0001,
-        "batch_size": "auto",
-        "learning_rate_init": 0.001,
-        "max_iter": 200,
-        "shuffle": True,
-        "early_stopping": False,
-        "random_state": SEED,
-    },
 }
 
 LEARNER_PREPROCESSING = {
@@ -167,12 +154,6 @@ LEARNER_PREPROCESSING = {
         "imputation_used": False,
         "scaling_used": False,
         "native_missing_handling": True,
-    },
-    "mlp": {
-        "preprocessing_type": "median_imputation_and_standardisation",
-        "imputation_used": True,
-        "scaling_used": True,
-        "native_missing_handling": False,
     },
 }
 
@@ -217,7 +198,7 @@ ALL_SCORE_COLS = [
 def save_nuisance_report(df, path):
     # Format mixed text/numeric summaries as well as numeric metric columns.
     out = df.copy()
-    for col in out.select_dtypes(include=["object"]).columns:
+    for col in out.select_dtypes(include=["object", "string"]).columns:
         out[col] = out[col].map(
             lambda value: f"{value:.5f}"
             if isinstance(value, (float, np.floating)) and pd.notna(value)
@@ -250,7 +231,11 @@ def configure_model_run(model_type):
 
 
 def binary_values(series):
-    return pd.to_numeric(series, errors="coerce").fillna(0).astype(int).clip(0, 1)
+    values = pd.to_numeric(series, errors="coerce")
+    invalid = values.isna() | ~values.isin([0, 1])
+    if invalid.any():
+        raise ValueError(f"{series.name or 'Binary field'} must contain only 0/1 values. Examples: {series.loc[invalid].head(10).tolist()}")
+    return values.astype(int)
 
 
 def load_panel(path=None):
@@ -332,37 +317,35 @@ def crossfit_row_assignments(df):
     return df[columns].copy()
 
 
-def fit_binary_model(features, target):
-    target = binary_values(target)
-
-    learner_configuration = LEARNER_CONFIGURATIONS[MODEL_TYPE]
+def fit_binary_model(features, target, model_type=None):
+    model_type = MODEL_TYPE if model_type is None else model_type
+    learner_configuration = LEARNER_CONFIGURATIONS[model_type]
     estimator = {
         "logistic_regression": LogisticRegression,
         "random_forest": RandomForestClassifier,
         "xgboost": XGBClassifier,
         "lightgbm": LGBMClassifier,
-        "mlp": MLPClassifier,
-    }[MODEL_TYPE](**learner_configuration)
+    }[model_type](**learner_configuration)
 
     steps = []
-    if LEARNER_PREPROCESSING[MODEL_TYPE]["imputation_used"]:
+    if LEARNER_PREPROCESSING[model_type]["imputation_used"]:
         steps.append(("imputer", SimpleImputer(strategy="median", add_indicator=False)))
-    if LEARNER_PREPROCESSING[MODEL_TYPE]["scaling_used"]:
+    if LEARNER_PREPROCESSING[model_type]["scaling_used"]:
         steps.append(("standardiser", StandardScaler()))
-    steps.append((MODEL_TYPE, estimator))
+    steps.append((model_type, estimator))
     pipe = Pipeline(steps)
     pipe.fit(features.to_numpy(dtype=float), target.to_numpy(dtype=int))
     # Training uses CUDA, but downstream predictions use NumPy arrays in CPU
     # memory. Match the fitted booster to those arrays to avoid XGBoost's
     # cross-device DMatrix fallback during prediction.
-    if MODEL_TYPE == "xgboost":
+    if model_type == "xgboost":
         pipe.named_steps["xgboost"].set_params(device="cpu")
     return pipe
 
 
 def predict_binary_proba(pipe, features):
     feature_values = features.to_numpy(dtype=float)
-    if MODEL_TYPE == "lightgbm":
+    if "lightgbm" in pipe.named_steps:
         feature_values = pd.DataFrame(
             feature_values,
             columns=pipe.named_steps["lightgbm"].feature_names_in_,
@@ -398,11 +381,12 @@ def fit_crossfit_fold_model(
     target,
     model_name,
     fold,
+    model_type=None,
 ):
     # Fit crossfit fold model
     if len(features) == 0:
         raise ValueError(f"Cannot fit {model_name} fold {fold}: training risk set is empty")
-    target = binary_values(target)
+    target = target.astype(int)
     events = int(target.sum())
     non_events = int(len(target) - events)
     retained_feature_cols, constant_features = split_constant_features(features)
@@ -447,6 +431,7 @@ def fit_crossfit_fold_model(
     model = fit_binary_model(
         features.loc[:, retained_feature_cols],
         target,
+        model_type=model_type,
     )
     return {
         **fold_details,
@@ -503,8 +488,6 @@ def mean_feature_importance_series(fold_models):
     return pd.concat(importances, axis=1).mean(axis=1).sort_values(ascending=False)
 
 
-
-
 def constant_features_by_fold(propensity_fold_models, in_models, out_models):
     # Build the training-fold-only constant-feature audit
     columns = [
@@ -547,11 +530,7 @@ def top_series_df(model_name, values, top_n):
             "feature": pd.NA,
             "model_importance": np.nan,
             "importance_available": False,
-            "importance_reason": (
-                "native_feature_importance_unavailable"
-                if MODEL_TYPE == "mlp"
-                else "no_fitted_fold_importance_available"
-            ),
+            "importance_reason": "no_fitted_fold_importance_available",
         }])
     top_df = values.head(top_n).reset_index()
     top_df.columns = ["feature", "model_importance"]
@@ -797,7 +776,7 @@ def model_summary_row(
     # Build summary row
     # Calculate binary metrics
     metrics = scalar_binary_metrics(eval_df, target_col, pred_col)
-    modelling_target = binary_values(modelling_df[target_col])
+    modelling_target = modelling_df[target_col]
     return {
         "model_group": model_group,
         "model_type": MODEL_TYPE,
@@ -968,7 +947,7 @@ def fold_performance_metrics(df):
 
 
 def nuisance_subgroup_diagnostics(df):
-    # Build subgroup performance and calibration from production predictions
+    # Build subgroup performance and calibration from full predictions
     performance_rows = []
     calibration_tables = []
 
@@ -1148,6 +1127,7 @@ def nuisance_learning_curves(
     propensity_fold_models,
     in_models,
     out_models,
+    panel_name=None,
 ):
     # Build deterministic patient-grouped diagnostic learning curves
     tasks = [{
@@ -1234,16 +1214,16 @@ def nuisance_learning_curves(
                     raise ValueError("Learning-curve patient leakage detected")
                 previous_patients = selected_patients
                 subset_mask = training_mask & df[ID_COL].isin(selected_patients)
-                training_target = binary_values(df.loc[subset_mask, task["target_col"]])
+                training_target = df.loc[subset_mask, task["target_col"]]
 
                 reuse_model = training_fraction == 1.0
-                print(
-                    f"[LEARNING CURVE] {task['model_name']} "
-                    f"fold {fold + 1}/{N_CROSSFIT_FOLDS} "
-                    f"fraction={training_fraction:.2f} "
-                    f"source={'production model' if reuse_model else 'diagnostic fit'}",
-                    flush=True,
-                )
+                if fold == 0:
+                    print(
+                        f"[LEARNING CURVE] model={MODEL_TYPE}; panel={panel_name or INFILE.stem}; "
+                        f"task={task['model_name']}; "
+                        f"fraction={training_fraction:.2f}",
+                        flush=True,
+                    )
                 fold_model = (
                     task["fold_models"][fold]
                     if reuse_model
@@ -1265,7 +1245,7 @@ def nuisance_learning_curves(
                     rtol=0.0,
                 ):
                     raise ValueError(
-                        f"Full learning-curve predictions differ from production "
+                        f"Learning-curve predictions differ from full-model "
                         f"predictions for {task['model_name']} fold {fold}"
                     )
 
@@ -1341,7 +1321,7 @@ def nuisance_learning_curves(
 
 # Propensity model: observed clinician removal behaviour among IN rows
 
-def fit_propensity_scores(df, feature_cols, remove_feature_cols):
+def fit_propensity_scores(df, feature_cols, remove_feature_cols, panel_name=None):
     # Fit propensity scores
     df[PROPENSITY_SCORE_COL] = np.nan
     df[KEEP_PROPENSITY_SCORE_COL] = np.nan
@@ -1349,16 +1329,15 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
     eligible_mask = df[STATE_COL].eq("in")
     fold_models = []
 
+    print(
+        f"[FIT] model={MODEL_TYPE}; panel={panel_name or INFILE.stem}; "
+        f"task=propensity_removal",
+        flush=True,
+    )
     # Fit crossfit fold model
     for fold in range(N_CROSSFIT_FOLDS):
         train_mask = eligible_mask & df[CROSSFIT_FOLD_COL].ne(fold)
         held_out_mask = eligible_mask & df[CROSSFIT_FOLD_COL].eq(fold)
-        print(
-            f"[FIT] propensity_removal fold {fold + 1}/{N_CROSSFIT_FOLDS} "
-            f"train={int(train_mask.sum()):,} "
-            f"held_out={int(held_out_mask.sum()):,}",
-            flush=True,
-        )
         # Fit crossfit fold model
         fold_model = fit_crossfit_fold_model(
             df.loc[train_mask, remove_feature_cols],
@@ -1420,7 +1399,7 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols):
 
 # State-specific binary outcome nuisance models
 
-def fit_outcome_scores(df, in_feature_cols, out_feature_cols):
+def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
     # Fit outcome scores
     covariate_dict = pd.read_csv(COVARIATE_DICT_FILE)
     # Prepare outcome targets
@@ -1456,16 +1435,15 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols):
             df.loc[in_rows & ~risk_mask, [keep_col, remove_col]] = 0.0
 
         fold_models = []
+        print(
+            f"[FIT] model={MODEL_TYPE}; panel={panel_name or INFILE.stem}; "
+            f"task={model_name}",
+            flush=True,
+        )
         # Fit crossfit fold model
         for fold in range(N_CROSSFIT_FOLDS):
             train_mask = risk_mask & df[CROSSFIT_FOLD_COL].ne(fold)
             held_out_mask = risk_mask & df[CROSSFIT_FOLD_COL].eq(fold)
-            print(
-                f"[FIT] {model_name} fold {fold + 1}/{N_CROSSFIT_FOLDS} "
-                f"train={int(train_mask.sum()):,} "
-                f"held_out={int(held_out_mask.sum()):,}",
-                flush=True,
-            )
             # Fit crossfit fold model
             fold_model = fit_crossfit_fold_model(
                 df.loc[train_mask, in_feature_cols],
@@ -1579,16 +1557,15 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols):
             df.loc[out_rows & ~risk_mask, score_col] = 0.0
 
         fold_models = []
+        print(
+            f"[FIT] model={MODEL_TYPE}; panel={panel_name or INFILE.stem}; "
+            f"task={model_name}",
+            flush=True,
+        )
         # Fit crossfit fold model
         for fold in range(N_CROSSFIT_FOLDS):
             train_mask = risk_mask & df[CROSSFIT_FOLD_COL].ne(fold)
             held_out_mask = risk_mask & df[CROSSFIT_FOLD_COL].eq(fold)
-            print(
-                f"[FIT] {model_name} fold {fold + 1}/{N_CROSSFIT_FOLDS} "
-                f"train={int(train_mask.sum()):,} "
-                f"held_out={int(held_out_mask.sum()):,}",
-                flush=True,
-            )
             # Fit crossfit fold model
             fold_model = fit_crossfit_fold_model(
                 df.loc[train_mask, out_feature_cols],
@@ -1852,7 +1829,7 @@ def save_nuisance_predictions(df):
     )
 
 
-def run_nuisance_model(model_type):
+def run_nuisance_model(model_type, panel_name=None):
     configure_model_run(model_type)
     print(
         f"[MODEL] Starting {MODEL_OUTPUT_NAME} ({MODEL_TYPE})",
@@ -1892,6 +1869,7 @@ def run_nuisance_model(model_type):
         df,
         feature_cols,
         remove_feature_cols,
+        panel_name=panel_name,
     )
 
     # Fit outcome scores
@@ -1899,6 +1877,7 @@ def run_nuisance_model(model_type):
         df,
         in_feature_cols,
         out_feature_cols,
+        panel_name=panel_name,
     )
     save_nuisance_report(
         constant_features_by_fold(
@@ -1922,7 +1901,7 @@ def run_nuisance_model(model_type):
         OUTDIR / "fold_performance_metrics.csv",
     )
 
-    production_predictions = df[ALL_SCORE_COLS].copy()
+    full_predictions = df[ALL_SCORE_COLS].copy()
     subgroup_performance, subgroup_calibration = nuisance_subgroup_diagnostics(df)
     save_nuisance_report(
         subgroup_performance,
@@ -1932,20 +1911,22 @@ def run_nuisance_model(model_type):
         subgroup_calibration,
         OUTDIR / "nuisance_subgroup_calibration.csv",
     )
-    save_nuisance_report(
-        nuisance_learning_curves(
-            df,
-            remove_feature_cols,
-            in_feature_cols,
-            out_feature_cols,
-            propensity_fold_models,
-            in_models,
-            out_models,
-        ),
-        OUTDIR / "nuisance_learning_curves.csv",
-    )
-    if not df[ALL_SCORE_COLS].equals(production_predictions):
-        raise ValueError("Diagnostics altered production nuisance predictions")
+    if RUN_LEARNING_CURVES:
+        save_nuisance_report(
+            nuisance_learning_curves(
+                df,
+                remove_feature_cols,
+                in_feature_cols,
+                out_feature_cols,
+                propensity_fold_models,
+                in_models,
+                out_models,
+                panel_name=panel_name,
+            ),
+            OUTDIR / "nuisance_learning_curves.csv",
+        )
+    if not df[ALL_SCORE_COLS].equals(full_predictions):
+        raise ValueError("Diagnostics altered full predictions")
 
     # Save nuisance predictions
     save_nuisance_predictions(df)
@@ -1961,7 +1942,7 @@ def main():
         configure_panel_run(input_path, nuisance_root)
         print(f"[PANEL] {panel_name}: {INFILE}", flush=True)
         for model_type in model_types:
-            run_nuisance_model(model_type)
+            run_nuisance_model(model_type, panel_name=panel_name)
         # Keep comparisons within this panel's output directory.
         build_nuisance_model_comparison()
 

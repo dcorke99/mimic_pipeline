@@ -6,6 +6,12 @@ import fit_nuisance_models as fnm
 
 
 class NuisanceCautiRiskSetTests(unittest.TestCase):
+    def test_binary_values_reject_missing_and_invalid_inputs(self):
+        for value in (None, "bad", 2, -1, 0.5):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "only 0/1"):
+                fnm.binary_values(pd.Series([value], name="cauti_in_period"))
+        self.assertEqual(fnm.binary_values(pd.Series(["0", "1"])).tolist(), [0, 1])
+
     def test_observed_cauti_training_masks_use_at_risk_flag(self):
         panel = pd.DataFrame(
             {

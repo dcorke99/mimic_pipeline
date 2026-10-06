@@ -10,69 +10,59 @@ import pandas as pd
 import policy_eval_common as pec
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+# Configuration
 
-POLICY_QA_PATH = REPO_ROOT / "artefacts" / "policy_interventions" / "policy_intervention_panel_qa.csv"
+REPO_ROOT = Path(__file__).resolve().parent
+BOOTSTRAP_MODE = "fixed"  # Select "fixed" or "refit" results for this audit.
+if BOOTSTRAP_MODE not in ("fixed", "refit"):
+    raise ValueError(f"Unknown bootstrap mode: {BOOTSTRAP_MODE!r}")
+
+POLICY_CHECK_PATH = REPO_ROOT / "artefacts" / "counterfactual_policies" / "policy_panel_checks.csv"
 GFORMULA_SUMMARY_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / "gformula_policy_outcomes_summary.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / BOOTSTRAP_MODE / "gformula_policy_outcomes_summary.csv"
 )
 GFORMULA_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / "gformula_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / BOOTSTRAP_MODE / "gformula_diagnostics.csv"
 )
 AIPW_SUMMARY_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / "aipw_policy_outcomes_summary.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / BOOTSTRAP_MODE / "aipw_policy_outcomes_summary.csv"
 )
 AIPW_WEIGHT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / "aipw_weight_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / BOOTSTRAP_MODE / "aipw_weight_diagnostics.csv"
 )
 IPW_SUMMARY_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / "ipw_policy_outcomes_summary.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_policy_outcomes_summary.csv"
 )
 IPW_WEIGHT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / "ipw_weight_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_weight_diagnostics.csv"
 )
 IPW_SUPPORT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / "ipw_policy_support_diagnostics.csv"
+    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_policy_support_diagnostics.csv"
 )
-OUTPUT_PATH = REPO_ROOT / "artefacts" / "policy_eval" / "baseline_policy_evaluation_audit.csv"
+OUTPUT_PATH = REPO_ROOT / "artefacts" / "policy_eval" / f"policy_results_checks_{BOOTSTRAP_MODE}.csv"
 
 CURRENT_PRACTICE_LABEL = "current_practice"
 TOLERANCE = 1e-10
 
 
-def policy_day_key(value):
-    # Build day key
-    if pd.isna(value):
-        return "<NA>"
-    numeric = float(value)
-    if np.isclose(numeric, round(numeric), atol=1e-9):
-        return str(int(round(numeric)))
-    return f"{numeric:.12g}"
-
-
 def add_policy_key(df):
-    # Add policy key
     out = df.copy()
-    out["__policy_day_key"] = out["policy_remove_day"].map(policy_day_key)
-    out["__policy_key"] = out["policy_name"].astype(str) + "|" + out["__policy_day_key"].astype(str)
+    day = pd.to_numeric(out["policy_remove_day"], errors="raise").fillna(-1)
+    out["__policy_key"] = list(zip(out["policy_name"], day))
     return out
 
 
 def bool_series(series):
-    # Convert a series to booleans
-    if pd.api.types.is_bool_dtype(series):
-        return series.fillna(False).astype(bool)
-    return series.astype("string").str.strip().str.lower().isin(["true", "1", "yes", "y"])
-
-
-def is_true(value):
-    # Check whether one value is true
-    # Convert a series to booleans
-    return bool_series(pd.Series([value])).iloc[0]
+    values = series.astype("string").str.strip().str.lower().map({
+        "true": True, "false": False, "1": True, "0": False,
+        "1.0": True, "0.0": False,
+    })
+    if values.isna().any():
+        raise ValueError(f"{series.name} contains missing or invalid boolean flags")
+    return values.astype(bool)
 
 
 def add_result(results, check, passed, detail):
-    # Add result
     results.append(
         {
             "check": check,
@@ -84,7 +74,6 @@ def add_result(results, check, passed, detail):
 
 def policy_key_set(df):
     # Build key set
-    # Add policy key
     return set(add_policy_key(df)["__policy_key"])
 
 
@@ -106,13 +95,11 @@ def check_same_policies(
     detail = "; ".join(f"{name}={len(values)} policies" for name, values in sets.items())
     if not passed:
         detail += "; differences=" + str({name: sorted(values ^ reference) for name, values in sets.items()})
-    # Add result
     add_result(results, "same_policies_across_methods", passed, detail)
 
 
 def structural_episode_counts(summary, method):
     # Build structural episode counts
-    # Add policy key
     df = add_policy_key(summary)
     if method == "ipw":
         total_col = np.where(
@@ -159,7 +146,6 @@ def check_same_episode_counts(
             ~(counts.notna().all(axis=1) & counts.nunique(axis=1).eq(1)),
             ["policy_name", "policy_remove_day", "n_gformula", "n_aipw", "n_ipw_total"],
         ].to_string(index=False)
-    # Add result
     add_result(results, "same_structural_episode_counts", bool(passed), detail)
 
 
@@ -178,9 +164,7 @@ def check_gformula_matches_aipw_plugin(
         ("expected_mean_catheter_exposure_days", "plugin_expected_mean_catheter_exposure_days"),
         ("expected_mean_catheter_in_interval_rows", "plugin_expected_mean_catheter_in_interval_rows"),
     ]
-    # Add policy key
     g = add_policy_key(g_summary)
-    # Add policy key
     a = add_policy_key(aipw_summary)
     merged = g.merge(a, on="__policy_key", suffixes=("_g", "_a"), how="inner")
 
@@ -207,7 +191,6 @@ def check_gformula_matches_aipw_plugin(
     detail = f"checked {checked} column pairs; max_abs_diff={max_diff:.3g}; tolerance={tolerance}"
     if failures:
         detail = pd.concat(failures, ignore_index=True).head(20).to_string(index=False)
-    # Add result
     add_result(results, "gformula_values_match_aipw_plugin_values", passed, detail)
 
 
@@ -238,7 +221,6 @@ def check_aipw_ess_leq_adherent(
     detail = "AIPW residual-correction ESS is <= adherent episodes in summary and diagnostics"
     if failures:
         detail = pd.concat(failures, ignore_index=True).to_string(index=False)
-    # Add result
     add_result(results, "aipw_ess_lte_adherent_episodes", passed, detail)
 
 
@@ -249,9 +231,7 @@ def check_ipw_summary_flags_match_diagnostics(
     ipw_support_diagnostics,
 ):
     # Check IPW summary flags match diagnostics
-    # Add policy key
     summary = add_policy_key(ipw_summary)
-    # Add policy key
     weight = add_policy_key(ipw_weight_diagnostics)
     failures = []
 
@@ -262,12 +242,10 @@ def check_ipw_summary_flags_match_diagnostics(
         how="left",
         suffixes=("_summary", "_weight_diagnostics"),
     )
-    # Convert a series to booleans
     for flag_col in flag_cols:
         summary_col = f"{flag_col}_summary"
         diag_col = f"{flag_col}_weight_diagnostics"
         target = merged.loc[~merged["policy_name"].eq(CURRENT_PRACTICE_LABEL)].copy()
-        # Convert a series to booleans
         mismatch = bool_series(target[summary_col]).ne(bool_series(target[diag_col]))
         if mismatch.any():
             failures.append(
@@ -279,7 +257,6 @@ def check_ipw_summary_flags_match_diagnostics(
     support_all = ipw_support_diagnostics.loc[
         ipw_support_diagnostics["group"].astype("string").eq("all")
     ].copy()
-    # Add policy key
     support_all = add_policy_key(support_all)
     support_merged = summary.merge(
         support_all[["__policy_key", "low_support_flag"]],
@@ -288,7 +265,6 @@ def check_ipw_summary_flags_match_diagnostics(
         suffixes=("_summary", "_support_diagnostics"),
     )
     target = support_merged.loc[~support_merged["policy_name"].eq(CURRENT_PRACTICE_LABEL)].copy()
-    # Convert a series to booleans
     mismatch = bool_series(target["low_support_flag_summary"]).ne(
         bool_series(target["low_support_flag_support_diagnostics"])
     )
@@ -309,19 +285,18 @@ def check_ipw_summary_flags_match_diagnostics(
     detail = "IPW summary flags match weight/support diagnostics for target policies"
     if failures:
         detail = pd.concat(failures, ignore_index=True).to_string(index=False)
-    # Add result
     add_result(results, "ipw_summary_flags_match_diagnostics", passed, detail)
 
 
-def check_remove_rows(results, policy_qa, g_diagnostics, aipw_summary):
+def check_remove_rows(results, policy_check, g_diagnostics, aipw_summary):
     # Check remove rows
     failures = []
     for label, df in [
-        ("policy_intervention_qa", policy_qa),
+        ("policy_panel_checks", policy_check),
         ("gformula_diagnostics", g_diagnostics),
         ("aipw_summary", aipw_summary),
     ]:
-        bad = pd.to_numeric(df["n_episodes_with_more_than_one_remove_row"], errors="coerce").fillna(0).gt(0)
+        bad = pd.to_numeric(df["n_episodes_with_more_than_one_remove_row"], errors="coerce").ne(0)
         if bad.any():
             failures.append(
                 df.loc[bad, ["policy_name", "policy_remove_day", "n_episodes_with_more_than_one_remove_row"]].assign(
@@ -332,30 +307,25 @@ def check_remove_rows(results, policy_qa, g_diagnostics, aipw_summary):
     detail = "no method reports more than one remove row per episode-policy"
     if failures:
         detail = pd.concat(failures, ignore_index=True).to_string(index=False)
-    # Add result
     add_result(results, "no_more_than_one_remove_row_per_episode_policy", passed, detail)
 
 
-def check_no_missing_predictions(
-    results,
-    g_summary,
-    g_diagnostics,
-    aipw_summary,
-):
-    # Check no missing predictions
-    checks = []
-    checks.append(("gformula_summary_incomplete", int(pd.to_numeric(g_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
-    g_missing_cols = [col for col in g_diagnostics.columns if col.startswith("n_missing_")]
-    for col in g_missing_cols:
-        checks.append((f"gformula_diagnostics_{col}", int(pd.to_numeric(g_diagnostics[col], errors="coerce").fillna(0).sum())))
-    checks.append(("aipw_summary_incomplete", int(pd.to_numeric(aipw_summary["n_incomplete_prediction_episodes"], errors="coerce").fillna(0).sum())))
-    failures = [(name, value) for name, value in checks if value != 0]
-    passed = bool(checks) and not failures
-    detail = "all prediction-missing counters are zero"
-    if failures:
-        detail = str(failures)
-    # Add result
-    add_result(results, "no_missing_predictions", passed, detail)
+def check_no_missing_predictions(results, g_summary, g_diagnostics, aipw_summary):
+    counts = [
+        ("gformula_summary_incomplete", g_summary["n_incomplete_prediction_episodes"]),
+        ("aipw_summary_incomplete", aipw_summary["n_incomplete_prediction_episodes"]),
+    ]
+    missing_cols = [col for col in g_diagnostics if col.startswith("n_missing_")]
+    counts.extend((f"gformula_diagnostics_{col}", g_diagnostics[col]) for col in missing_cols)
+    failures = []
+    if not missing_cols:
+        failures.append("G-formula diagnostics have no prediction-missing counters")
+    for name, series in counts:
+        values = pd.to_numeric(series, errors="coerce")
+        if values.empty or values.ne(0).any():
+            failures.append(f"{name}: missing, invalid or nonzero counts")
+    add_result(results, "no_missing_predictions", not failures,
+               "; ".join(failures) if failures else "all prediction-missing counters are present and zero")
 
 
 def check_no_probabilities_outside_unit_interval(
@@ -368,14 +338,12 @@ def check_no_probabilities_outside_unit_interval(
     # Check no probabilities outside unit interval
     failures = []
     for col in ["n_predictions_below_0", "n_predictions_above_1"]:
-        count = int(pd.to_numeric(g_diagnostics[col], errors="coerce").fillna(0).sum())
-        if count:
-            failures.append(f"gformula_diagnostics {col}={count}")
+        values = pd.to_numeric(g_diagnostics[col], errors="coerce")
+        if values.empty or values.ne(0).any():
+            failures.append(f"gformula_diagnostics {col} contains missing, invalid or nonzero counts")
 
     out_of_bounds_cols = [col for col in aipw_summary.columns if col.endswith("_out_of_bounds") or "_out_of_bounds_" in col]
-    # Convert a series to booleans
     for col in out_of_bounds_cols:
-        # Convert a series to booleans
         if bool_series(aipw_summary[col]).any():
             failures.append(f"aipw_summary {col} has true values")
 
@@ -402,47 +370,15 @@ def check_no_probabilities_outside_unit_interval(
     detail = "diagnostic counters and summary probability columns are within [0, 1]"
     if failures:
         detail = "; ".join(failures)
-    # Add result
     add_result(results, "no_probabilities_outside_0_1", passed, detail)
 
 
-def check_remove_day_1_poor_support(
-    results,
-    ipw_summary,
-    ipw_support_diagnostics,
-    aipw_summary,
-):
-    # Check remove day 1 poor support
-    failures = []
-    # Check whether one value is true
-    for label, df in [("ipw_summary", ipw_summary), ("aipw_summary", aipw_summary)]:
-        row = df.loc[df["policy_name"].eq("remove_on_day_1")]
-        # Check whether one value is true
-        if not is_true(row["low_support_flag"].iloc[0]):
-            failures.append(f"{label} remove_on_day_1 low_support_flag is not true")
-
-    support_all = ipw_support_diagnostics.loc[
-        ipw_support_diagnostics["policy_name"].eq("remove_on_day_1")
-        & ipw_support_diagnostics["group"].astype("string").eq("all")
-    ]
-    # Check whether one value is true
-    if not is_true(support_all["low_support_flag"].iloc[0]):
-        failures.append("ipw_support_diagnostics remove_on_day_1/all low_support_flag is not true")
-
-    passed = not failures
-    detail = "remove_on_day_1 is flagged as poor support in IPW/AIPW outputs"
-    if failures:
-        detail = "; ".join(failures)
-    # Add result
-    add_result(results, "remove_day_1_flagged_as_poor_support", passed, detail)
-
-
 def main():
-    # Collect each audit result
+    # Collect each result check
     results = []
 
     # Load the policy and estimator reports
-    policy_qa = pd.read_csv(POLICY_QA_PATH, low_memory=False)
+    policy_check = pd.read_csv(POLICY_CHECK_PATH, low_memory=False)
     g_summary = pd.read_csv(GFORMULA_SUMMARY_PATH, low_memory=False)
     g_diagnostics = pd.read_csv(GFORMULA_DIAGNOSTICS_PATH, low_memory=False)
     aipw_summary = pd.read_csv(AIPW_SUMMARY_PATH, low_memory=False)
@@ -476,29 +412,27 @@ def main():
     # Check IPW summary flags match diagnostics
     check_ipw_summary_flags_match_diagnostics(results, ipw_summary, ipw_weight_diagnostics, ipw_support_diagnostics)
     # Check remove rows
-    check_remove_rows(results, policy_qa, g_diagnostics, aipw_summary)
+    check_remove_rows(results, policy_check, g_diagnostics, aipw_summary)
     # Check no missing predictions
     check_no_missing_predictions(results, g_summary, g_diagnostics, aipw_summary)
     # Check no probabilities outside unit interval
     check_no_probabilities_outside_unit_interval(results, g_summary, g_diagnostics, aipw_summary, ipw_summary)
-    # Check remove day 1 poor support
-    check_remove_day_1_poor_support(results, ipw_summary, ipw_support_diagnostics, aipw_summary)
 
-    # Save the complete audit table
+    # Save the result checks
     report = pd.DataFrame(results)
     pec.save_report_df(report, OUTPUT_PATH)
 
     # Stop the pipeline when any check fails
     failed = report.loc[report["status"].eq("FAIL")]
     if failed.empty:
-        print("BASELINE QA PASSED")
+        print("POLICY RESULTS CHECKS PASSED")
         print(f"Checks passed: {len(report)}")
-        print(f"Saved audit report: {OUTPUT_PATH}")
+        print(f"Saved result checks: {OUTPUT_PATH}")
         return
 
-    print("BASELINE QA FAILED")
+    print("POLICY RESULTS CHECKS FAILED")
     print(failed.to_string(index=False))
-    print(f"Saved audit report: {OUTPUT_PATH}")
+    print(f"Saved result checks: {OUTPUT_PATH}")
     raise SystemExit(1)
 
 

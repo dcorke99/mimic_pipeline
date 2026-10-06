@@ -1,49 +1,62 @@
 # MIMIC catheter policy pipeline
 
-Use a Python environment with `requirements.txt` installed; run each script with `python <script.py>` or VS Code's Run Python File.
-Keep the project layout together; raw MIMIC-IV data defaults to `../Data/MIMIC-IV/mimic-iv-3.1`, overridable with `MIMIC_DIR`.
+`requirements.txt` defines the python environment
+
+Run each script with `python <script.py>` or VS Code
+
+Raw MIMIC-IV data defaults to `../Data/MIMIC-IV/mimic-iv-3.1`, overridable with `MIMIC_DIR`.
 
 ## Main run order
 
-For a selected ML model, this workflow generates **4 panels × 3 estimators × 2 nuisance modes = 24 combinations** without changing dataset or bootstrap-mode settings.
-The panels are real data, semi-synthetic measured confounding, confounder omitted, and randomised actions; both modes produce bootstrap confidence intervals.
-Match fitting's `MODEL_TYPE` to each evaluator's `NUISANCE_MODEL_TYPE`; fitting with `MODEL_TYPE="all"` trains every learner, but each evaluator still uses only its selected learner.
+The pipeline is run on separate data panels representing real data, semi-synthetic measured confounding, confounder omitted, and randomised actions. It supports 3 estimators (g-formula, IPW and AIPW) each with 2 confidence interval bootstrap modes (fixed-model and refit-model). For each selected learner this workflow generates up to **4 panels × 3 estimators × 2 bootstrap modes = 24 combinations**.
 
-1. `create_data_panel.py` — Builds catheter episodes, cleans chart covariates, and creates the modelling panel from MIMIC-IV.
-2. `create_semi_synthetic_panel.py` — Generates the three validation panels and oracle truth from the observed modelling panel.
-3. `fit_nuisance_models.py` — Fits separate nuisance models, cross-fitted predictions, and diagnostics for all four panels (`MODEL_TYPE="all"` fits every learner).
-4. `build_policy_intervention_panels.py` — Builds catheter-removal policy panels and quality checks for all four datasets.
-5. `evaluate_gformula_policies.py` — Estimates all four panels using the g-formula with fixed-model and refitted-model bootstrap inference.
-6. `evaluate_ipw_policies.py` — Estimates all four panels using inverse probability weighting with both bootstrap modes and diagnostics.
-7. `evaluate_aipw_policies.py` — Estimates all four panels using augmented inverse probability weighting with both bootstrap modes and diagnostics.
-8. `audit_policy_evaluation_baseline.py` — Checks consistency of real-data saved-model policy panels and outputs from all three estimators.
-9. `prepare_results_plots.py` — Produces comparison plots and a summary table for the real-data saved-model evaluation and audit outputs.
+Each script has its own configuration section.
 
-Steps 3–4 can run in either order once all four panels exist; steps 5–7 can run in any order after both are complete.
-Each evaluator uses `N_BOOTSTRAP=1000` per panel and mode; refitting retrains nuisance models for each patient bootstrap sample.
-Each evaluator's `main()` contains its own panel and bootstrap-mode loops. To run only the fixed bootstrap, comment out the `True,` line in that evaluator's `for refit in (...)` loop.
-The scripts read inputs directly: missing files or required columns raise their normal Python or pandas errors at the point of use.
-All-panel loops leave their module settings configured for the final panel and mode; they do not save and restore global settings.
-Saved-model results use each panel's `policy_eval/<estimator>` folder, with intervals in `confidence_intervals/fixed`.
-Refitted results use `policy_eval/<estimator>/refit_nuisance`, with intervals in `confidence_intervals/refit` beneath it.
-The final audit and plots cover only real-data saved-model results, rather than all 24 combinations.
+Select panels independently by editing `PANEL_RUNS` in `fit_nuisance_models.py`, `build_policy_panels.py` and each evaluator. Comment out entries to skip panels.
 
-## PowerShell launcher
+Select learners with `MODEL_TYPE="xgboost" or MODEL_TYPE="all"` in `fit_nuisance_models.py` and evaluation learners with `NUISANCE_MODEL_TYPE` in each evaluator script. Bootstrap modes are selected in each evaluator by setting `BOOTSTRAP_MODES`.
 
-- `main_pipeline.ps1` — Creates all four panels, fits nuisance models, builds policies, runs both estimation modes, and creates the real-data saved-model audit and plots.
+For fixed-model bootstrap, each evaluator’s `NUISANCE_MODEL_TYPE` must refer to a learner previously fitted for the selected panels by `fit_nuisance_models.py`.
 
-Run `./main_pipeline.ps1` in PowerShell to execute the main run order above using the project's `.venv` interpreter.
+Refitted-model bootstrap fits the selected learner during evaluation and can run without saved models or predictions.
 
-## Optional scripts
+Implemented nuisance models are logistic regression, random forest, XGBoost and LightGBM.
 
-- `audit_duplicate_episode_days.py` — Audits duplicate episode-day rows; run after creating the modelling panel.
-- `panel_analysis.py` — Creates descriptive summaries, plots, and hypothesis tests; requires the panel and existing `artefacts/step1` feature tables.
-- `panel_analysis+.py` — Runs the same panel analysis with additional median-split age tests; use instead of `panel_analysis.py` when wanted.
+“For semi-synthetic validation, to compare an estimated policy outcome with its known true value, that policy must be included in both `build_policy_panels.py` and `create_semi_synthetic_panel.py`.
 
-## Shared modules (imported automatically)
+1. `create_data_panel.py` — Builds catheter episodes, cleans chart covariates, and creates the modelling panel from raw MIMIC-IV data.
+2. `create_semi_synthetic_panel.py` — Generates three semi-synthetic validation panels, records known row-level probabilities, and calculates known true CAUTI policy risks.
+3. `fit_nuisance_models.py` — Fits nuisance models for the selected MODEL_TYPEs and produces cross-fitted predictions and diagnostics for its selected panels.
+4. `panel_analysis.py` — Creates descriptive summaries and statistical comparisons of the real-data modelling panel, using saved nuisance-model features. The launcher runs it immediately after nuisance fitting.
+5. `build_policy_panels.py` — Builds catheter-removal policy panels and checks for its selected panels.
+6. `evaluate_gformula_policies.py` — Estimates policy outcomes for the selected panels using the g-formula, with the enabled bootstrap modes and diagnostics.
+7. `evaluate_ipw_policies.py` — Estimates its selected panels using inverse probability weighting with the enabled bootstrap modes and diagnostics.
+8. `evaluate_aipw_policies.py` — Estimates its selected panels using augmented inverse probability weighting with the enabled bootstrap modes and diagnostics.
+9. `check_policy_results.py` — Checks the real-data policy panels and consistency of the g-formula, IPW and AIPW results for the selected bootstrap mode.
+
+Nuisance fitting (step 3) and policy-panel construction (step 5) can run in either order once the selected panels exist. Panel analysis (step 4) requires nuisance fitting.
+Steps 6–8 can run in any order once their selected data panels and policy panels exist. Fixed-model mode also requires nuisance fitting (step 3); refitted-model mode does not require saved models or predictions.
+
+Each panel’s `counterfactual_policies/panels` folder contains one CSV per policy. These describe the `policy_action` under the hypothetical policy for each row in the observed data panel. `counterfactual_policies/policy_panels.csv` indexes the policies.
+
+`policy_panel_checks.csv` summarises the counterfactual actions versus the observed actions for each policy. `n_applicable_policy_keep_rows` and `n_applicable_policy_remove_rows` count actions on observed decision rows; `n_policy_remove_rows` counts all hypothetical removal rows. `proportion_policy_matches_observed_action_today` is a fraction between 0 and 1.
+
+`known_truth_policy_values.csv` contains known CAUTI policy risks; truth-only fields stay separate from estimator inputs.
+
+Each evaluator configures `N_BOOTSTRAP=1000`, `BOOTSTRAP_SEED` and `REFIT_CROSSFIT_FOLDS` locally. To estimate confidence intervals it uses `N_BOOTSTRAP` per panel and mode (refitting retrains nuisance models for each patient bootstrap sample). Set `BOOTSTRAP_MODES=("fixed",)` for fixed-model bootstrap, `("refit",)` for refitted-model bootstrap, or `("fixed", "refit")` for both in each evaluator.
+
+For each panel and estimator, fixed-model results and diagnostics are saved in `policy_eval/<estimator>/fixed/`; refitted-model results and diagnostics are saved in `policy_eval/<estimator>/refit/`. Each run folder contains its own `confidence_intervals/` subfolder.
+
+`check_policy_results.py` checks real-data results for the mode selected by its `BOOTSTRAP_MODE` setting (default `"fixed"`) and writes `policy_eval/policy_results_checks_<mode>.csv`. Missing or invalid diagnostic counts fail the checks; no particular removal day is required.
+
+`panel_analysis.py` provides a statistical descriptive analysis of `data/modelling_panel.csv`. It reads outcome feature rankings and saved propensity models from `artefacts/nuisance_models/xgboost` (configurable with `NUISANCE_MODEL_TYPE`).
+
+Run `./main_pipeline.ps1` in PowerShell to execute the main run order above using the project's `.venv` interpreter. The launcher stops immediately if any script fails.
+
+## Shared import modules
 
 - `policy_eval_common.py` — Provides shared panel validation, prediction, and reporting helpers.
-- `policy_bootstrap.py` — Computes patient-level bootstrap confidence intervals, optionally refitting nuisance models.
+- `policy_bootstrap_common.py` — Computes patient-level bootstrap confidence intervals, optionally refitting nuisance models.
 
 ## Tests
 

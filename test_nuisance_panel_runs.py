@@ -1,4 +1,4 @@
-"""Check multi-panel fitting orchestration without training production models."""
+"""Check multi-panel fitting orchestration without training full models."""
 
 from contextlib import redirect_stdout
 from io import StringIO
@@ -31,7 +31,7 @@ class NuisancePanelRunsTests(unittest.TestCase):
                     path.touch()
                 runs, reports = [], []
 
-                def fit(model_type):
+                def fit(model_type, panel_name=None):
                     nuisance.configure_model_run(model_type)
                     runs.append((nuisance.INFILE, nuisance.OUTDIR, model_type))
                     self.assertEqual(nuisance.NUISANCE_PREDICTIONS_FILE,
@@ -46,7 +46,8 @@ class NuisancePanelRunsTests(unittest.TestCase):
                                   side_effect=lambda: reports.append(nuisance.MODEL_COMPARISON_FILE)), \
                      redirect_stdout(StringIO()):
                     nuisance.main()
-                    self.assertEqual(nuisance.MODEL_TYPE, "mlp" if selection == "all" else selection)
+                    self.assertEqual(nuisance.MODEL_TYPE,
+                                     nuisance.MODEL_TYPES[-1] if selection == "all" else selection)
                 models = nuisance.MODEL_TYPES if selection == "all" else (selection,)
                 self.assertEqual(runs, [(path, output / model, model)
                                         for _, path, output in panels for model in models])
@@ -71,7 +72,7 @@ class NuisancePanelRunsTests(unittest.TestCase):
                  patch.object(nuisance, "MODEL_TYPE", "xgboost"), \
                  patch.object(nuisance, "build_nuisance_model_comparison"), \
                  patch.object(nuisance, "run_nuisance_model",
-                              side_effect=lambda model: nuisance.INFILE.read_text()) as fit:
+                              side_effect=lambda model, panel_name: nuisance.INFILE.read_text()) as fit:
                 with self.assertRaisesRegex(FileNotFoundError, "missing.csv"):
                     nuisance.main()
                 self.assertEqual(fit.call_count, 2)

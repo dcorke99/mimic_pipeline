@@ -1,48 +1,53 @@
-#!/usr/bin/env python3
-# Evaluate catheter-removal policies with AIPW estimates
-
-
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
-import policy_bootstrap as bootstrap
+import policy_bootstrap_common as bootstrap
 import fit_nuisance_models as nuisance
-from build_policy_intervention_panels import read_policy_panel
+from build_policy_panels import read_policy_collection
 from policy_eval_common import (
+    effective_sample_size,
+    assign_policy_prediction,
+    cumulative_event_probability,
     CROSSFIT_FOLD_COL,
     PREDICTION_COLUMNS,
-    add_episode_day_since_insertion,
+    add_episode_day,
     fill_missing_counterfactual_predictions,
 )
 
 
-# Paths and constants
+# Configuration
 
 REPO_ROOT = Path(__file__).resolve().parent
 NUISANCE_MODEL_TYPE = "xgboost"
 N_BOOTSTRAP = 1000
-REFIT_NUISANCE = False  # Single-panel mode; main() runs both fixed and refit modes.
+BOOTSTRAP_SEED = 20260923
+REFIT_CROSSFIT_FOLDS = 5
+BOOTSTRAP_MODES = ("fixed",)  # Use ("fixed", "refit") to run both modes.
 
 
-# Initial paths for direct single-panel calls; main() configures all four panels.
-PANEL_PATH = REPO_ROOT / "data/modelling_panel.csv"
-POLICY_PANEL_PATH = REPO_ROOT / "artefacts/policy_interventions/policy_intervention_panel_long.csv"
-NUISANCE_MODEL_DIR = REPO_ROOT / "artefacts/nuisance_models" / NUISANCE_MODEL_TYPE
-OUTDIR = REPO_ROOT / "artefacts/policy_eval/aipw"
+# Panels to process in this script only; comment out entries to skip them.
+VALIDATION_DIR = REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding"
+PANEL_RUNS = (
+    ("real", REPO_ROOT / "data/modelling_panel.csv", REPO_ROOT / "artefacts/nuisance_models"),
+    ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
+     VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),
+    ("confounder_omitted", VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
+     VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),
+    ("randomised_action", VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
+     VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"),
+)
 
-NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
-OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
-OUTPUT_PATHS = {
-    "summary": OUTDIR / "aipw_policy_outcomes_summary.csv",
-    "episodes": OUTDIR / "aipw_policy_episode_scores.csv",
-    "support_diagnostics": OUTDIR / "aipw_policy_support_diagnostics.csv",
-    "weight_diagnostics": OUTDIR / "aipw_weight_diagnostics.csv",
-    "residual_diagnostics": OUTDIR / "aipw_residual_diagnostics.csv",
-    "clipping_sensitivity": OUTDIR / "aipw_clipping_sensitivity.csv",
-    "current_practice": OUTDIR / "current_practice_aipw_episode_scores.csv",
+OUTPUT_FILENAMES = {
+    "summary": "aipw_policy_outcomes_summary.csv",
+    "episodes": "aipw_policy_episode_scores.csv",
+    "support_diagnostics": "aipw_policy_support_diagnostics.csv",
+    "weight_diagnostics": "aipw_weight_diagnostics.csv",
+    "residual_diagnostics": "aipw_residual_diagnostics.csv",
+    "clipping_sensitivity": "aipw_clipping_sensitivity.csv",
+    "current_practice": "current_practice_aipw_episode_scores.csv",
 }
 
 CLIP_LOWER = 0.01
@@ -159,43 +164,6 @@ MISSING_COUNTERFACTUAL_MESSAGE = (
 # Generic helpers
 
 
-def cumulative_event_probability(probabilities):
-    # Calculate cumulative event probability
-    probs = pd.to_numeric(probabilities, errors="coerce").dropna()
-    if probs.empty:
-        return np.nan
-    probs = probs.clip(0.0, 1.0)
-    return float(1.0 - np.prod(1.0 - probs.to_numpy(dtype=float)))
-
-
-def effective_sample_size(weights):
-    # Calculate the effective sample size
-    # Return positive finite weights
-    weights = pd.to_numeric(weights, errors="coerce")
-    weights = weights[np.isfinite(weights) & weights.gt(0)]
-    if weights.empty:
-        return np.nan
-    sum_weights = float(weights.sum())
-    sum_squared_weights = float(np.square(weights).sum())
-    return float((sum_weights ** 2) / sum_squared_weights) if sum_squared_weights > 0 else np.nan
-
-
-def load_policy_panel(path):
-    # Load and validate the policy panel
-    df = read_policy_panel(path)
-    if df["policy_name"].dropna().empty:
-        raise ValueError("Policy panel contains no policy_name values.")
-    if df["policy_remove_day"].isna().any():
-        examples = df.loc[df["policy_remove_day"].isna(), ["policy_name", "decision_row_id"]].head(10)
-        raise ValueError(f"Policy panel has missing policy_remove_day values. Examples:\n{examples}")
-    pec.validate_resolved_target_policy_timeline(
-        df,
-        episode_id_col=EPISODE_ID_COL,
-        context=str(path),
-    )
-    return df
-
-
 def load_nuisance_predictions(path):
     # Load and validate the nuisance predictions
     df = pd.read_csv(path, low_memory=False)
@@ -237,61 +205,37 @@ def join_nuisance_predictions(policy_df, nuisance_df):
 # Policy timeline and nuisance prediction selection
 
 
-def assign_mu_from_source(df, target_col, source_col, mask):
-    # Copy selected prediction values into mean columns
-    df.loc[mask, target_col] = pd.to_numeric(df.loc[mask, source_col], errors="coerce")
-    rescored_col = f"__rescored_{source_col}"
-    df.loc[mask & df[rescored_col], "__used_rescored_prediction"] = True
-
-
 def select_policy_predictions(df):
     # Select predictions implied by the target policy
     for col in MU_COLUMNS:
         df[col] = np.nan
     df["__used_rescored_prediction"] = False
 
-    keep_rows = df["policy_catheter_state"].eq("in") & df[
-        "policy_action_remove_resolved"
-    ].eq(0)
-    remove_rows = df["policy_catheter_state"].eq("in") & df[
-        "policy_action_remove_resolved"
-    ].eq(1)
+    keep_rows = df["policy_catheter_state"].eq("in") & df["policy_action"].eq("keep")
+    remove_rows = df["policy_catheter_state"].eq("in") & df["policy_action"].eq("remove")
     out_rows = df["policy_catheter_state"].eq("out")
     out_cauti_rows = out_rows & pd.to_numeric(df["policy_periods_out"], errors="coerce").le(
         POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
     )
 
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_cauti_under_policy", "p_cauti_if_keep", keep_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_death_under_policy", "p_death_if_keep", keep_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_icu_exit_alive_under_policy", "p_icu_exit_alive_if_keep", keep_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_no_event_under_policy", "p_no_event_if_keep", keep_rows)
+    assign_policy_prediction(df, "mu_cauti_under_policy", "p_cauti_if_keep", keep_rows)
+    assign_policy_prediction(df, "mu_death_under_policy", "p_death_if_keep", keep_rows)
+    assign_policy_prediction(df, "mu_icu_exit_alive_under_policy", "p_icu_exit_alive_if_keep", keep_rows)
+    assign_policy_prediction(df, "mu_no_event_under_policy", "p_no_event_if_keep", keep_rows)
     df.loc[keep_rows, "mu_recatheterisation_under_policy"] = 0.0
 
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_cauti_under_policy", "p_cauti_if_remove", remove_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_death_under_policy", "p_death_if_remove", remove_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_icu_exit_alive_under_policy", "p_icu_exit_alive_if_remove", remove_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_no_event_under_policy", "p_no_event_if_remove", remove_rows)
+    assign_policy_prediction(df, "mu_cauti_under_policy", "p_cauti_if_remove", remove_rows)
+    assign_policy_prediction(df, "mu_death_under_policy", "p_death_if_remove", remove_rows)
+    assign_policy_prediction(df, "mu_icu_exit_alive_under_policy", "p_icu_exit_alive_if_remove", remove_rows)
+    assign_policy_prediction(df, "mu_no_event_under_policy", "p_no_event_if_remove", remove_rows)
     df.loc[remove_rows, "mu_recatheterisation_under_policy"] = 0.0
 
     df.loc[out_rows, "mu_cauti_under_policy"] = 0.0
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_cauti_under_policy", "p_cauti_if_out", out_cauti_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_recatheterisation_under_policy", "p_reinsertion_if_out", out_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_death_under_policy", "p_death_if_out", out_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_icu_exit_alive_under_policy", "p_icu_exit_alive_if_out", out_rows)
-    # Copy selected prediction values into mean columns
-    assign_mu_from_source(df, "mu_no_event_under_policy", "p_no_event_if_out", out_rows)
+    assign_policy_prediction(df, "mu_cauti_under_policy", "p_cauti_if_out", out_cauti_rows)
+    assign_policy_prediction(df, "mu_recatheterisation_under_policy", "p_reinsertion_if_out", out_rows)
+    assign_policy_prediction(df, "mu_death_under_policy", "p_death_if_out", out_rows)
+    assign_policy_prediction(df, "mu_icu_exit_alive_under_policy", "p_icu_exit_alive_if_out", out_rows)
+    assign_policy_prediction(df, "mu_no_event_under_policy", "p_no_event_if_out", out_rows)
 
     missing_any = df[MU_COLUMNS].isna().any(axis=1)
     invalid_any = pd.Series(False, index=df.index)
@@ -354,8 +298,8 @@ def add_support_and_adherence(df, clip_lower, clip_upper):
             )
 
     df["policy_support"] = np.nan
-    remove_rows = applicable & df["policy_action_remove"].eq(1)
-    keep_rows = applicable & df["policy_action_remove"].eq(0)
+    remove_rows = applicable & df["policy_action"].eq("remove")
+    keep_rows = applicable & df["policy_action"].eq("keep")
     df.loc[remove_rows, "policy_support"] = df.loc[remove_rows, "p_remove_obs"]
     df.loc[keep_rows, "policy_support"] = df.loc[keep_rows, "p_keep_obs"]
     support = pd.to_numeric(df["policy_support"], errors="coerce")
@@ -364,7 +308,7 @@ def add_support_and_adherence(df, clip_lower, clip_upper):
     if invalid_support.any():
         examples = df.loc[
             invalid_support,
-            ["policy_name", "decision_row_id", "policy_action_remove", "policy_support"],
+            ["policy_name", "decision_row_id", "policy_support"],
         ].head(10)
         raise ValueError(f"Policy support must be finite and between 0 and 1. Examples:\n{examples}")
 
@@ -414,7 +358,7 @@ def build_policy_episode_scores(df):
     df["_catheter_in_row_int"] = df["catheter_state"].astype("string").str.lower().eq("in").astype(int)
     df["_policy_catheter_in_row_int"] = df["policy_catheter_state"].eq("in").astype(int)
     df["_policy_remove_row_int"] = df[
-        "policy_action_resolved"
+        "policy_action"
     ].eq("remove").astype(int)
     df["_observed_catheter_exposure_days"] = df["_catheter_in_row_int"] * pd.to_numeric(
         df["period_duration_days"],
@@ -424,7 +368,7 @@ def build_policy_episode_scores(df):
         df["period_duration_days"],
         errors="coerce",
     )
-    day = pd.to_numeric(df["episode_day_since_insertion"], errors="coerce")
+    day = pd.to_numeric(df["episode_day"], errors="coerce")
     remove_day = pd.to_numeric(df["policy_remove_day"], errors="coerce")
     death_period = pd.to_numeric(
         df["death_in_period"],
@@ -444,7 +388,7 @@ def build_policy_episode_scores(df):
     df["_failed_to_remove_on_policy_day"] = (
         day.eq(remove_day)
         & df["policy_applicable"].astype(bool)
-        & pd.to_numeric(df["policy_action_remove"], errors="coerce").eq(1)
+        & df["policy_action"].eq("remove")
         & df["policy_matches_observed_action_today"].eq(0)
     ).astype(int)
 
@@ -460,23 +404,21 @@ def build_policy_episode_scores(df):
             "policy_removal_day_extra_row_treated_as_out",
             "sum",
         ),
-        plugin_expected_catheter_in_intervals=("_policy_catheter_in_row_int", "sum"),
+        plugin_expected_catheter_in_interval_rows=("_policy_catheter_in_row_int", "sum"),
         plugin_expected_catheter_exposure_days=("_policy_catheter_exposure_days", "sum"),
-        observed_catheter_in_intervals=("_catheter_in_row_int", "sum"),
+        observed_catheter_in_interval_rows=("_catheter_in_row_int", "sum"),
         observed_catheter_exposure_days=("_observed_catheter_exposure_days", "sum"),
-        max_episode_day_since_insertion=("episode_day_since_insertion", "max"),
+        max_episode_day=("episode_day", "max"),
         episode_has_terminal_event=("_terminal_period", "max"),
         episode_observed_removed_before_policy_day=("_observed_removed_before_policy_day", "max"),
         episode_failed_to_remove_on_policy_day=("_failed_to_remove_on_policy_day", "max"),
         prediction_complete=("prediction_status", lambda s: bool(s.eq("complete").all())),
         n_missing_prediction_rows=("prediction_status", lambda s: int(s.ne("complete").sum())),
     )
-    episode_df["plugin_expected_catheter_in_interval_rows"] = episode_df["plugin_expected_catheter_in_intervals"]
-    episode_df["observed_catheter_in_interval_rows"] = episode_df["observed_catheter_in_intervals"]
     episode_df["episode_has_more_than_one_policy_remove_row"] = (
         episode_df["n_policy_remove_rows"].gt(1)
     ).astype(int)
-    max_day = pd.to_numeric(episode_df["max_episode_day_since_insertion"], errors="coerce")
+    max_day = pd.to_numeric(episode_df["max_episode_day"], errors="coerce")
     remove_day_episode = pd.to_numeric(episode_df["policy_remove_day"], errors="coerce")
     before_policy_day = max_day.lt(remove_day_episode)
     episode_df["episode_terminal_before_policy_removal"] = (
@@ -620,31 +562,22 @@ def build_current_practice_rows(nuisance_df, policy_df):
     df = map_episode_ids_to_nuisance_predictions(nuisance_df, policy_df)
     df = pec.add_period_duration_days(df, context="current-practice AIPW rows")
     # Add episode day since catheter insertion
-    df = add_episode_day_since_insertion(df)
+    df = add_episode_day(df)
     df["policy_name"] = CURRENT_PRACTICE_LABEL
     df[POLICY_TYPE_COL] = "observed"
     df["policy_remove_day"] = pd.NA
     df["policy_catheter_state"] = df["catheter_state"].astype("string").str.lower()
-    df["policy_action_resolved"] = "out"
+    df["policy_action"] = "out"
     df.loc[
         df["policy_catheter_state"].eq("in")
         & pd.to_numeric(df["removed_in_period"], errors="coerce").eq(0),
-        "policy_action_resolved",
+        "policy_action",
     ] = "keep"
     df.loc[
         df["policy_catheter_state"].eq("in")
         & pd.to_numeric(df["removed_in_period"], errors="coerce").eq(1),
-        "policy_action_resolved",
+        "policy_action",
     ] = "remove"
-    df["policy_action_remove_resolved"] = np.nan
-    df.loc[
-        df["policy_action_resolved"].eq("keep"),
-        "policy_action_remove_resolved",
-    ] = 0.0
-    df.loc[
-        df["policy_action_resolved"].eq("remove"),
-        "policy_action_remove_resolved",
-    ] = 1.0
     df["policy_periods_in"] = np.where(df["policy_catheter_state"].eq("in"), df["periods_in_state"], np.nan)
     df["policy_periods_out"] = np.where(df["policy_catheter_state"].eq("out"), df["periods_in_state"], np.nan)
     df["policy_applicable"] = False
@@ -677,15 +610,13 @@ def build_current_practice_episode_scores(current_rows):
     )
     group_cols = ["policy_name", POLICY_TYPE_COL, "policy_remove_day", EPISODE_ID_COL]
     episode_df = df.groupby(group_cols, as_index=False, dropna=False, sort=False).agg(
-        plugin_expected_catheter_in_intervals=("_policy_catheter_in_row_int", "sum"),
+        plugin_expected_catheter_in_interval_rows=("_policy_catheter_in_row_int", "sum"),
         plugin_expected_catheter_exposure_days=("_policy_catheter_exposure_days", "sum"),
-        observed_catheter_in_intervals=("_catheter_in_row_int", "sum"),
+        observed_catheter_in_interval_rows=("_catheter_in_row_int", "sum"),
         observed_catheter_exposure_days=("_observed_catheter_exposure_days", "sum"),
         prediction_complete=("prediction_status", lambda s: bool(s.eq("complete").all())),
         n_missing_prediction_rows=("prediction_status", lambda s: int(s.ne("complete").sum())),
     )
-    episode_df["plugin_expected_catheter_in_interval_rows"] = episode_df["plugin_expected_catheter_in_intervals"]
-    episode_df["observed_catheter_in_interval_rows"] = episode_df["observed_catheter_in_intervals"]
     for col in EPISODE_FIRST_COLS:
         values = df.groupby(
             group_cols,
@@ -775,9 +706,9 @@ def policy_summary_row(
             errors="coerce",
         ).fillna(0).sum()
     )
-    if fixed_day_policy and "max_episode_day_since_insertion" in policy_df.columns:
+    if fixed_day_policy and "max_episode_day" in policy_df.columns:
         n_episodes_reaching_policy_removal_day = int(
-            pd.to_numeric(policy_df["max_episode_day_since_insertion"], errors="coerce")
+            pd.to_numeric(policy_df["max_episode_day"], errors="coerce")
             .ge(numeric_remove_day)
             .sum()
         )
@@ -1252,8 +1183,6 @@ def order_episode_columns(df):
         "residual_catheter_exposure_days",
         "weighted_residual_catheter_exposure_days",
         "aipw_ht_score_catheter_exposure_days",
-        "plugin_expected_catheter_in_intervals",
-        "observed_catheter_in_intervals",
         "plugin_expected_catheter_in_interval_rows",
         "observed_catheter_in_interval_rows",
         "prediction_complete",
@@ -1271,12 +1200,12 @@ def order_episode_columns(df):
 
 # Main
 
-def print_console_summary(summary_df, row_df, episode_df, output_paths):
+def print_console_summary(summary_df, row_df, episode_df, output_paths, policy_manifest_path, model_type):
     target_episode_df = episode_df.loc[~episode_df["policy_name"].eq(CURRENT_PRACTICE_LABEL)]
     print()
     print("--- AIPW POLICY EVALUATION COMPLETE ---")
-    print(f"Policy-intervention panel: {POLICY_PANEL_PATH}")
-    print(f"Nuisance model type: {NUISANCE_MODEL_TYPE}")
+    print(f"Policy panel index: {policy_manifest_path}")
+    print(f"Nuisance model type: {model_type}")
     print(f"Number of policies: {row_df['policy_name'].nunique():,}")
     print(f"Number of patients: {row_df['subject_id'].nunique():,}")
     print(f"Number of episodes: {row_df[EPISODE_ID_COL].nunique():,}")
@@ -1328,21 +1257,29 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
     return episode_df, row_df, current_episode_df
 
 
-def run_panel_estimation():
-    OUTDIR.mkdir(exist_ok=True, parents=True)
-    policy_df = load_policy_panel(POLICY_PANEL_PATH)
+def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, panel_name=None):
+    if bootstrap_mode not in ("fixed", "refit"):
+        raise ValueError(f"Unknown bootstrap mode: {bootstrap_mode!r}")
+    policy_manifest_path = artefact_root / "counterfactual_policies/policy_panels.csv"
+    nuisance_model_dir = artefact_root / "nuisance_models" / model_type
+    nuisance_predictions_path = nuisance_model_dir / "nuisance_predictions.csv"
+    outcome_models_path = nuisance_model_dir / "outcome_models.pkl"
+    outdir = artefact_root / "policy_eval/aipw" / bootstrap_mode
+    output_paths = {key: outdir / name for key, name in OUTPUT_FILENAMES.items()}
+    outdir.mkdir(exist_ok=True, parents=True)
+    policy_df = read_policy_collection(policy_manifest_path)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
     refit_panel = None
-    if REFIT_NUISANCE:
-        nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
-        refit_panel = nuisance.load_panel(PANEL_PATH)
+    if bootstrap_mode == "refit":
+        refit_panel = nuisance.load_panel(panel_path)
         subjects = pd.Index(sorted(refit_panel.subject_id.unique()), name="subject_id")
         nuisance_df, _ = bootstrap.refit_nuisance_predictions(
             refit_panel, subjects, np.ones(len(subjects), dtype=int), "aipw",
+            n_splits=REFIT_CROSSFIT_FOLDS, model_type=model_type,
         )
     else:
-        nuisance_df = load_nuisance_predictions(NUISANCE_PREDICTIONS_PATH)
-        nuisance_df = fill_missing_counterfactual_predictions(nuisance_df, OUTCOME_MODELS_PATH)
+        nuisance_df = load_nuisance_predictions(nuisance_predictions_path)
+        nuisance_df = fill_missing_counterfactual_predictions(nuisance_df, outcome_models_path)
     nuisance_df["subject_id"] = nuisance_df.subject_id.astype(str)
     episode_df, row_df, current_episode_df = evaluate_policy_episodes(policy_df, nuisance_df)
 
@@ -1372,55 +1309,35 @@ def run_panel_estimation():
     )
 
     # Save rounded policy-level report outputs
-    pec.save_report_df(summary_df, OUTPUT_PATHS["summary"])
+    pec.save_report_df(summary_df, output_paths["summary"])
     # Save episode-level scores at full precision for later inference
-    episode_df.to_csv(OUTPUT_PATHS["episodes"], index=False)
+    episode_df.to_csv(output_paths["episodes"], index=False)
     # Save rounded support diagnostics
-    pec.save_report_df(support_diagnostics_df, OUTPUT_PATHS["support_diagnostics"])
+    pec.save_report_df(support_diagnostics_df, output_paths["support_diagnostics"])
     # Save rounded weight diagnostics
-    pec.save_report_df(weight_diagnostics_df, OUTPUT_PATHS["weight_diagnostics"])
+    pec.save_report_df(weight_diagnostics_df, output_paths["weight_diagnostics"])
     # Save rounded residual diagnostics
-    pec.save_report_df(residual_diagnostics_df, OUTPUT_PATHS["residual_diagnostics"])
+    pec.save_report_df(residual_diagnostics_df, output_paths["residual_diagnostics"])
     # Save rounded clipping-sensitivity estimates
-    pec.save_report_df(clipping_sensitivity_df, OUTPUT_PATHS["clipping_sensitivity"])
+    pec.save_report_df(clipping_sensitivity_df, output_paths["clipping_sensitivity"])
     # Save current-practice episode scores at full precision
-    current_episode_df.to_csv(OUTPUT_PATHS["current_practice"], index=False)
-    print_console_summary(summary_df, row_df, episode_df, OUTPUT_PATHS)
+    current_episode_df.to_csv(output_paths["current_practice"], index=False)
+    print_console_summary(summary_df, row_df, episode_df, output_paths, policy_manifest_path, model_type)
 
     bootstrap.run_bootstrap(
-        "aipw", episode_df, policy_df, evaluate_policy_episodes, OUTDIR,
-        N_BOOTSTRAP, refit_panel=refit_panel,
+        "aipw", episode_df, policy_df, evaluate_policy_episodes, outdir,
+        N_BOOTSTRAP, refit_panel=refit_panel, seed=BOOTSTRAP_SEED,
+        refit_n_splits=REFIT_CROSSFIT_FOLDS, model_type=model_type,
+        panel_name=panel_name or panel_path.stem,
     )
 
 
 def main():
-    global PANEL_PATH, POLICY_PANEL_PATH, NUISANCE_MODEL_DIR, NUISANCE_PREDICTIONS_PATH
-    global OUTDIR, OUTPUT_PATHS, REFIT_NUISANCE
-    global OUTCOME_MODELS_PATH
-
-    output_filenames = {key: path.name for key, path in OUTPUT_PATHS.items()}
-    for panel_name, panel_path, nuisance_root in nuisance.PANEL_RUNS:
-        artefact_root = nuisance_root.parent
-        output_root = artefact_root / "policy_eval/aipw"
-        PANEL_PATH = panel_path
-        POLICY_PANEL_PATH = artefact_root / "policy_interventions/policy_intervention_panel_long.csv"
-        NUISANCE_MODEL_DIR = nuisance_root / NUISANCE_MODEL_TYPE
-        NUISANCE_PREDICTIONS_PATH = NUISANCE_MODEL_DIR / "nuisance_predictions.csv"
-        OUTCOME_MODELS_PATH = NUISANCE_MODEL_DIR / "outcome_models.pkl"
-        nuisance.configure_panel_run(panel_path, nuisance_root)
-        nuisance.configure_model_run(NUISANCE_MODEL_TYPE)
-        for refit in (
-            False,  # Fixed bootstrap.
-            # True,   # Refit bootstrap: comment out this line to disable.
-        ):
-            REFIT_NUISANCE = refit
-            OUTDIR = output_root / "refit_nuisance" if refit else output_root
-            OUTPUT_PATHS = {
-                key: OUTDIR / filename for key, filename in output_filenames.items()
-            }
-            mode = "refit" if refit else "fixed"
-            print(f"[PANEL] {panel_name}; estimator=aipw; nuisance={mode}", flush=True)
-            run_panel_estimation()
+    for panel_name, panel_path, nuisance_root in PANEL_RUNS:
+        for mode in BOOTSTRAP_MODES:
+            print(f"[PANEL] {panel_name}; estimator=aipw; bootstrap={mode}", flush=True)
+            run_panel_estimation(panel_path, nuisance_root.parent, NUISANCE_MODEL_TYPE, mode,
+                                 panel_name=panel_name)
 
 
 if __name__ == "__main__":

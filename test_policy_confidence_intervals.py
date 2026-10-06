@@ -1,3 +1,4 @@
+import check_policy_results as result_checks
 """Regression tests for patient-clustered policy-value inference.
 
 The fixture has unequal numbers of episodes per patient, nonuniform support
@@ -11,7 +12,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-import policy_bootstrap as ci
+import policy_bootstrap_common as ci
 import evaluate_aipw_policies as aipw
 import evaluate_gformula_policies as gformula
 import evaluate_ipw_policies as ipw
@@ -76,9 +77,8 @@ def example_episodes():
         gformula, ipw, aipw = (base.copy() for _ in range(3))
         # These interval-count columns are required by the existing summary
         # helpers even though inference uses duration in days.
-        gformula["expected_catheter_in_intervals"] = [1, 2, 3, 4]
         gformula["expected_catheter_in_interval_rows"] = [1, 2, 3, 4]
-        ipw["observed_catheter_in_intervals"] = [4, 1, 7, 8]
+        ipw["observed_catheter_in_interval_rows"] = [4, 1, 7, 8]
         ipw["episode_ipw_weight"] = weights
         aipw["residual_correction_weight"] = weights
         aipw["plugin_expected_catheter_in_interval_rows"] = [1, 2, 3, 4]
@@ -399,6 +399,49 @@ class PatientBootstrapTests(unittest.TestCase):
         self.assertFalse(np.allclose(bounds[1], incorrect))
 
 
+class PolicyResultsCheckTests(unittest.TestCase):
+    def test_missing_or_invalid_prediction_counts_fail(self):
+        for value in (np.nan, "bad", -1, 1):
+            with self.subTest(value=value):
+                results = []
+                summary = pd.DataFrame({"n_incomplete_prediction_episodes": [value]})
+                diagnostic = pd.DataFrame({"n_missing_cauti": [value]})
+                result_checks.check_no_missing_predictions(results, summary, diagnostic, summary)
+                self.assertEqual(results[0]["status"], "FAIL")
+        results = []
+        result_checks.check_no_missing_predictions(
+            results, pd.DataFrame({"n_incomplete_prediction_episodes": [0]}),
+            pd.DataFrame({"n_missing_cauti": [0]}),
+            pd.DataFrame({"n_incomplete_prediction_episodes": [0]}),
+        )
+        self.assertEqual(results[0]["status"], "PASS")
+
+    def test_missing_or_invalid_removal_counts_fail(self):
+        for value in (np.nan, "bad", -1, 1):
+            with self.subTest(value=value):
+                report = pd.DataFrame({"policy_name": ["remove_on_day_2"],
+                                       "policy_remove_day": [2],
+                                       "n_episodes_with_more_than_one_remove_row": [value]})
+                results = []
+                result_checks.check_remove_rows(results, report, report, report)
+                self.assertEqual(results[0]["status"], "FAIL")
+
+    def test_support_flags_work_without_day_one_and_can_be_false(self):
+        summary = pd.DataFrame({"policy_name": ["remove_on_day_2"], "policy_remove_day": [2],
+                                "low_adherence_flag": [False], "low_ess_flag": [False],
+                                "extreme_weight_flag": [False], "low_support_flag": [False]})
+        support = summary.assign(group="all")
+        results = []
+        result_checks.check_ipw_summary_flags_match_diagnostics(results, summary, summary, support)
+        self.assertEqual(results[0]["status"], "PASS")
+        results = []
+        changed = summary.assign(low_support_flag=True)
+        result_checks.check_ipw_summary_flags_match_diagnostics(results, changed, summary, support)
+        self.assertEqual(results[0]["status"], "FAIL")
+
+    def test_missing_boolean_diagnostic_cannot_match_false(self):
+        with self.assertRaisesRegex(ValueError, "missing or invalid"):
+            result_checks.bool_series(pd.Series([np.nan], name="low_support_flag"))
 
 
 if __name__ == "__main__":

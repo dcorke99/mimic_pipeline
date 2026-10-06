@@ -76,11 +76,10 @@ def add_fixed_day_target_policy_timeline(
     df,
     *,
     episode_id_col,
-    action_col="policy_action_resolved",
-    action_remove_col="policy_action_remove_resolved",
+    action_col="policy_action",
     policy_name_col="policy_name",
     policy_remove_day_col="policy_remove_day",
-    episode_day_col="episode_day_since_insertion",
+    episode_day_col="episode_day",
     period_start_col="period_start",
     period_end_col="period_end",
     decision_row_id_col="decision_row_id",
@@ -88,7 +87,7 @@ def add_fixed_day_target_policy_timeline(
     periods_in_col="policy_periods_in",
     periods_out_col="policy_periods_out",
 ):
-    # Add the resolved fixed-day policy timeline
+    # Add the fixed-day policy timeline
     out = df.copy()
     out = out.sort_values(
         [
@@ -125,10 +124,6 @@ def add_fixed_day_target_policy_timeline(
     out.loc[before_remove, action_col] = "keep"
     out.loc[first_row_on_remove_day, action_col] = "remove"
 
-    out[action_remove_col] = np.nan
-    out.loc[before_remove, action_remove_col] = 0.0
-    out.loc[first_row_on_remove_day, action_remove_col] = 1.0
-
     out[periods_in_col] = np.nan
     out.loc[before_remove | first_row_on_remove_day, periods_in_col] = day.loc[
         before_remove | first_row_on_remove_day
@@ -141,22 +136,21 @@ def add_fixed_day_target_policy_timeline(
     return out
 
 
-def resolved_timeline_diagnostics(
+def policy_timeline_checks(
     df,
     *,
     episode_id_col="catheter_episode_id",
     policy_name_col="policy_name",
     policy_remove_day_col="policy_remove_day",
-    episode_day_col="episode_day_since_insertion",
+    episode_day_col="episode_day",
 ):
-    # Summarise resolved timeline diagnostics
+    # Summarise policy timeline checks
     rows = []
     for policy_name, policy_df in df.groupby(policy_name_col, dropna=False, sort=False):
-        remove_day = pd.to_numeric(policy_df[policy_remove_day_col], errors="coerce").dropna()
+        remove_day = pd.to_numeric(policy_df.get(policy_remove_day_col, pd.Series(dtype=float)), errors="coerce").dropna()
         numeric_remove_day = float(remove_day.iloc[0]) if len(remove_day) else np.nan
-        action = policy_df["policy_action_resolved"].astype("string").str.strip().str.lower()
-        action_remove = pd.to_numeric(policy_df["policy_action_remove_resolved"], errors="coerce")
-        remove_rows = action.eq("remove") | action_remove.eq(1)
+        action = policy_df["policy_action"].astype("string").str.strip().str.lower()
+        remove_rows = action.eq("remove")
         remove_rows_by_episode = remove_rows.groupby(policy_df[episode_id_col], sort=False).sum()
 
         if pd.notna(numeric_remove_day):
@@ -186,59 +180,58 @@ def resolved_timeline_diagnostics(
                     .fillna(0)
                     .sum()
                 ),
-                "n_policy_remove_row_shortfall_vs_reached_episodes": int(n_reached - n_remove_rows),
+                "n_policy_remove_row_shortfall_vs_reached_episodes": int(n_reached - n_remove_rows) if pd.notna(numeric_remove_day) else 0,
             }
         )
     return pd.DataFrame(rows)
 
 
-def validate_resolved_target_policy_timeline(
+def check_policy_timeline(
     df,
     *,
     episode_id_col="catheter_episode_id",
-    context="policy_intervention_panel_long.csv",
+    context="policy panel",
 ):
-    # Validate the resolved policy timeline
+    # Validate the policy timeline
     state = df["policy_catheter_state"].astype("string").str.strip().str.lower()
-    action = df["policy_action_resolved"].astype("string").str.strip().str.lower()
-    action_remove = pd.to_numeric(df["policy_action_remove_resolved"], errors="coerce")
+    action = df["policy_action"].astype("string").str.strip().str.lower()
 
     invalid_state = ~state.isin(["in", "out"])
     if invalid_state.any():
         examples = df.loc[invalid_state, ["policy_name", episode_id_col, "policy_catheter_state"]].head(10)
         raise ValueError(
             f"{context} has invalid policy_catheter_state values. "
-            f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
+            f"Rebuild with build_policy_panels.py. Examples:\n{examples}"
         )
 
     invalid_action = ~action.isin(["keep", "remove", "out"])
     if invalid_action.any():
-        examples = df.loc[invalid_action, ["policy_name", episode_id_col, "policy_action_resolved"]].head(10)
+        examples = df.loc[invalid_action, ["policy_name", episode_id_col, "policy_action"]].head(10)
         raise ValueError(
-            f"{context} has invalid policy_action_resolved values. "
-            f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
+            f"{context} has invalid policy_action values. "
+            f"Rebuild with build_policy_panels.py. Examples:\n{examples}"
         )
 
-    out_remove = state.eq("out") & (action.eq("remove") | action_remove.eq(1))
+    out_remove = state.eq("out") & action.eq("remove")
     if out_remove.any():
         examples = df.loc[
             out_remove,
-            ["policy_name", episode_id_col, "policy_catheter_state", "policy_action_resolved"],
+            ["policy_name", episode_id_col, "policy_catheter_state", "policy_action"],
         ].head(10)
         raise ValueError(
-            f"{context} assigns a resolved remove action on OUT-state rows. "
-            f"Rebuild with build_policy_intervention_panels.py. Examples:\n{examples}"
+            f"{context} assigns a remove action on OUT-state rows. "
+            f"Rebuild with build_policy_panels.py. Examples:\n{examples}"
         )
 
-    # Summarise resolved timeline diagnostics
-    diagnostics = resolved_timeline_diagnostics(df, episode_id_col=episode_id_col)
+    # Summarise policy timeline checks
+    diagnostics = policy_timeline_checks(df, episode_id_col=episode_id_col)
     too_many = diagnostics["n_episodes_with_more_than_one_remove_row"].gt(0)
     shortfall = diagnostics["n_policy_remove_row_shortfall_vs_reached_episodes"].ne(0)
     if too_many.any() or shortfall.any():
         failing = diagnostics.loc[too_many | shortfall].head(20)
         raise ValueError(
-            f"{context} has unsafe fixed-day resolved target-policy timing. "
-            "Rebuild it with build_policy_intervention_panels.py. Diagnostics:\n"
+            f"{context} has unsafe fixed-day policy timing. "
+            "Rebuild it with build_policy_panels.py. Diagnostics:\n"
             f"{failing}"
         )
 
@@ -246,7 +239,7 @@ def validate_resolved_target_policy_timeline(
 def duplicate_episode_day_count(
     df,
     group_cols,
-    day_col="episode_day_since_insertion",
+    day_col="episode_day",
 ):
     # Count duplicate episode-day rows
     duplicated = df.duplicated([*group_cols, day_col], keep=False)
@@ -355,14 +348,14 @@ PREDICTION_COLUMNS = [
 ]
 
 
-def add_episode_day_since_insertion(df):
+def add_episode_day(df):
     # Add episode day since catheter insertion
     df = df.copy()
     inserted = pd.to_datetime(df["inserted"], errors="coerce")
     period_start = pd.to_datetime(df["period_start"], errors="coerce")
     elapsed_days = (period_start - inserted).dt.total_seconds() / 86400.0
-    df["episode_day_since_insertion"] = np.floor(elapsed_days).astype(int) + 1
-    df.loc[df["episode_day_since_insertion"].lt(1), "episode_day_since_insertion"] = 1
+    df["episode_day"] = np.floor(elapsed_days).astype(int) + 1
+    df.loc[df["episode_day"].lt(1), "episode_day"] = 1
     return df
 
 
@@ -464,3 +457,31 @@ def fill_missing_counterfactual_predictions(
         )
 
     return df
+
+
+def effective_sample_size(weights):
+    # Calculate the effective sample size
+    # Return positive finite weights
+    weights = pd.to_numeric(weights, errors="coerce")
+    weights = weights[np.isfinite(weights) & weights.gt(0)]
+    if weights.empty:
+        return np.nan
+    sum_weights = float(weights.sum())
+    sum_squared_weights = float(np.square(weights).sum())
+    return float((sum_weights ** 2) / sum_squared_weights) if sum_squared_weights > 0 else np.nan
+
+
+def assign_policy_prediction(df, target_col, source_col, mask):
+    # Copy selected prediction values into mean columns
+    df.loc[mask, target_col] = pd.to_numeric(df.loc[mask, source_col], errors="coerce")
+    rescored_col = f"__rescored_{source_col}"
+    df.loc[mask & df[rescored_col], "__used_rescored_prediction"] = True
+
+
+def cumulative_event_probability(probabilities):
+    # Calculate cumulative event probability
+    probs = pd.to_numeric(probabilities, errors="coerce").dropna()
+    if probs.empty:
+        return np.nan
+    probs = probs.clip(0.0, 1.0)
+    return float(1.0 - np.prod(1.0 - probs.to_numpy(dtype=float)))

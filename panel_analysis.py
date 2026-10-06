@@ -1,6 +1,8 @@
-# Build descriptive summaries for the catheter modelling panel
+"""Describe the current modelling panel and saved nuisance-model features."""
+
 from pathlib import Path
 import re
+import joblib
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -8,19 +10,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from policy_eval_common import add_episode_day
+
 # Config
 REPO_ROOT = Path(__file__).resolve().parent
 DATA_FILE = REPO_ROOT / "data" / "modelling_panel.csv"
 RESULTS_DIR = REPO_ROOT / "artefacts" / "panel_analysis"
 COVARIATE_DICT_FILE = REPO_ROOT / "data" / "covariate_dictionary.csv"
 
-STEP1_DIR = REPO_ROOT / "artefacts" / "step1"
-STEP1_TOP_MODEL_FEATURES_FILE = STEP1_DIR / "top_model_features.csv"
-STEP1_TOP_SHAP_FEATURES_FILE = STEP1_DIR / "top_shap_features.csv"
+NUISANCE_MODEL_TYPE = "xgboost"
+NUISANCE_DIR = REPO_ROOT / "artefacts" / "nuisance_models" / NUISANCE_MODEL_TYPE
+OUTCOME_FEATURES_FILE = NUISANCE_DIR / "outcome_top_model_features.csv"
+PROPENSITY_MODEL_FILE = NUISANCE_DIR / "propensity_model.pkl"
 
 DP = 3
 KEEP_STATS = {"mean"}
-LATE_REMOVAL_DAY_THRESHOLD = 7
+LATE_REMOVAL_PERIOD_THRESHOLD = 7
 AGE_THRESHOLD = 60
 TOP_N_COVARIATES = 20
 
@@ -76,10 +81,28 @@ def coerce_numeric(df, cols):
             })
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-# Load a Step 1 top-features table saved by 01_step1_transition_models.py
-def load_step1_top_features(path):
-    # Load step1 top features
-    df = pd.read_csv(path)
+def load_nuisance_top_features():
+    # Outcome rankings are exported; propensity rankings come from saved folds.
+    df = pd.read_csv(OUTCOME_FEATURES_FILE)
+    saved = joblib.load(PROPENSITY_MODEL_FILE)
+    fold_importances = []
+    for fold in saved["remove_fold_models"]:
+        if fold["fallback"] or fold["model"] is None:
+            continue
+        estimator = fold["model"].named_steps[NUISANCE_MODEL_TYPE]
+        if hasattr(estimator, "feature_importances_"):
+            values = estimator.feature_importances_
+        elif hasattr(estimator, "coef_"):
+            values = np.abs(estimator.coef_[0])
+        else:
+            continue
+        fold_importances.append(pd.Series(values, index=fold["retained_feature_cols"]))
+    if fold_importances:
+        importance = pd.concat(fold_importances, axis=1).mean(axis=1).sort_values(ascending=False).head(TOP_N_COVARIATES)
+        propensity = pd.DataFrame({"model": "removal", "feature": importance.index,
+                                   "rank": np.arange(1, len(importance) + 1)})
+        df = pd.concat([propensity, df], ignore_index=True)
+    df = df.loc[df["feature"].notna()].copy()
 
     out = df.copy()
     out["model"] = out["model"].astype(str).str.strip().str.lower()
@@ -90,10 +113,9 @@ def load_step1_top_features(path):
     return out
 
 
-# Return the ordered feature names for one model from a Step 1 feature table
-def get_step1_feature_names(step1_features, model_name):
-    # Get step1 feature names
-    tmp = step1_features[step1_features["model"] == model_name].copy()
+# Return ordered feature names for one current nuisance model
+def get_nuisance_feature_names(features, model_name):
+    tmp = features[features["model"] == model_name].copy()
 
     tmp = tmp.sort_values(["rank", "feature"])
 
@@ -111,6 +133,8 @@ def get_step1_feature_names(step1_features, model_name):
 # Calculate Cliff's delta for two groups as a simple effect-size summary
 def cliffs_delta(x1, x0):
     # Calculate Cliff's delta
+    if not x1.size or not x0.size:
+        return np.nan
     xy = np.concatenate([x1, x0])
     ranks = stats.rankdata(xy)
     rx = ranks[: x1.size].sum()
@@ -149,22 +173,11 @@ def build_risk_sets(df):
             [out[key] for key in EPISODE_KEYS], dropna=False
         ).cumsum()
     )
-    out["cauti_risk_row"] = (
-        (out[STATE_COL] == "in") |
-        ((out[STATE_COL] == "out") & (out[PERIODS_COL] <= POST_REMOVE_RISK_PERIODS))
-    ).astype(int)
+    out["cauti_risk_row"] = out["at_risk_cauti"].astype(int)
     out["reinsertion_fit_row"] = (
-        (out[STATE_COL] == "out") &
-        ~(
-            (out[LAST_PERIOD_COL] == 1) &
-            (out[END_REASON_COL].isin(["death", "icu_exit_alive"])) &
-            (out[Y_REINS] == 0)
-        )
+        out[STATE_COL].eq("out") & out["at_risk_reinsertion"].eq(1)
     ).astype(int)
-    out["removal_fit_row"] = (
-        (out[DECISION_ROW_COL] == 1) &
-        (out["prior_cauti_count"] == 0)
-    ).astype(int)
+    out["removal_fit_row"] = out[DECISION_ROW_COL].astype(int)
     return out
 
 
@@ -187,10 +200,12 @@ def build_overview_tables(df):
         .agg(
             rows=(STATE_COL, "size"),
             unique_subject_id=(ID_COL, "nunique"),
-            unique_episodes=("stay_id", "nunique"),
         )
         .reset_index()
     )
+
+    episode_counts = df.drop_duplicates([STATE_COL, *EPISODE_KEYS]).groupby(STATE_COL, dropna=False).size()
+    state_overview["unique_episodes"] = state_overview[STATE_COL].map(episode_counts)
 
     # Summarise event counts on the relevant row subsets
     event_rows = []
@@ -198,7 +213,7 @@ def build_overview_tables(df):
         "removal_in_period_on_decision_rows": df[DECISION_ROW_COL] == 1,
         "late_removal_in_period_on_decision_rows": (
             (df[DECISION_ROW_COL] == 1) &
-            (df[DECISION_PERIOD_COL] >= LATE_REMOVAL_DAY_THRESHOLD)
+            (df[DECISION_PERIOD_COL] >= LATE_REMOVAL_PERIOD_THRESHOLD)
         ),
         "cauti_in_period_on_cauti_risk_rows": df["cauti_risk_row"] == 1,
         "reinsertion_in_period_on_out_fit_rows": df["reinsertion_fit_row"] == 1,
@@ -232,9 +247,9 @@ def build_overview_tables(df):
         {"metric": "cauti_risk_rows", "value": int(df["cauti_risk_row"].sum())},
         {"metric": "removal_fit_rows", "value": int(df["removal_fit_row"].sum())},
         {"metric": "reinsertion_fit_rows", "value": int(df["reinsertion_fit_row"].sum())},
-        {"metric": "excluded_post_cauti_rows", "value": int((df["prior_cauti_count"] > 0).sum())},
+        {"metric": "post_cauti_rows_excluded_from_cauti_risk", "value": int(((df["prior_cauti_count"] > 0) & df["cauti_risk_row"].eq(0)).sum())},
         {
-            "metric": "excluded_terminal_out_rows",
+            "metric": "out_rows_excluded_from_reinsertion_risk",
             "value": int(((df[STATE_COL] == "out") & (df["reinsertion_fit_row"] == 0)).sum()),
         },
     ])
@@ -264,13 +279,16 @@ def build_episode_level_table(
     episode_subject = d.groupby(EPISODE_KEYS, dropna=False)[ID_COL].first().rename(ID_COL)
     episode_hadm = d.groupby(EPISODE_KEYS, dropna=False)["hadm_id"].first().rename("hadm_id")
 
-    catheter_days = (
+    catheter_in_periods = (
         in_rows.groupby(EPISODE_KEYS, dropna=False)[PERIODS_COL]
         .max()
-        .rename("catheter_days")
+        .rename("catheter_in_periods")
     )
+    catheter_days = (
+        in_rows.groupby(EPISODE_KEYS, dropna=False)[INTERVAL_COL].sum() / 24.0
+    ).rename("catheter_days")
 
-    late_removal_episode = (catheter_days >= LATE_REMOVAL_DAY_THRESHOLD).astype("int8").rename("late_removal_episode")
+    late_removal_episode = (catheter_in_periods >= LATE_REMOVAL_PERIOD_THRESHOLD).astype("int8").rename("late_removal_episode")
 
     cauti_episode = (
         d.groupby(EPISODE_KEYS, dropna=False)[Y_CAUTI]
@@ -321,6 +339,7 @@ def build_episode_level_table(
             episode_hadm,
             episode_age,
             catheter_days,
+            catheter_in_periods,
             late_removal_episode,
             cauti_episode,
             reinsertion_episode,
@@ -334,11 +353,13 @@ def build_episode_level_table(
 
     if include_age_split:
         age = pd.to_numeric(out["age"], errors="coerce")
-        out["age_ge_episode_median"] = age.ge(age.median()).astype("int8")
+        out["age_episode_median"] = float(age.median())
+        out["age_ge_episode_median"] = age.ge(age.median()).astype(float).where(age.notna())
 
     numeric_cols = [
         "age",
         "catheter_days",
+        "catheter_in_periods",
         "late_removal_episode",
         "cauti_episode",
         "reinsertion_episode",
@@ -427,7 +448,11 @@ def binary_group_test(
     odds_ratio = float(odds_ratio)
     fisher_p = float(fisher_p)
 
-    chi2_p = float(stats.chi2_contingency(table.values, correction=False)[1])
+    chi2_p = (
+        float(stats.chi2_contingency(table.values, correction=False)[1])
+        if table.sum(axis=0).gt(0).all() and table.sum(axis=1).gt(0).all()
+        else np.nan
+    )
 
     return {
         "test_name": test_name,
@@ -495,7 +520,7 @@ def resolve_feature_cols(
     feature_lookup,
     available_cols,
 ):
-    # Map saved Step 1 names back to panel columns
+    # Map labelled names back to panel columns
     # Resolve feature columns
     cols = []
     seen = set()
@@ -577,14 +602,114 @@ def plot_event_rates(cauti_period, reinsertion_period, outdir):
     plt.close(fig)
 
 
+def build_duplicate_interval_reports(df):
+    """Distinguish multiple intervals within a day from identical interval rows."""
+    df = df.copy()
+    # Assign one stable number to each catheter episode
+    episode_key_cols = ["subject_id", "hadm_id", "stay_id", "inserted", "removed"]
+    df["catheter_episode_id"] = pd.factorize(
+        df[episode_key_cols].astype(str).agg("|".join, axis=1),
+        sort=True,
+    )[0] + 1
+
+    # Add episode day since catheter insertion
+    df = add_episode_day(df)
+
+    # Count rows within each episode-day
+    day_key = ["catheter_episode_id", "episode_day"]
+
+    counts = (
+        df.groupby(day_key, dropna=False)
+        .size()
+        .reset_index(name="n_rows_for_episode_day")
+        .sort_values("n_rows_for_episode_day", ascending=False)
+    )
+
+    # Retain episode-days with multiple rows
+    duplicate_days = counts[counts["n_rows_for_episode_day"] > 1].copy()
+
+    # Recover the full rows behind those counts
+    duplicate_rows = df.merge(
+        duplicate_days[day_key],
+        on=day_key,
+        how="inner",
+    ).sort_values(
+        ["catheter_episode_id", "episode_day", "period_start", "period_end"]
+    )
+
+    # Define exact duplicate interval fields
+    exact_key = [
+        "catheter_episode_id",
+        "episode_day",
+        "period_start",
+        "period_end",
+        "catheter_state",
+        "observed_action",
+        "removed_in_period",
+        "periods_in_state",
+    ]
+
+    # Count identical interval rows
+    exact_counts = (
+        df.groupby(exact_key, dropna=False)
+        .size()
+        .reset_index(name="n_exact_duplicate_rows")
+        .sort_values("n_exact_duplicate_rows", ascending=False)
+    )
+
+    # Retain groups with exact duplicates
+    exact_duplicates = exact_counts[exact_counts["n_exact_duplicate_rows"] > 1].copy()
+
+    # Recover the full exact duplicate rows
+    exact_duplicate_rows = df.merge(
+        exact_duplicates[exact_key],
+        on=exact_key,
+        how="inner",
+    ).sort_values(exact_key)
+
+    # Summarise the time range of each duplicate episode-day
+    if not duplicate_rows.empty:
+        interval_summary = (
+            duplicate_rows.groupby(day_key, dropna=False)
+            .agg(
+                subject_id=("subject_id", "first"),
+                hadm_id=("hadm_id", "first"),
+                stay_id=("stay_id", "first"),
+                inserted=("inserted", "first"),
+                first_period_start=("period_start", "min"),
+                last_period_end=("period_end", "max"),
+                n_unique_period_starts=("period_start", "nunique"),
+                n_unique_period_ends=("period_end", "nunique"),
+            )
+            .reset_index()
+            .merge(duplicate_days, on=day_key, how="left")
+            .sort_values("n_rows_for_episode_day", ascending=False)
+        )
+    else:
+        interval_summary = duplicate_days
+
+    return {
+        "11_episode_day_row_counts.csv": counts,
+        "12_multiple_interval_episode_days.csv": duplicate_days,
+        "13_multiple_interval_episode_day_rows.csv": duplicate_rows,
+        "14_exact_duplicate_interval_summary.csv": exact_duplicates,
+        "15_exact_duplicate_interval_rows.csv": exact_duplicate_rows,
+        "16_multiple_interval_episode_day_trace.csv": interval_summary,
+    }
+
+
 # Run the merged panel diagnostics and supervisor-facing descriptive/inferential analysis
-def main(include_age_split=False):
+def main(include_age_split=True):
     RESULTS_DIR.mkdir(exist_ok=True, parents=True)
 
     # Load and standardise the panel
     df = pd.read_csv(DATA_FILE, low_memory=False)
     df.columns = df.columns.str.strip()
     df = df.copy()
+    # Use the same source panel for the interval audit and descriptive analysis.
+    interval_reports = build_duplicate_interval_reports(df)
+    for filename, report in interval_reports.items():
+        save_csv(report, RESULTS_DIR / filename, round_dp=DP)
     df[ID_COL] = df[ID_COL].astype(str).str.strip()
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
     df[END_REASON_COL] = (
@@ -594,14 +719,30 @@ def main(include_age_split=False):
     # Detect the itemid covariates used in the analysis and load their saved labels
     cov_cols, _ = detect_covariate_cols(df.columns.tolist(), KEEP_STATS)
     cov_meta = pd.read_csv(COVARIATE_DICT_FILE)
-    cov_meta["description"] = cov_meta["label"].astype(str) + " [mean]"
-    feature_lookup = dict(zip(cov_meta["description"], cov_meta["col"]))
-    feature_lookup.update({f"{desc} [missing]": f"{col}__missing" for col, desc in zip(cov_meta["col"], cov_meta["description"])})
+    labels = dict(zip(cov_meta["itemid"].astype(int), cov_meta["label"]))
+    feature_lookup = {}
+    feature_descriptions = {}
+    for col in df.columns:
+        match = re.fullmatch(r"itemid_(\d+)__(.+)", col)
+        if match:
+            itemid, statistic = int(match.group(1)), match.group(2)
+            description = f"{labels.get(itemid, str(itemid))} [{statistic}]"
+            feature_lookup[description] = col
+            feature_descriptions[col] = description
+    # These fields are derived from the current panel instead of old exports.
+    df["period_start"] = pd.to_datetime(df["period_start"], errors="raise")
+    df["period_end"] = pd.to_datetime(df["period_end"], errors="raise")
+    df[INTERVAL_COL] = (df["period_end"] - df["period_start"]).dt.total_seconds() / 3600
+    if df[INTERVAL_COL].isna().any() or df[INTERVAL_COL].le(0).any():
+        raise ValueError("Every panel interval must have a positive duration")
+    df[DECISION_ROW_COL] = (df[STATE_COL].eq("in") & df["observed_action"].isin(["keep", "remove"])).astype(int)
+    df[LAST_PERIOD_COL] = df[TIME_COL].eq(df.groupby(EPISODE_KEYS)[TIME_COL].transform("max")).astype(int)
 
     # Coerce the core numeric inputs
     numeric_cols = [
         TIME_COL, PERIODS_COL, INTERVAL_COL, ACTION_COL, DECISION_ROW_COL, Y_CAUTI, Y_REINS,
         LAST_PERIOD_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
+        "at_risk_cauti", "at_risk_reinsertion",
     ] + cov_cols
     coerce_numeric(df, numeric_cols)
 
@@ -627,13 +768,10 @@ def main(include_age_split=False):
     df = build_risk_sets(df)
     df[LATE_REMOVAL_COL] = (
         (df[ACTION_COL] == 1) &
-        (df[DECISION_PERIOD_COL] >= LATE_REMOVAL_DAY_THRESHOLD)
+        (df[DECISION_PERIOD_COL] >= LATE_REMOVAL_PERIOD_THRESHOLD)
     ).astype("int8")
 
-    # Load the Step 1 feature lists used later
-    step1_top_model_features = load_step1_top_features(STEP1_TOP_MODEL_FEATURES_FILE)
-    # Load step1 top features
-    step1_top_shap_features = load_step1_top_features(STEP1_TOP_SHAP_FEATURES_FILE)
+    nuisance_features = load_nuisance_top_features()
 
     removal_feature = feature_lookup.get(REMOVAL_FEATURE, REMOVAL_FEATURE)
     cauti_binary_feature = feature_lookup.get(CAUTI_BINARY_FEATURE, CAUTI_BINARY_FEATURE)
@@ -679,34 +817,32 @@ def main(include_age_split=False):
     cauti_rows = analysis_sets["cauti_risk_rows"]
     out_fit_rows = analysis_sets["reinsertion_fit_rows"]
 
-    # Describe the Step 1 features highlighted by the models
-    model_describe_configs = [
-        ("removal", "decision_rows"),
-        ("cauti", "cauti_risk_rows"),
-        ("reinsertion", "reinsertion_fit_rows"),
-    ]
-    available_cols = set(df.columns)
-    save_csv(
-        pd.concat(
-            [
-                describe_selected_covariates(
-                    analysis_sets[analysis_set_name],
-                    resolve_feature_cols(get_step1_feature_names(step1_features, model_name), feature_lookup, available_cols),
-                    analysis_set_name,
-                    model_name,
-                    feature_source,
-                    DP,
-                )
-                for feature_source, step1_features in [
-                    ("model", step1_top_model_features),
-                    ("shap", step1_top_shap_features),
-                ]
-                for model_name, analysis_set_name in model_describe_configs
-            ],
-            ignore_index=True,
-        ),
-        RESULTS_DIR / "07_xgb_influential_covariate_descriptives.csv",
-    )
+    # Describe every current outcome model on its corresponding training risk set.
+    analysis_sets["in_cauti_risk_rows"] = df.loc[df[STATE_COL].eq("in") & df["cauti_risk_row"].eq(1)]
+    analysis_sets["out_cauti_risk_rows"] = df.loc[df[STATE_COL].eq("out") & df["cauti_risk_row"].eq(1)]
+    tables = []
+    for model_name in nuisance_features["model"].drop_duplicates():
+        if model_name == "removal":
+            analysis_set = "decision_rows"
+        elif model_name == "in_cauti":
+            analysis_set = "in_cauti_risk_rows"
+        elif model_name == "out_cauti":
+            analysis_set = "out_cauti_risk_rows"
+        elif model_name == "out_reinsertion":
+            analysis_set = "reinsertion_fit_rows"
+        else:
+            analysis_set = "in_rows" if model_name.startswith("in_") else "out_rows"
+        table = describe_selected_covariates(
+            analysis_sets[analysis_set],
+            resolve_feature_cols(get_nuisance_feature_names(nuisance_features, model_name),
+                                 feature_lookup, set(df.columns)),
+            analysis_set, model_name, "native_model_importance", DP,
+        )
+        tables.append(table)
+    influential = pd.concat(tables, ignore_index=True)
+    influential["learner"] = NUISANCE_MODEL_TYPE
+    influential["description"] = influential["col"].map(feature_descriptions).fillna(influential["col"])
+    save_csv(influential, RESULTS_DIR / "07_nuisance_influential_covariate_descriptives.csv")
 
     # Build and save the episode-level table
     episode_df = build_episode_level_table(
@@ -728,7 +864,7 @@ def main(include_age_split=False):
                 {
                     "value_col": removal_feature,
                     "group_col": "late_removal_episode",
-                    "test_name": f"{REMOVAL_FEATURE} by late removal episode (catheter days >= {LATE_REMOVAL_DAY_THRESHOLD})",
+                    "test_name": f"{REMOVAL_FEATURE} by late removal episode (catheter IN periods >= {LATE_REMOVAL_PERIOD_THRESHOLD})",
                 },
             ),
             (
@@ -802,9 +938,11 @@ def main(include_age_split=False):
     # Save the summary figures
     plot_event_rates(cauti_period, reinsertion_period, RESULTS_DIR)
 
+    print(f"Episode-days with multiple intervals: {len(interval_reports['12_multiple_interval_episode_days.csv']):,}")
+    print(f"Exact duplicate interval groups: {len(interval_reports['14_exact_duplicate_interval_summary.csv']):,}")
     print(f"Outputs saved to: {RESULTS_DIR}")
     print(f"Number of covariates analysed: {len(cov_cols)}")
-    print(f"Late removal threshold: period >= {LATE_REMOVAL_DAY_THRESHOLD}")
+    print(f"Late removal threshold: period >= {LATE_REMOVAL_PERIOD_THRESHOLD}")
 
 if __name__ == "__main__":
     main()

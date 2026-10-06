@@ -1,4 +1,3 @@
-# Standard-library utilities
 import re
 import os
 from collections import defaultdict
@@ -8,13 +7,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
-# Configuration
-
 # Define pipeline directories
 REPO_ROOT = Path(__file__).resolve().parent
 # Raw data lives outside the repository by default. Override with MIMIC_DIR
-# when it is stored elsewhere; relative overrides are based on REPO_ROOT.
 MIMIC_DIR = Path(os.environ.get("MIMIC_DIR") or REPO_ROOT.parent / "Data" / "MIMIC-IV" / "mimic-iv-3.1").expanduser()
 if not MIMIC_DIR.is_absolute():
     MIMIC_DIR = REPO_ROOT / MIMIC_DIR
@@ -83,7 +78,6 @@ ETHNICITY_UNAVAILABLE_MARKERS = (
     "NO INFORMATION",
 )
 
-
 def load_item_labels():
     # Load one label per item
     d_items_df = pd.read_csv(
@@ -101,14 +95,10 @@ def load_item_labels():
     # Return an ID lookup
     return d_items_df.set_index("itemid")["label"].to_dict()
 
-
 def print_section(title):
     # Print a stage heading
     print()
     print(f"=== {title} ===")
-
-
-# Catheter episode cohort and base panel
 
 def normalise_ethnicity_text(value):
     # Standardise whitespace and case for matching
@@ -116,14 +106,12 @@ def normalise_ethnicity_text(value):
         return ""
     return re.sub(r"\s+", " ", str(value).strip()).upper()
 
-
 def ethnicity_is_missing(value):
     # Identify unavailable ethnicity information
     ethnicity_text = normalise_ethnicity_text(value)
     return not ethnicity_text or any(
         marker in ethnicity_text for marker in ETHNICITY_UNAVAILABLE_MARKERS
     )
-
 
 def map_ethnicity_group(value):
     # Collapse substantive raw ethnicity labels
@@ -141,7 +129,6 @@ def map_ethnicity_group(value):
     if "HISPANIC" in ethnicity_text or "LATIN" in ethnicity_text:
         return "Hispanic"
     return "Other"
-
 
 def build_ethnicity_mapping_audit(episodes):
     # Summarise source ethnicity mappings in the episode cohort
@@ -167,7 +154,6 @@ def build_ethnicity_mapping_audit(episodes):
         )
         .reset_index(drop=True)
     )
-
 
 def merge_overlapping_foley_events(df):
     # Merge overlapping Foley records
@@ -201,7 +187,6 @@ def merge_overlapping_foley_events(df):
 
     # Return one row per episode
     return pd.DataFrame(episodes, columns=["stay_id", "inserted", "removed"])
-
 
 def add_episode_endpoints(catheterised):
     # End each catheter episode at its first absorbing or episode-closing event
@@ -244,7 +229,6 @@ def add_episode_endpoints(catheterised):
 
     return out
 
-
 def exclude_post_terminal_episode_starts(catheterised):
     # Remove source episodes that begin after the patient has died or left ICU
     out = catheterised.copy()
@@ -272,7 +256,6 @@ def exclude_post_terminal_episode_starts(catheterised):
         )
 
     return out.loc[~invalid_start].reset_index(drop=True)
-
 
 def build_catheter_episodes():
     # Load ICU stay boundaries
@@ -451,7 +434,6 @@ def build_catheter_episodes():
     # Return episodes in time order
     return catheterised.sort_values(["stay_id", "inserted"]).reset_index(drop=True)
 
-
 def make_state_windows(state_start, state_end):
     # Reject empty state spans
     if pd.isna(state_start) or pd.isna(state_end) or state_end <= state_start:
@@ -471,7 +453,6 @@ def make_state_windows(state_start, state_end):
 
     # Return period boundaries
     return rows
-
 
 def validate_cauti_risk_set(panel, episode_keys):
     # Reconstruct first-event eligibility in episode-time order
@@ -507,7 +488,6 @@ def validate_cauti_risk_set(panel, episode_keys):
             "CAUTI risk set does not match catheter-state, post-removal-window, "
             "and first-event eligibility"
         )
-
 
 def build_base_panel(catheterised):
     # Collect panel rows
@@ -718,7 +698,6 @@ def build_base_panel(catheterised):
     # Return the ordered panel
     return panel[ordered_cols]
 
-
 def create_episode_cohort_and_base_panel():
     # Define stage outputs
     catheter_episodes_file = DATA_DIR / "catheter_episodes.csv"
@@ -760,9 +739,6 @@ def create_episode_cohort_and_base_panel():
     print("Episodes:", len(episodes))
     print("Stays:", episodes["stay_id"].nunique())
     print("Base panel rows:", len(base_panel))
-
-
-# Raw chart-event extraction
 
 def build_chart_extraction_windows(episodes):
     # Select episode boundaries
@@ -809,7 +785,6 @@ def build_chart_extraction_windows(episodes):
 
     # Return merged windows
     return pd.DataFrame(merged_windows, columns=["stay_id", "window_start", "window_end"])
-
 
 def extract_chart_covariates():
     # Define stage files
@@ -939,9 +914,6 @@ def extract_chart_covariates():
     print(f"[INFO] rows kept: {kept_rows_total:,}")
     print(f"[INFO] Fahrenheit rows converted: {converted_rows_total:,}")
 
-
-# Chart covariate cleaning
-
 def _load_numeric_values_by_itemid():
     # Collect values across chunks
     value_parts = defaultdict(list)
@@ -964,7 +936,6 @@ def _load_numeric_values_by_itemid():
         itemid: pd.concat(parts, ignore_index=True)
         for itemid, parts in value_parts.items()
     }
-
 
 def fit_cleaning_rules():
     # Load values by item
@@ -1020,7 +991,6 @@ def fit_cleaning_rules():
 
     # Return all fitted rules
     return rules
-
 
 def apply_cleaning_rules(rules):
     # Prepare an atomic output
@@ -1102,7 +1072,6 @@ def apply_cleaning_rules(rules):
     # Publish the cleaned file
     tmp_outfile.replace(outfile)
 
-
 def clean_chart_covariates():
     # Define stage files
     kept_preprocessed_chart_file = DATA_DIR / "preprocessed_raw_chart_covariates_kept.csv"
@@ -1124,10 +1093,6 @@ def clean_chart_covariates():
     apply_cleaning_rules(rules)
 
     print("[SAVE CLEANED]", cleaned_chart_file)
-
-
-# Modelling panel aggregation
-
 
 def build_retention_log(aggregated, panel, itemid_to_label):
     # Calculate coverage denominators
@@ -1195,7 +1160,6 @@ def build_retention_log(aggregated, panel, itemid_to_label):
         ["decision", "row_coverage", "stay_coverage", "n_rows", "itemid", "stat"],
         ascending=[True, False, False, False, True, True],
     ).reset_index(drop=True)
-
 
 def aggregate_itemid_covariates(panel, itemid_to_label):
     # Select panel lookback windows
@@ -1342,10 +1306,6 @@ def aggregate_itemid_covariates(panel, itemid_to_label):
     print("[EHR] Covariates aggregated.")
     return panel, retention_log
 
-
-# Modelling panel and feature dictionary
-
-
 def detect_covariate_itemids(columns):
     # Match chart feature names
     pattern = re.compile(r"^itemid_(\d+)__", flags=re.IGNORECASE)
@@ -1359,7 +1319,6 @@ def detect_covariate_itemids(columns):
 
     # Return sorted IDs
     return pd.DataFrame({"itemid": sorted(itemids)})
-
 
 def add_itemid_missing_indicators(df):
     # Add one missingness indicator per final itemid-derived feature
@@ -1378,7 +1337,6 @@ def add_itemid_missing_indicators(df):
         [df, pd.DataFrame(missing_indicators, index=df.index)],
         axis=1,
     ).copy()
-
 
 def build_modelling_panel():
     # Define stage files
@@ -1513,7 +1471,6 @@ def main():
     # Report completion
     print()
     print("Data panel creation completed.")
-
 
 if __name__ == "__main__":
     # Run the full pipeline
