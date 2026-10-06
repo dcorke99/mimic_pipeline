@@ -1377,10 +1377,9 @@ def build_modelling_panel():
     base_cols = [col for col in df.columns if not col.startswith("itemid_")]
     df = df[base_cols + chart_feature_cols]
 
-    # Normalise chart feature values
-    for col in chart_feature_cols:
-        df[col] = pd.to_numeric(df[col])
-    df[chart_feature_cols] = df[chart_feature_cols].round(ROUND_DP)
+    # Normalise chart features together to avoid fragmenting the panel.
+    chart_features = df[chart_feature_cols].apply(pd.to_numeric).round(ROUND_DP)
+    df = pd.concat([df[base_cols], chart_features], axis=1).copy()
 
     # Normalise event indicators
     for col in [ACTION_COL, Y_CAUTI, Y_REINS, Y_DEATH, Y_ICU_EXIT_ALIVE]:
