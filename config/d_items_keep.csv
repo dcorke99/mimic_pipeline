@@ -1,0 +1,1007 @@
+itemid,label,abbreviation,category,unitname,param_type
+226515,Date of Birth,DOB,ADT,,Date and time
+226228,Gender,Gender,ADT,,Text
+220003,ICU Admission date,ICU Admission date,ADT,,Date and time
+226545,Race,Race,ADT,,Text
+229790,Estimated Blood Loss (Bronch),EBL (Bronch),Bronchoscopy,mL,Numeric
+229794,Estimated Blood Loss (MBAL),EBL (MBAL),Bronchoscopy,mL,Numeric
+228435,Volume instilled (MBAL),Volume instilled (MBAL),Bronchoscopy,mL,Numeric
+228436,Volume obtained (MBAL),Volume obtained (MBAL),Bronchoscopy,mL,Numeric
+224803,AV Fistula L Bruit,AV Fistula L Bruit,Cardiovascular,,Text
+224804,AV Fistula L Thrill,AV Fistula L Thrill,Cardiovascular,,Text
+224800,AV Fistula R Bruit,AV Fistula R Bruit,Cardiovascular,,Text
+224801,AV Fistula R Thrill,AV Fistula R Thrill,Cardiovascular,,Text
+223968,Angio Appearance # 1,Angio Appearance # 1,Cardiovascular,,Text
+223972,Angio Appearance # 2,Angio Appearance # 2,Cardiovascular,,Text
+228445,Angio Appearance # 3,Angio Appearance # 3,Cardiovascular,,Text
+228446,Angio Appearance # 4,Angio Appearance # 4,Cardiovascular,,Text
+223970,Angio Dressing # 1,Angio Dressing # 1,Cardiovascular,,Text
+223973,Angio Dressing # 2,Angio Dressing # 2,Cardiovascular,,Text
+228447,Angio Dressing # 3,Angio Dressing # 3,Cardiovascular,,Text
+228448,Angio Dressing # 4,Angio Dressing # 4,Cardiovascular,,Text
+223967,Angio Site # 1,Angio Site # 1,Cardiovascular,,Text
+223971,Angio Site # 2,Angio Site # 2,Cardiovascular,,Text
+228449,Angio Site # 3,Angio Site # 3,Cardiovascular,,Text
+228450,Angio Site # 4,Angio Site # 4,Cardiovascular,,Text
+228419,Compression device # 1,Compression device # 1,Cardiovascular,,Text
+228420,Compression device # 2,Compression device # 2,Cardiovascular,,Text
+228451,Compression device # 3,Compression device # 3,Cardiovascular,,Text
+228452,Compression device # 4,Compression device # 4,Cardiovascular,,Text
+223942,Graft/Flap Pulse,Graft/Flap Pulse,Cardiovascular,,Text
+224389,Heart Sounds,Heart Sounds,Cardiovascular,,Text
+223983,LLE Color,LLE Color,Cardiovascular,,Text
+224773,LLE Temp,LLE Temp,Cardiovascular,,Text
+223982,LUE Color,LUE Color,Cardiovascular,,Text
+224769,LUE Temp,LUE Temp,Cardiovascular,,Text
+225989,Pericardial Drain Aspiration,Pericardial Drain Aspiration,Cardiovascular,,Checkbox
+223953,Pericardial Drain Drainage,Pericardial Drain Drainage,Cardiovascular,,Text
+225990,Pericardial Drain Flush,Pericardial Drain Flush,Cardiovascular,,Checkbox
+223954,Pericardial Drain Site,Pericardial Drain Site,Cardiovascular,,Text
+223952,Pericardial Drain Status,Pericardial Drain Status,Cardiovascular,,Text
+223979,RLE Color,RLE Color,Cardiovascular,,Text
+224771,RLE Temp,RLE Temp,Cardiovascular,,Text
+223976,RUE Color,RUE Color,Cardiovascular,,Text
+224767,RUE Temp,RUE Temp,Cardiovascular,,Text
+229317,StO2,StO2,Cardiovascular,,Numeric
+224845,Permanent Pacemaker Rate,Permanent Pacemaker Rate,Cardiovascular (Pacer Data),/min,Numeric
+220194,Temporary AV interval,Temp AV interval,Cardiovascular (Pacer Data),msec,Numeric
+224753,Temporary Atrial Sens Setting mV,Temp Atrial Sens Setting mV,Cardiovascular (Pacer Data),mV,Numeric
+224752,Temporary Atrial Sens Threshold mV,Temp Atrial Sens Threshold mV,Cardiovascular (Pacer Data),mV,Numeric
+224755,Temporary Atrial Stim Setting mA,Temp Atrial Stim Setting mA,Cardiovascular (Pacer Data),mA,Numeric
+224754,Temporary Atrial Stim Threshold mA,Temp Atrial Stim Threshold mA,Cardiovascular (Pacer Data),mA,Numeric
+224751,Temporary Pacemaker Rate,Temp Pacemaker Rate,Cardiovascular (Pacer Data),bpm,Numeric
+224839,Temporary Pacemaker Wires Atrial,Temp Pacemaker Wires Atrial,Cardiovascular (Pacer Data),,Numeric
+223963,Temporary Pacemaker Wires Ground,Temp Pacemaker Wires Ground,Cardiovascular (Pacer Data),,Numeric
+223962,Temporary Pacemaker Wires Venticular,Temp Pacemaker Wires Venticular,Cardiovascular (Pacer Data),,Numeric
+223958,Temporary Venticular Sens Threshold mV,Temp Venticular Sens Threshold mV,Cardiovascular (Pacer Data),mV,Numeric
+223960,Temporary Venticular Stim Threshold mA,Temp Venticular Stim Threshold mA,Cardiovascular (Pacer Data),mA,Numeric
+224837,Temporary Ventricular Sens Setting mV,Temp Ventricular Sens Setting mV,Cardiovascular (Pacer Data),mV,Numeric
+224838,Temporary Ventricular Stim Setting mA,Temp Ventricular Stim Setting mA,Cardiovascular (Pacer Data),mA,Numeric
+223969,Transcutaneous Pacer Rate,Transcutaneous Pacer Rate,Cardiovascular (Pacer Data),,Numeric
+229254,Flow (LVAD),Flow (LVAD),Centrimag,L/min,Numeric
+229255,Flow (RVAD),Flow (RVAD),Centrimag,L/min,Numeric
+229256,Flow Alarm (Hi) (LVAD),Flow Alarm (Hi) (LVAD),Centrimag,,Numeric
+229257,Flow Alarm (Hi) (RVAD),Flow Alarm (Hi) (RVAD),Centrimag,,Numeric
+229258,Flow Alarm (Lo) (LVAD),Flow Alarm (Lo) (LVAD),Centrimag,,Numeric
+229259,Flow Alarm (Lo) (RVAD),Flow Alarm (Lo) (RVAD),Centrimag,,Numeric
+229262,Speed (LVAD),Speed (LVAD),Centrimag,RPM,Numeric
+229263,Speed (RVAD),Speed (RVAD),Centrimag,RPM,Numeric
+226616,Anderson,Anderson,Drains,mL,Numeric
+226608,Cerebral Subdural #1,Cerebral Subdural #1,Drains,mL,Numeric
+226609,Cerebral Subdural #2,Cerebral Subdural #2,Drains,mL,Numeric
+226606,Cerebral Ventricular #1,Cerebral Ventricular #1,Drains,mL,Numeric
+226607,Cerebral Ventricular #2,Cerebral Ventricular #2,Drains,mL,Numeric
+226621,Davol,Davol,Drains,mL,Numeric
+227701,Drainage Bag,Drainage Bag,Drains,mL,Numeric
+226604,Hemovac #1,Hemovac #1,Drains,mL,Numeric
+226605,Hemovac #2,Hemovac #2,Drains,mL,Numeric
+226598,JP Lateral,JP Lateral,Drains,mL,Numeric
+226597,JP Medial,JP Medial,Drains,mL,Numeric
+226599,Jackson Pratt #1,Jackson Pratt #1,Drains,mL,Numeric
+226600,Jackson Pratt #2,Jackson Pratt #2,Drains,mL,Numeric
+226601,Jackson Pratt #3,Jackson Pratt #3,Drains,mL,Numeric
+226602,Jackson Pratt #4,Jackson Pratt #4,Drains,mL,Numeric
+226610,Lumbar,Lumbar,Drains,mL,Numeric
+226623,Penrose #1,Penrose #1,Drains,mL,Numeric
+226624,Penrose #2,Penrose #2,Drains,mL,Numeric
+226612,Pericardial,Pericardial,Drains,mL,Numeric
+226619,Pigtail #1,Pigtail #1,Drains,mL,Numeric
+226620,Pigtail #2,Pigtail #2,Drains,mL,Numeric
+226622,Red Rubber,Red Rubber,Drains,mL,Numeric
+226617,Sump #1,Sump #1,Drains,mL,Numeric
+226618,Sump #2,Sump #2,Drains,mL,Numeric
+226603,T Tube,T Tube,Drains,mL,Numeric
+226625,Tap,Tap,Drains,mL,Numeric
+226613,Wound Vac #1,Wound Vac #1,Drains,mL,Numeric
+226614,Wound Vac #2,Wound Vac #2,Drains,mL,Numeric
+229823,Flow (VAD),Flow (VAD),Durable VAD,L/min,Numeric
+229824,HCT (VAD),HCT (VAD),Durable VAD,,Numeric
+229825,High Watts Alarm (VAD),High Watts Alarm (VAD),Durable VAD,,Numeric
+229826,Low Flow Alarm (VAD),Low Flow Alarm (VAD),Durable VAD,,Numeric
+229895,Low Speed Limit (VAD),Low Speed Limit (VAD),Durable VAD,RPM,Numeric
+229827,Mean BP (VAD),Mean BP (VAD),Durable VAD,mmHg,Numeric
+229859,Power (Watts) (VAD),Power (Watts) (VAD),Durable VAD,,Numeric
+229828,Pulsatility Index (VAD),Pulsatility Index (VAD),Durable VAD,,Numeric
+229829,Speed (VAD),Speed (VAD),Durable VAD,RPM,Numeric
+229834,Waveform Peak (VAD),Waveform Peak (VAD),Durable VAD,,Numeric
+229835,Waveform Trough (VAD),Waveform Trough (VAD),Durable VAD,,Numeric
+229832,ZzWaveform Variability (VAD)old,ZzWaveform Variability (VAD)old,Durable VAD,,Numeric
+229852,Delta P (CH),Delta P (CH),ECMO,,Numeric
+230168,Delta P (ECMO),Delta P (ECMO),ECMO,,Numeric
+229855,Delta P Alarm (CH),Delta P Alarm (CH),ECMO,,Numeric
+230169,Delta P Alarm (ECMO),Delta P Alarm (ECMO),ECMO,,Numeric
+229841,FiO2 (CH),FiO2 (CH),ECMO,%,Numeric
+229280,FiO2 (ECMO),FiO2 (ECMO),ECMO,%,Numeric
+229842,Flow (CH),Flow (CH),ECMO,L/min,Numeric
+229270,Flow (ECMO),Flow (ECMO),ECMO,L/min,Numeric
+229843,Flow Alarm (Hi) (CH),Flow Alarm (Hi) (CH),ECMO,,Numeric
+229271,Flow Alarm (Hi) (ECMO),Flow Alarm (Hi) (ECMO),ECMO,,Numeric
+229844,Flow Alarm (Lo) (CH),Flow Alarm (Lo) (CH),ECMO,,Numeric
+229272,Flow Alarm (Lo) (ECMO),Flow Alarm (Lo) (ECMO),ECMO,,Numeric
+229363,P1 (ECMO),P1 (ECMO),ECMO,mmHg,Numeric
+229365,P1 - P2 (ECMO),P1 - P2 (ECMO),ECMO,mmHg,Numeric
+229364,P2 (ECMO),P2 (ECMO),ECMO,mmHg,Numeric
+229851,Part (CH),Part (CH),ECMO,,Numeric
+229849,Part Alarm (Hi) (CH),Part Alarm (Hi) (CH),ECMO,,Numeric
+230170,Part Alarm (Hi) (ECMO),Part Alarm (Hi) (ECMO),ECMO,,Numeric
+230165,Pint (CH),Pint (CH),ECMO,,Numeric
+230167,Pint Alarm (Hi) (CH),Pint Alarm (Hi) (CH),ECMO,,Numeric
+230171,Pint Alarm (Hi) (ECMO),Pint Alarm (Hi) (ECMO),ECMO,,Numeric
+229850,Pven (CH),Pven (CH),ECMO,,Numeric
+230166,Pven Alarm (High) (CH),Pven Alarm (High) (CH),ECMO,,Numeric
+229848,Pven Alarm (Low) (CH),Pven Alarm (Low) (CH),ECMO,,Numeric
+229845,Speed (CH),Speed (CH),ECMO,RPM,Numeric
+229277,Speed (ECMO),Speed (ECMO),ECMO,RPM,Numeric
+230163,StO2 L (CH),StO2 L (CH),ECMO,%,Numeric
+230164,StO2 L (ECMO),StO2 L (ECMO),ECMO,%,Numeric
+230162,StO2 R (CH),StO2 R (CH),ECMO,%,Numeric
+230161,StO2 R (ECMO),StO2 R (ECMO),ECMO,%,Numeric
+229847,SvO2 Alarm (Lo) (CH),SvO2 Alarm (Lo) (CH),ECMO,,Numeric
+224019,Bladder Irrigation,Bladder Irrigation,GI/GU,,Text
+229371,Bladder Scan Estimate,Bladder Scan Estimate,GI/GU,mL,Numeric
+228714,Bladder scanned,Bladder scanned,GI/GU,,Text
+229352,Foley Cath Insertion Date,Indwelling Urinary Cath Insertion Date,GI/GU,,Date and time
+229354,Foley Cath Insertion Location,Indwelling Urinary Cath Insertion Location,GI/GU,,Text
+229353,Foley Cath Removal Date,Foley Cath Removal Date,GI/GU,,Date and time
+229351,Foley Catheter,Indwelling Urinary Catheter,GI/GU,,Processes
+227584,GU Catheter D/C Date,GU Catheter D/C Date,GI/GU,,Date and time
+224878,GU Catheter Insertion Date,GU Catheter Insertion Date,GI/GU,,Date and time
+224017,GU Catheter Size,GU Catheter Size,GI/GU,,Text
+230176,IUC Stabilization Device,IUC Stabilization Device,GI/GU,,Checkbox
+224876,Urine Appearance,Urine Appearance,GI/GU,,Text
+224016,Urine Color,Urine Color,GI/GU,,Text
+224015,Urine Source,Urine Source,GI/GU,,Text
+226512,Admission Weight (Kg),Admission Weight (Kg),General,kg,Numeric
+226531,Admission Weight (lbs.),Admission Weight (lbs.),General,,Numeric
+224639,Daily Weight,Daily Weight,General,kg,Numeric
+226846,Feeding Weight,Feeding Weight,General,kg,Numeric
+226707,Height,Height,General,Inch,Numeric
+226730,Height (cm),Height (cm),General,cm,Numeric
+226260,Mechanically Ventilated,Mechanically Ventilated,General,,Checkbox
+229791,Estimated Blood Loss (GenProc),EBL (GenProc),Generic Proc Note,mL,Numeric
+228478,Number of Attempts (Gen Proc),Number of Attempts (Gen Proc),Generic Proc Note,,Numeric
+228479,Number of Operators (Gen Proc),Number of Operators (Gen Proc),Generic Proc Note,,Numeric
+229304,Flow (L/min) (HeartWare),Flow (L/min) (HeartWare),Heartware,,Numeric
+229306,HCT (HeartWare),HCT (HeartWare),Heartware,,Numeric
+229308,High Power Alarm (HeartWare),High Power Alarm (HeartWare),Heartware,,Numeric
+229307,Low Flow Alarm (HeartWare),Low Flow Alarm (HeartWare),Heartware,,Numeric
+229305,Power (Watts) (HeartWare),Power (Watts) (HeartWare),Heartware,,Numeric
+229303,Speed (RPM) (HeartWare),Speed (RPM) (HeartWare),Heartware,,Numeric
+229235,Brain Tissue Oxygenation,PbtO2,Hemodynamics,mmHg,Numeric
+227543,CO (Arterial),CO (Arterial),Hemodynamics,L/min,Numeric
+224842,Cardiac Output (CCO),CO (CCO),Hemodynamics,L/min,Numeric
+220088,Cardiac Output (thermodilution),CO (thermodilution),Hemodynamics,L/min,Numeric
+220074,Central Venous Pressure,CVP,Hemodynamics,mmHg,Numeric
+227066,Cerebral Perfusion Pressure,CPP,Hemodynamics,mmHg,Numeric
+229236,Cerebral Temperature (C),Cerebral T (C),Hemodynamics,°C,Numeric
+224660,ECMO,ECMO,Hemodynamics,L/min,Numeric
+226272,EF (CCO),EF (CCO),Hemodynamics,%,Numeric
+229238,FiO2 Challenge,FiO2 Challenge,Hemodynamics,,Text
+229239,FiO2 Challenge Result,FiO2 Challenge Result,Hemodynamics,,Text
+228871,HM II- Backup Cont in room with pt settings,HM II- Backup Cont in room with pt settings_201904,Hemodynamics,,Checkbox
+228873,HM II- Flow,HM II- Flow,Hemodynamics,L/min,Numeric
+228872,HM II- Mean BP,HM II- Mean BP,Hemodynamics,mmHg,Numeric
+228875,HM II- PI,HM II- PI,Hemodynamics,,Numeric
+228869,HM II- Perc Lock fully engaged,HM II- Perc Lock fully engaged,Hemodynamics,,Checkbox
+228876,HM II- Power,HM II- Power,Hemodynamics,,Numeric
+228874,HM II- Speed (RPM),HM II- Speed (RPM),Hemodynamics,,Numeric
+228870,HM II- Sys Cont in Prim Mode,HM II- Sys Cont in Prim Mode,Hemodynamics,,Checkbox
+220765,Intra Cranial Pressure,ICP,Hemodynamics,mmHg,Numeric
+227989,Intra Cranial Pressure #2,IC2,Hemodynamics,mmHg,Numeric
+220069,Left Artrial Pressure,LAP,Hemodynamics,mmHg,Numeric
+220125,Left Ventricular Assit Device Flow,LVAD,Hemodynamics,L/min,Numeric
+223773,PA Line cm Mark,PA Line cm Mark,Hemodynamics,cm,Numeric
+223771,PCWP,PCWP,Hemodynamics,mmHg,Numeric
+220060,Pulmonary Artery Pressure diastolic,PAPd,Hemodynamics,mmHg,Numeric
+220061,Pulmonary Artery Pressure mean,PAPm,Hemodynamics,mmHg,Numeric
+220059,Pulmonary Artery Pressure systolic,PAPs,Hemodynamics,mmHg,Numeric
+220128,Right Ventricular Assist Device Flow,RVAD,Hemodynamics,L/min,Numeric
+227547,SV (Arterial),SV (Arterial),Hemodynamics,mL/beat,Numeric
+227546,SVV (Arterial),SVV (Arterial),Hemodynamics,%,Numeric
+227549,ScvO2 (Presep),ScvO2 (Presep),Hemodynamics,%,Numeric
+227542,ScvO2 (Presep) Calibrated,ScvO2 (Presep) Calibrated,Hemodynamics,,Date and time
+227806,ScvO2 (Presep) SQI,ScvO2 (Presep) SQI,Hemodynamics,,Text
+223772,SvO2,SvO2,Hemodynamics,%,Numeric
+227541,SvO2 Calibrated,SvO2 Calibrated,Hemodynamics,,Date and time
+227805,SvO2 SQI,SvO2 SQI,Hemodynamics,,Text
+224363,VAD Beat Rate L,VAD Beat Rate L,Hemodynamics,bpm,Numeric
+223775,VAD Beat Rate R,VAD Beat Rate R,Hemodynamics,bpm,Numeric
+224659,Vacuum Assist,Vacuum Assist,Hemodynamics,mmHg,Numeric
+228145,ABI Ankle BP L,ABI Ankle BP L ,IABP,mmHg,Numeric
+224317,ABI Ankle BP R,ABI Ankle BP R,IABP,mmHg,Numeric
+224315,ABI Brachial BP L,ABI Brachial BP L,IABP,mmHg,Numeric
+228146,ABI Brachial BP R,ABI Brachial BP R ,IABP,mmHg,Numeric
+224309,Assisted Systole,SYS - Assisted,IABP,mmHg,Numeric
+224310,Augmented Diastole,AUG,IABP,mmHg,Numeric
+224311,BAEDP,DIA - Assisted,IABP,mmHg,Numeric
+224322,IABP Mean,MAP - Assisted,IABP,mmHg,Numeric
+224654,PAEDP,DIA - Unassisted,IABP,mmHg,Numeric
+228866,Plateau Pressure (IABP),Plateau Pressure (IABP),IABP,mmHg,Numeric
+224652,Unassisted Systole,SYS - Unassisted,IABP,mmHg,Numeric
+224318,ABI Ankle BP L (Impella),ABI Ankle BP L (Impella),Impella,mmHg,Numeric
+228148,ABI Ankle BP R (Impella),ABI Ankle BP R (Impella),Impella,mmHg,Numeric
+228149,ABI Brachial BP L (Impella),ABI Brachial BP L (Impella),Impella,mmHg,Numeric
+224314,ABI Brachial BP R (Impella),ABI Brachial BP R (Impella),Impella,mmHg,Numeric
+228151,Aortic Pressure Signal - Diastolic,Aortic Pressure Signal - Diastolic,Impella,mmHg.,Numeric
+228152,Aortic Pressure Signal - Systolic,Aortic Pressure Signal - Systolic,Impella,mmHg.,Numeric
+229897,Cardiac Output (CO) (Impella),CO (Impella),Impella,L/min,Numeric
+229896,Cardiac Power Output (CPO),CPO,Impella,Watts,Numeric
+228154,Flow Rate (Impella),Flow Rate (Impella),Impella,L/min,Numeric
+229671,Flow Rate (Impella) (R),Flow Rate (Impella) (R),Impella,L/min,Numeric
+229898,LVEDP (Impella),LVEDP (Impella),Impella,mmHg,Numeric
+229900,Left Ventricular Pressure Signal - Diastolic,Left Ventricular Pressure Signal - Diastolic,Impella,mmHg,Numeric
+229899,Left Ventricular Pressure Signal - Systolic,Left Ventricular Pressure Signal - Systolic,Impella,mmHg,Numeric
+229311,Motor Current (mA) High,Motor Current (mA) High,Impella,,Numeric
+229673,Motor Current (mA) High (R),Motor Current (mA) High (R),Impella,,Numeric
+229312,Motor Current (mA) Low,Motor Current (mA) Low,Impella,,Numeric
+229674,Motor Current (mA) Low (R),Motor Current (mA) Low (R),Impella,,Numeric
+229668,Pulmonary Artery Pressure Signal - Diastolic,Pulmonary Artery Pressure Signal - Diastolic,Impella,mmHg.,Numeric
+229669,Pulmonary Atrtery Pressure Signal - Systolic,Pulmonary Artery Pressure Signal - Systolic,Impella,mmHg.,Numeric
+228158,Purge Pressure,Purge Pressure,Impella,mmHg,Numeric
+229677,Purge Pressure (R),Purge Pressure (R),Impella,mmHg,Numeric
+228159,Purge Solution Flow Rate,Purge Solution Flow Rate,Impella,ml/hr,Numeric
+229678,Purge Solution Flow Rate (R),Purge Solution Flow Rate (R),Impella,ml/hr,Numeric
+227214,Cis-atracurium (Intubation),Cis-atracurium (Intubation),Intubation,mg,Numeric
+229792,Estimated Blood Loss (Intub),EBL (Intub),Intubation,mL,Numeric
+227212,Etomidate (Intubation),Etomidate (Intubation),Intubation,mg,Numeric
+227211,Ketamine (Intubation),Ketamine (Intubation),Intubation,mg,Numeric
+229789,Phenylephrine (Intubation),Phenylephrine (Intubation),Intubation,mcg,Numeric
+227210,Propofol (Intubation),Propofol (Intubation),Intubation,mg,Numeric
+229788,Rocuronium (Intubation),Rocuronium (Intubation),Intubation,mg,Numeric
+227215,Succynlocholine (Intubation),Succynlocholine (Intubation),Intubation,mg,Numeric
+227213,Vecuronium (Intubation),Vecuronium (Intubation),Intubation,mg,Numeric
+220644,ALT,ALT,Labs,,Numeric
+220587,AST,AST,Labs,,Numeric
+229372,AT ( Antithrombin funct),AT ( Antithrombin funct),Labs,,Numeric
+229374,AT (Antithrombin funct),AT (Antithrombin funct),Labs,,Numeric with tag
+229361,Absolute Count - Basos,Absolute Count - Basos,Labs,,Numeric
+229360,Absolute Count - Eos,Absolute Count - Eos,Labs,,Numeric
+229358,Absolute Count - Lymphs,Absolute Count - Lymphs,Labs,,Numeric
+229359,Absolute Count - Monos,Absolute Count - Monos,Labs,,Numeric
+229357,Absolute Count - Neuts,Absolute Count - Neuts,Labs,,Numeric
+229362,Absolute Count - Retic,Absolute Count - Retic,Labs,,Numeric
+229355,Absolute Neutrophil Count,Absolute Neutrophil Count,Labs,,Numeric
+220507,Activated Clotting Time,ACT,Labs,,Numeric
+227456,Albumin,Albumin,Labs,,Numeric with tag
+225612,Alkaline Phosphate,Alkaline Phosphate,Labs,,Numeric
+220580,Ammonia,Ammonia,Labs,,Numeric
+228391,Ammonia (SOFT),Ammonia (SOFT),Labs,,Numeric with tag
+228241,Ammonia (Soft)_OLD_1,Ammonia (Soft)_OLD_1,Labs,,Numeric
+220581,Amylase,Amylase,Labs,,Numeric
+227073,Anion gap,Anion gap,Labs,,Numeric
+224828,Arterial Base Excess,Arterial Base Excess,Labs,,Numeric
+220235,Arterial CO2 Pressure,PCO2 (Arterial),Labs,mmHg,Numeric
+220227,Arterial O2 Saturation,SaO2,Labs,%,Numeric
+220224,Arterial O2 pressure,PO2 (Arterial),Labs,mmHg,Numeric
+225624,BUN,BUN,Labs,,Numeric
+226482,Blood Clot Outdates,Blood Clot Outdates,Labs,,Date and time
+227446,Brain Natiuretic Peptide (BNP),Brain Natiuretic Peptide (BNP),Labs,,Numeric with tag
+227444,C Reactive Protein (CRP),C Reactive Protein (CRP),Labs,,Numeric with tag
+225634,CK (CPK),CK (CPK),Labs,,Numeric
+227445,CK-MB,CK-MB,Labs,,Numeric with tag
+225628,CK-MB fraction (%),CK-MB fraction (%),Labs,,Numeric
+225625,Calcium non-ionized,Calcium non-ionized,Labs,,Numeric
+227686,Central Venous O2% Sat,Central Venous O2% Sat,Labs,%,Numeric
+220602,Chloride (serum),Chloride (serum),Labs,,Numeric
+228385,Chloride (serum) (soft),Chloride (serum) (soft),Labs,,Numeric with tag
+226536,Chloride (whole blood),Chloride (whole blood),Labs,,Numeric
+228386,Chloride (whole blood) (soft),Chloride (whole blood) (soft),Labs,,Numeric with tag
+220603,Cholesterol,Cholesterol,Labs,,Numeric
+227463,Cortisol,Cortisol,Labs,,Numeric with tag
+220615,Creatinine (serum),Creatinine (serum),Labs,,Numeric
+229761,Creatinine (whole blood),Creatinine (whole blood),Labs,,Numeric
+225636,D-Dimer,D-Dimer,Labs,,Numeric
+228240,D-Dimer (SOFT),D-Dimer (SOFT),Labs,,Numeric with tag
+229356,Differential - Immature Granulocytes,Differential - Immature Granulocytes,Labs,,Numeric
+225637,Differential-Atyps,Differential-Atyps,Labs,,Numeric
+225638,Differential-Bands,Differential-Bands,Labs,,Numeric
+225639,Differential-Basos,Differential-Basos,Labs,,Numeric
+225640,Differential-Eos,Differential-Eos,Labs,,Numeric
+225641,Differential-Lymphs,Differential-Lymphs,Labs,,Numeric
+225642,Differential-Monos,Differential-Monos,Labs,,Numeric
+225643,Differential-Neuts,Differential-Neuts,Labs,,Numeric
+227440,Digoxin,Digoxin,Labs,,Numeric with tag
+225651,Direct Bilirubin,Direct Bilirubin,Labs,,Numeric
+227462,FK506,FK506,Labs,,Numeric with tag
+227468,Fibrinogen,Fibrinogen,Labs,,Numeric with tag
+225656,Freeform Chemistry,Freeform Chemistry,Labs,,Numeric
+225657,Freeform Coags,Freeform Coags,Labs,,Numeric
+225658,Freeform Drug Level,Freeform Drug Level,Labs,,Numeric
+225659,Freeform Enzymes,Freeform Enzymes,Labs,,Numeric
+225660,Freeform Hematology,Freeform Hematology,Labs,,Numeric
+227448,Gentamicin (Peak),Gentamicin (Peak),Labs,,Numeric with tag
+227447,Gentamicin (Random),Gentamicin (Random),Labs,,Numeric with tag
+227449,Gentamicin (Trough),Gentamicin (Trough),Labs,,Numeric with tag
+220621,Glucose (serum),Glucose (serum),Labs,,Numeric
+226537,Glucose (whole blood),Glucose (whole blood),Labs,,Numeric
+228388,Glucose (whole blood) (soft),Glucose (whole blood) (soft),Labs,,Numeric with tag
+225664,Glucose finger stick (range 70-100),Glucose FS (range 70 -100),Labs,,Numeric
+227443,HCO3 (serum),HCO3 (serum),Labs,,Numeric with tag
+220624,HDL,HDL,Labs,,Numeric
+220545,Hematocrit (serum),Hematocrit (serum),Labs,,Numeric
+226540,Hematocrit (whole blood - calc),Hematocrit (whole blood - calc),Labs,,Numeric
+220228,Hemoglobin,Hemoglobin,Labs,g/dl,Numeric
+227467,INR,INR,Labs,,Numeric with tag
+225667,Ionized Calcium,Ionized Calcium,Labs,,Numeric
+220632,LDH,LDH,Labs,,Numeric
+225671,LDL calculated,LDL calculated,Labs,,Numeric
+227441,LDL measured,LDL measured,Labs,,Numeric with tag
+225668,Lactic Acid,Lactic Acid,Labs,,Numeric
+225672,Lipase,Lipase,Labs,,Numeric
+220635,Magnesium,Magnesium,Labs,,Numeric
+225674,Mixed Venous O2% Sat,Mixed Venous O2% Sat,Labs,%,Numeric
+223830,PH (Arterial),PH (Arterial),Labs,,Numeric
+228243,PH (SOFT),PH (SOFT),Labs,,Numeric
+220274,PH (Venous),PH (Venous),Labs,,Numeric
+220734,PH (dipstick),PH (dipstick),Labs,,Numeric
+227516,PO2 (Mixed Venous),PO2 (Mixed Venous),Labs,mmHg,Numeric
+227466,PTT,PTT,Labs,,Numeric with tag
+227460,Phenobarbital,Phenobarbital,Labs,,Numeric with tag
+227461,Phenytoin (Dilantin),Phenytoin (Dilantin),Labs,,Numeric with tag
+226504,Phenytoin (Free),Phenytoin (Free),Labs,,Numeric
+228239,Phenytoin (Free) (SOFT),Phenytoin (Free) (SOFT),Labs,,Numeric
+225677,Phosphorous,Phosphorous,Labs,,Numeric
+227457,Platelet Count,Platelet Count,Labs,,Numeric with tag
+227442,Potassium (serum),Potassium (serum),Labs,,Numeric with tag
+227464,Potassium (whole blood),Potassium (whole blood),Labs,,Numeric with tag
+227458,Procan,Procan,Labs,,Numeric with tag
+227459,Procan Napa,Procan Napa,Labs,,Numeric with tag
+227465,Prothrombin time,PT,Labs,,Numeric with tag
+228242,Pt. Temperature (BG) (SOFT),Pt. Temperature (BG) (SOFT),Labs,,Numeric
+226541,ScvO2 Central Venous O2% Sat,ScvO2 Central Venous O2% Sat,Labs,,Numeric
+227470,Sed Rate,Sed Rate,Labs,,Numeric with tag
+225684,Serum Osmolality,Serum Osmolality,Labs,,Numeric
+220645,Sodium (serum),Sodium (serum),Labs,,Numeric
+228389,Sodium (serum) (soft),Sodium (serum) (soft),Labs,,Numeric with tag
+226534,Sodium (whole blood),Sodium (whole blood),Labs,,Numeric
+228390,Sodium (whole blood) (soft),Sodium (whole blood) (soft),Labs,,Numeric with tag
+227471,Specific Gravity (urine),Specific Gravity (urine),Labs,,Numeric with tag
+225698,TCO2 (calc) Arterial,TCO2 (calc) Arterial,Labs,,Numeric
+223679,TCO2 (calc) Venous,TCO2 (calc) Venous,Labs,,Numeric
+225685,Thiocynate,Thiocynate,Labs,,Numeric
+227469,Thrombin,Thrombin,Labs,,Numeric with tag
+227450,Tobramycin (Peak),Tobramycin (Peak),Labs,,Numeric with tag
+227451,Tobramycin (Random),Tobramycin (Random),Labs,,Numeric with tag
+227452,Tobramycin (Trough),Tobramycin (Trough),Labs,,Numeric with tag
+225690,Total Bilirubin,Total Bilirubin,Labs,,Numeric
+225692,Total Granulocyte Count (TGC),Total Granulocyte Count (TGC),Labs,,Numeric
+220650,Total Protein,Total Protein,Labs,,Numeric
+225693,Triglyceride,Triglyceride,Labs,,Numeric
+227429,Troponin-T,Troponin-T,Labs,,Numeric with tag
+229375,UF Heparin (Anti-Xa),UF Heparin (Anti-Xa),Labs,,Numeric with tag
+229373,UF Heparin (Anti-Xa)_U_1,UF Heparin (Anti-Xa)_U_1,Labs,,Numeric
+225695,Uric Acid,Uric Acid,Labs,,Numeric
+227453,Vancomycin (Peak),Vancomycin (Peak),Labs,,Numeric with tag
+227454,Vancomycin (Random),Vancomycin (Random),Labs,,Numeric with tag
+227455,Vancomycin (Trough),Vancomycin (Trough),Labs,,Numeric with tag
+226062,Venous CO2 Pressure,PCO2 (Venous),Labs,mmHg,Numeric
+226063,Venous O2 Pressure,PO2 (Venous),Labs,mmHg,Numeric
+220546,WBC,WBC,Labs,,Numeric
+220574,ZAlbumin,ZAlbumin,Labs,,Numeric
+225622,ZBrain Natiuretic Peptide (BNP),ZBrain Natiuretic Peptide (BNP),Labs,,Numeric
+220612,ZC Reactive Protein (CRP),ZC Reaction Protein (CRP),Labs,,Numeric
+225632,ZCK-MB,ZCK-MB,Labs,,Numeric
+227685,ZCentral Venous O2% Sat,ZCentral Venous O2% Sat,Labs,,Numeric
+220611,ZCortisol,ZCortisol,Labs,,Numeric
+225644,ZDigoxin,ZDigoxin,Labs,,Numeric
+225655,ZFK506,ZFK506,Labs,,Numeric
+220541,ZFibrinogen,ZFibrinogen,Labs,,Numeric
+225662,ZGentamicin (Peak),ZGentamicin (Peak),Labs,,Numeric
+226069,ZGentamicin (Random),ZGentamicin (Random),Labs,,Numeric
+226068,ZGentamicin (Trough),ZGentamicin (Trough),Labs,,Numeric
+224826,ZHCO3 (serum),ZHCO3 (serum),Labs,,Numeric
+220561,ZINR,ZINR,Labs,,Numeric
+225670,ZLDL measured,ZLDL measured,Labs,,Numeric
+220562,ZPTT,ZPTT,Labs,,Numeric
+225676,ZPhenobarbital,ZPhenobarbital,Labs,,Numeric
+225645,ZPhenytoin (Dilantin),ZPhenytoin (Dilantin),Labs,,Numeric
+225678,ZPlatelet Count,ZPlatelet Count,Labs,,Numeric
+220640,ZPotassium (serum),ZPotassium (serum),Labs,,Numeric
+226535,ZPotassium (whole blood),ZPotassium (whole blood),Labs,,Numeric
+225679,ZProcan,ZProcan,Labs,,Numeric
+225680,ZProcan Napa,ZProcan Napa,Labs,,Numeric
+220560,ZProthrombin time,ZPT,Labs,,Numeric
+225683,ZSed Rate,ZSed Rate,Labs,,Numeric
+220799,ZSpecific Gravity (urine),ZSpecific gravity (urine),Labs,,Numeric
+225686,ZThrombin,ZThrombin,Labs,,Numeric
+225688,ZTobramycin (Peak),ZTobramycin (Peak),Labs,,Numeric
+226067,ZTobramycin (Random),ZTobramycin (Random),Labs,,Numeric
+226066,ZTobramycin (Trough),ZTobramycin (Trough),Labs,,Numeric
+225694,ZTropinin - T,ZTropinin - T,Labs,,Numeric
+225697,ZVancomycin (Peak),ZVancomycin (Peak),Labs,,Numeric
+226065,ZVancomycin (Random),ZVancomycin (Random),Labs,,Numeric
+226064,ZVancomycin (Trough),ZVancomycin (Trough),Labs,,Numeric
+224498,Amount of fluid removed (LP),Amount of fluid removed (LP),Lumbar Puncture,mL,Numeric
+229793,Estimated Blood Loss (LP),EBL (LP),Lumbar Puncture,mL,Numeric
+224491,Lidocaine 1% (LP),Lidocaine 1% (LP),Lumbar Puncture,mL SC,Numeric
+228370,CO / CI Change,CO / CI Change,NICOM,%,Numeric
+228368,Cardiac Index (CI NICOM),Cardiac Index (CI NICOM),NICOM,L/min/m2,Numeric
+228369,Cardiac Output (CO NICOM),Cardiac Output (CO NICOM),NICOM,L/min,Numeric
+228371,DO2I (NICOM),DO2I (NICOM),NICOM,mL/min/m2,Numeric
+228377,SVI Change,SVI Change,NICOM,%,Numeric
+228374,Stroke Volume (SV NICOM),Stroke Volume (SV NICOM),NICOM,mL/beat,Numeric
+228375,Stroke Volume Index (SVI NICOM),Stroke Volume Index (SVI NICOM),NICOM,%,Numeric
+228376,Stroke Volume Variation (SVV NICOM),Stroke Volume Variation (SVI NICOM),NICOM,,Numeric
+228378,TFCd (NICOM),TFCd (NICOM),NICOM,%,Numeric
+228379,TFCd0 (NICOM),TFCd0 (NICOM),NICOM,%,Numeric
+228380,Thoracic Fluid Content (TFC) (NICOM),TFC (NICOM),NICOM,,Numeric
+228381,Total Peripheral Resistance (TPR) (NICOM),TPR (NICOM),NICOM,dynes*sec/cm5,Numeric
+228382,Total Peripheral Resistance Index (TPRI) (NICOM),TPRI (NICOM),NICOM,dynes*sec/cm5/m2,Numeric
+226105,Behavior,Behavior,Neurological,,Text
+230152,CFS-HR,CFS-HR,Neurological,,Text
+230157,CFS-Posturing,CFS-Posturing,Neurological,,Text
+230153,CFS-RR,CFS-RR,Neurological,,Text
+230154,CFS-SBP,CFS-SBP,Neurological,,Text
+230156,CFS-Sweating,CFS-Sweating,Neurological,,Text
+230155,CFS-Temp,CFS-Temp,Neurological,,Text
+229386,Cerebellar - Finger -> Nose,Cerebellar - Finger -> Nose,Neurological,,Text
+229387,Cerebellar - Heel -> Shin,Cerebellar - Heel -> Shin,Neurological,,Text
+228398,Commands,Commands,Neurological,,Text
+228397,Commands Response,Commands Response,Neurological,,Text
+223903,Communication,Communication,Neurological,,Text
+224731,Corneal Reflex Left,Corneal Reflex Left,Neurological,,Text
+228415,Corneal Reflex Left,Corneal Reflex Left,Neurological,,Text
+224730,Corneal Reflex Right,Corneal Reflex Right,Neurological,,Text
+228416,Corneal Reflex Right,Corneal Reflex Right,Neurological,,Text
+223905,Cough Reflex,Cough Reflex,Neurological,,Text
+229383,Extraocular Movements,EOMs,Neurological,,Text
+228399,Facial Droop,Facial Droop,Neurological,,Text
+223910,Follows Commands,Follows Commands,Neurological,,Text
+220739,GCS - Eye Opening,Eye Opening,Neurological,,Text
+223901,GCS - Motor Response,Motor Response,Neurological,,Text
+223900,GCS - Verbal Response,Verbal Response,Neurological,,Text
+223904,Gag Reflex,Gag Reflex,Neurological,,Text
+223920,LL Strength/Movement,LL Strength/Movement,Neurological,,Text
+224762,LLE Sensation,LLE Sensation,Neurological,,Text
+223919,LU Strength/Movement,LU Strength/Movement,Neurological,,Text
+224759,LUE Sensation,LUE Sensation,Neurological,,Text
+226104,Level of Consciousness,Level of Consciousness,Neurological,,Text
+228404,Motor L Arm,Motor L Arm,Neurological,,Text
+228405,Motor L Leg,Motor L Leg,Neurological,,Text
+228406,Motor R Arm,Motor R Arm,Neurological,,Text
+228407,Motor R Leg,Motor R Leg,Neurological,,Text
+230102,NPi - Diff,NPi - Diff,Neurological,,Numeric
+230101,NPi - Left,NPi - Left,Neurological,,Numeric
+230100,NPi - Right,NPi - Right,Neurological,,Numeric
+223932,Neuro Drain #1 Drainage,Neuro Drain #1 Drainage,Neurological,,Text
+227985,Neuro Drain #1 Landmark,Neuro Drain #1 Landmark,Neurological,,Text
+223930,Neuro Drain #1 Level,Neuro Drain #1 Level,Neurological,,Text
+223931,Neuro Drain #1 Status,Neuro Drain #1 Status,Neurological,,Text
+223926,Neuro Drain #1 Type,Neuro Drain #1 Type,Neurological,,Text
+227983,Neuro Drain #2 Drainage,Neuro Drain #2 Drainage,Neurological,,Text
+227986,Neuro Drain #2 Landmark,Neuro Drain #2 Landmark,Neurological,,Text
+227984,Neuro Drain #2 Level,Neuro Drain #2 Level,Neurological,,Text
+227982,Neuro Drain #2 Status,Neuro Drain #2 Status,Neurological,,Text
+227981,Neuro Drain #2 Type,Neuro Drain #2 Type,Neurological,,Text
+224765,Neuro Drain Head of Bed,Neuro Drain HOB,Neurological,,Text
+227122,Neuro Drain Landmark,Neuro Drain Landmark,Neurological,,Text
+227591,Neuro Drain Landmark,Neuro Drain Landmark,Neurological,,Text
+224764,Neuro Drain Location,Neuro Drain Location,Neurological,,Text
+223921,Neuro Symptoms,Neuro Symptoms,Neurological,,Text
+224380,Neuro Waveform Appearance,Neuro Waveform Appearance,Neurological,,Text
+228402,Neurological Symptoms,Neurological Symptoms,Neurological,,Text
+223898,Orientation,Orientation,Neurological,,Text
+229381,Orientation,Orientation,Neurological,,Text
+229382,Orientation Score (new)_OLD_1,Orientation Score (new)_OLD_1,Neurological,,Numeric
+228394,Orientation to Person,Orientation to Person,Neurological,,Text
+228395,Orientation to Place,Orientation to Place,Neurological,,Text
+228396,Orientation to Time,Orientation to Time,Neurological,,Text
+228401,Pronator Drift,Pronator Drift,Neurological,,Text
+227988,Pronator drift present,Pronator drift present,Neurological,,Text
+227288,Pupil Response Left,Pupil Response L,Neurological,,Text
+227121,Pupil Response Right,Pupil Response R,Neurological,,Text
+230106,Pupil Size - Diff,Pupil Size - Diff,Neurological,mm,Numeric
+230103,Pupil Size - Left.,Pupil Size - Left.,Neurological,mm,Numeric
+230105,Pupil Size - Right.,Pupil Size - Right.,Neurological,mm,Numeric
+224733,Pupil Size Left,Pupil Size Left,Neurological,,Text
+223907,Pupil Size Right,Pupil Size Right,Neurological,,Text
+223918,RL Strength/Movement,RL Strength/Movement,Neurological,,Text
+223924,RLE Sensation,RLE Sensation,Neurological,,Text
+223917,RU Strength/Movement,RU Strength/Movement,Neurological,,Text
+224758,RUE Sensation,RUE Sensation,Neurological,,Text
+224756,Response,Response,Neurological,,Text
+223916,Response to Stimuli (Type),Response to Stimuli (Type),Neurological,,Text
+223754,Risk for Falls,Risk for Falls,Neurological,,Text
+223923,Seizure Activity,Seizure Activity,Neurological,,Text
+228413,Seizure Activity,Seizure Activity,Neurological,,Text
+223925,Seizure Duration,Seizure Duration,Neurological,,Text
+229385,Shoulder Shrug,Should Shrug,Neurological,,Text
+223902,Speech,Speech,Neurological,,Text
+228414,Speech,Speech,Neurological,,Text
+223911,Spontaneous Movement,Spontaneous Movement,Neurological,,Text
+228409,Strength L Arm,Strength L Arm,Neurological,,Text
+228410,Strength L Leg,Strength L Leg,Neurological,,Text
+228412,Strength R Arm,Strength R Arm,Neurological,,Text
+228411,Strength R Leg,Strength R Leg,Neurological,,Text
+229384,Tongue,Tongue,Neurological,,Text
+228400,Visual Field Cut,Visual Field Cut,Neurological,,Text
+227645,Breast Feed - L (Minutes),Breast Feed - L (Minutes),OB-GYN,min,Numeric
+227646,Breast Feed - R (Minutes),Breast Feed - R (Minutes),OB-GYN,min,Numeric
+227647,Clot Size (cm),Clot Size (cm),OB-GYN,cm,Numeric
+226569,Anderson (gastric),Anderson (gastric),Output,mL,Numeric
+226570,Blakemore,Blakemore,Output,mL,Numeric
+226632,Cath Lab,Cath Lab,Output,mL,Numeric
+226588,Chest Tube #1,Chest Tube #1,Output,mL,Numeric
+226589,Chest Tube #2,Chest Tube #2,Output,mL,Numeric
+229413,Chest Tube #3,Chest Tube #3,Output,mL,Numeric
+229414,Chest Tube #4,Chest Tube #4,Output,mL,Numeric
+226561,Condom Cath,Condom Cath,Output,mL,Numeric
+226571,Emesis,Emesis,Output,mL,Numeric
+226572,Ewald,Ewald,Output,mL,Numeric
+226580,Fecal Bag,Fecal Bag,Output,mL,Numeric
+226559,Foley,Foley,Output,mL,Numeric
+227488,GU Irrigant Volume In,GU Irrigant Volume In,Output,mL,Numeric
+227489,GU Irrigant/Urine Volume Out,GU Irrigant/Urine Volume Out,Output,mL,Numeric
+226573,Gastric Tube,Gastric Tube,Output,mL,Numeric
+226584,Ileoconduit,Ileoconduit,Output,mL,Numeric
+226574,Jejunostomy,Jejunostomy,Output,mL,Numeric
+226565,L Nephrostomy,L Nephrostomy,Output,mL,Numeric
+226590,L Pleural #1,L Pleural #1,Output,mL,Numeric
+226591,L Pleural #2,L Pleural #2,Output,mL,Numeric
+226558,L Ureteral Stent,L Ureteral Stent,Output,mL,Numeric
+226592,Mediastinal,Mediastinal,Output,mL,Numeric
+226575,Nasogastric,Nasogastric,Output,mL,Numeric
+226626,OR EBL,OR EBL,Output,mL,Numeric
+226627,OR Urine,OR Urine,Output,mL,Numeric
+226576,Oral Gastric,Oral Gastric,Output,mL,Numeric
+226582,Ostomy (output),Ostomy (output),Output,mL,Numeric
+226628,PACU Drains,PACU Drains,Output,mL,Numeric
+226629,PACU EBL,PACU EBL,Output,mL,Numeric
+226630,PACU Gastric,PACU Gastric,Output,mL,Numeric
+226631,PACU Urine,PACU Urine,Output,mL,Numeric
+226633,Pre-Admission,Pre-Admission,Output,mL,Numeric
+226564,R Nephrostomy,R Nephrostomy,Output,mL,Numeric
+226593,R Pleural #1,R Pleural #1,Output,mL,Numeric
+226595,R Pleural #2,R Pleural #2,Output,mL,Numeric
+226557,R Ureteral Stent,R Ureteral Stent,Output,mL,Numeric
+226583,Rectal Tube,Rectal Tube,Output,mL,Numeric
+226579,Stool,Stool,Output,mL,Numeric
+226567,Straight Cath,Straight Cath,Output,mL,Numeric
+226563,Suprapubic,Suprapubic,Output,mL,Numeric
+227510,TF Residual,TF Residual,Output,mL,Numeric
+227511,TF Residual Output,TF Residual Output,Output,mL,Numeric
+226566,Urine and GU Irrigant Out,Urine and GU Irrigant Out,Output,mL,Numeric
+226560,Void,Void,Output,mL,Numeric
+228444,BIS Index Range,BIS Index Range,Pain/Sedation,,Numeric
+224661,Baseline Current/mA,Baseline Current/mA,Pain/Sedation,mA,Numeric
+224662,Current Used/mA,Current Used/mA,Pain/Sedation,mA,Numeric
+224411,Epidural Bolus (mL),Epidural Bolus (mL),Pain/Sedation,mL,Numeric
+224366,Epidural Infusion Rate (mL/hr),Epidural Infusion Rate (mL/hr),Pain/Sedation,ml/hr,Numeric
+224367,Epidural Total Dose (mL),Epidural Total Dose (mL),Pain/Sedation,mL,Numeric
+227812,Medication Infusion Rate - Adjunctive Pain Management,Medication Infusion Rate,Pain/Sedation,,Numeric
+224330,PCA 1 hour limit,PCA 1 hour limit,Pain/Sedation,,Numeric
+224663,PCA attempt,PCA attempt,Pain/Sedation,,Numeric
+224331,PCA basal rate (mL/hour),PCA basal rate (mL/hour),Pain/Sedation,ml/hr,Numeric
+224410,PCA bolus,PCA bolus,Pain/Sedation,,Numeric
+224328,PCA dose,PCA dose,Pain/Sedation,,Numeric
+224332,PCA inject,PCA inject,Pain/Sedation,,Numeric
+224329,PCA lockout (min),PCA lockout (min),Pain/Sedation,min,Numeric
+224665,PCA total dose,PCA total dose,Pain/Sedation,,Numeric
+230050,PNC-1 Bolus (mL),PNC-1 Bolus (mL),Pain/Sedation,mL,Numeric
+230051,PNC-1 Infusion Rate (mL/hr),PNC-1 Infusion Rate (mL/hr),Pain/Sedation,ml/hr,Numeric
+230057,PNC-2 Bolus (mL),PNC-2 Bolus (mL),Pain/Sedation,mL,Numeric
+230058,PNC-2 Infusion Rate (mL/hr),PNC-2 Infusion Rate (mL/hr),Pain/Sedation,ml/hr,Numeric
+229795,Estimated Blood Loss (Para),EBL (Para),Paracentesis,mL,Numeric
+225261,Fluid removed (PACEN),Fluid removed (PACEN),Paracentesis,mL,Numeric
+225257,Lidocaine 1% (PACEN),Lidocaine 1% (PACEN),Paracentesis,mL SC,Numeric
+226011,Number of attempts (PACEN),Number of attempts (PACEN),Paracentesis,,Numeric
+228176,CFI (PiCCO),CFI (PiCCO),PiCCO,L/min,Numeric
+228177,CI (PiCCO),CI (PiCCO),PiCCO,L/min/m2,Numeric
+228178,CO (PiCCO),CO (PiCCO),PiCCO,L/min,Numeric
+228179,ELWI (PiCCO),ELWI (PiCCO),PiCCO,ml/kg,Numeric
+228180,GEDI (PiCCO),GEDI (PiCCO),PiCCO,mL/m2,Numeric
+228181,ITBVI (PiCCO),ITBVI (PiCCO),PiCCO,mL/m2,Numeric
+228182,SVI (PiCCO),SVI (PiCCO),PiCCO,mL/m2,Numeric
+228185,SVRI (PiCCO),SVRI (PiCCO),PiCCO,dynes.sec.cm-5/m2,Numeric
+228183,SVRI (PiCCO)_OLD_1,SVRI (PiCCO)_OLD_1,PiCCO,dynes.sec.cm-5/m2,Numeric
+228184,SVV (PiCCO),SVV (PiCCO),PiCCO,%,Numeric
+229322,Breathing pattern/effort,Breathing pattern/effort,Pulmonary,,Text
+223998,CT #1 Crepitus,CT #1 Crepitus,Pulmonary,,Text
+223996,CT #1 Drainage,CT #1 Drainage,Pulmonary,,Text
+223997,CT #1 Dressing,CT #1 Dressing,Pulmonary,,Text
+223995,CT #1 Fluctuate,CT #1 Fluctuate,Pulmonary,,Text
+224775,CT #1 Leak,CT #1 Leak,Pulmonary,,Text
+223994,CT #1 Suction Amount,CT #1 Suction Amount,Pulmonary,,Text
+224806,CT #1 Suction Type,CT #1 Suction Type,Pulmonary,,Text
+224423,CT #2 Crepitus,CT #2 Crepitus,Pulmonary,,Text
+224424,CT #2 Drainage,CT #2 Drainage,Pulmonary,,Text
+224425,CT #2 Dressing,CT #2 Dressing,Pulmonary,,Text
+224426,CT #2 Fluctuate,CT #2 Fluctuate,Pulmonary,,Text
+224777,CT #2 Leak,CT #2 Leak,Pulmonary,,Text
+224427,CT #2 Suction Amount,CT #2 Suction Amount,Pulmonary,,Text
+224808,CT #2 Suction Type,CT #2 Suction Type,Pulmonary,,Text
+224428,CT #3 Crepitus,CT #3 Crepitus,Pulmonary,,Text
+224430,CT #3 Drainage,CT #3 Drainage,Pulmonary,,Text
+224432,CT #3 Dressing,CT #3 Dressing,Pulmonary,,Text
+224434,CT #3 Fluctuate,CT #3 Fluctuate,Pulmonary,,Text
+224779,CT #3 Leak,CT #3 Leak,Pulmonary,,Text
+224436,CT #3 Suction Amount,CT #3 Suction Amount,Pulmonary,,Text
+224810,CT #3 Suction Type,CT #3 Suction Type,Pulmonary,,Text
+224429,CT #4 Crepitus,CT #4 Crepitus,Pulmonary,,Text
+224431,CT #4 Drainage,CT #4 Drainage,Pulmonary,,Text
+224433,CT #4 Dressing,CT #4 Dressing,Pulmonary,,Text
+224435,CT #4 Fluctuate,CT #4 Fluctuate,Pulmonary,,Text
+224781,CT #4 Leak,CT #4 Leak,Pulmonary,,Text
+224437,CT #4 Suction Amount,CT #4 Suction Amount,Pulmonary,,Text
+224812,CT #4 Suction Type,CT #4 Suction Type,Pulmonary,,Text
+223993,Chest Tube Site # 1,Chest Tube Site # 1,Pulmonary,,Text
+224438,Chest Tube Site # 2,Chest Tube Site # 2,Pulmonary,,Text
+224439,Chest Tube Site #3,Chest Tube Site #3,Pulmonary,,Text
+224440,Chest Tube Site #4,Chest Tube Site #4,Pulmonary,,Text
+223991,Cough Effort,Cough Effort,Pulmonary,,Text
+223992,Cough Type,Cough Type,Pulmonary,,Text
+229323,Current Dyspnea Assessment,Current Dyspnea Assessment,Pulmonary,,Text
+223989,LLL Lung Sounds,LLL Lung Sounds,Pulmonary,,Text
+223988,LUL Lung Sounds,LUL Lung Sounds,Pulmonary,,Text
+223987,RLL Lung Sounds,RLL Lung Sounds,Pulmonary,,Text
+223986,RUL Lung Sounds,RUL Lung Sounds,Pulmonary,,Text
+223990,Respiratory Effort,Respiratory Effort,Pulmonary,,Text
+223985,Respiratory Pattern,Respiratory Pattern,Pulmonary,,Text
+229659,% Minute Volume,% Minute Volume,Respiratory,,Numeric
+224704,ATC %,ATC %,Respiratory,%,Numeric
+227134,ATC Tube #,ATC Tube #,Respiratory,,Text
+229991,Absorbent changed (Anes),Absorbent changed (Ans),Respiratory,,Checkbox
+224723,Accessory Muscle Use,Accessory Muscle Use,Respiratory,,Text
+223867,Additional Settings,Additional Settings,Respiratory,,Text
+227567,Airway Location,Airway Location,Respiratory,,Text
+227568,Airway Size (mm),Airway Size (mm),Respiratory,,Text
+223836,Airway Type,Airway Type,Respiratory,,Text
+226815,Airway problems,Airway problems,Respiratory,,Text
+229995,Amsorb changed (Anes),Amsorb changed (Anes),Respiratory,,Checkbox
+223876,Apnea Interval,Apnea Interval,Respiratory,sec,Numeric
+224720,Arrythmia,Arrythmia,Respiratory,,Text
+227583,Autoset/CPAP,Autoset/CPAP,Respiratory,,Text
+227579,BiPap EPAP,BiPap EPAP,Respiratory,cmH2O,Numeric
+227580,BiPap IPAP,BiPap IPAP,Respiratory,cmH2O,Numeric
+227578,BiPap Mask,BiPap Mask,Respiratory,,Text
+227577,BiPap Mode,BiPap Mode,Respiratory,,Text
+227582,BiPap O2 Flow,BiPap O2 Flow,Respiratory,L/min,Numeric
+227581,BiPap bpm (S/T -Back up),BiPap bpm (S/T -Back up),Respiratory,bpm,Numeric
+230150,Blocker Balloon Status,Blocker Balloon Status,Respiratory,,Text
+230148,Blocker External Location,Blocker External Location,Respiratory,,Text
+230147,Blocker Mark,Blocker Mark,Respiratory,cm,Numeric
+230149,Blocker Secured,Blocker Secured,Respiratory,,Checkbox
+230146,Blocker Type,Blocker Type,Respiratory,,Text
+230151,Blocker Volume,Blocker Volume,Respiratory,mL,Numeric
+220245,CO2 production,CO2 production,Respiratory,ml/min,Numeric
+224713,Circuit Changed,Circuit Changed,Respiratory,,Text
+229988,Circuit changed (Anes),Circuit changed (Anes),Respiratory,,Checkbox
+229661,Compliance,Compliance,Respiratory,cmH2O/L/seconds,Numeric
+224748,Cont Neb - Dose (mg/hr/drug),Cont Neb - Dose (mg/hr/drug),Respiratory,mg/hour,Numeric
+224375,Cont Neb - Med,Cont Neb - Med,Respiratory,,Text
+227131,Cont. Neb Med Dose,Cont. Neb Med Dose,Respiratory,,Text
+224417,Cuff Pressure,Cuff Pressure,Respiratory,cmH2O,Numeric
+224418,Cuff Volume (mL),Cuff Volume (mL),Respiratory,mL,Numeric
+224680,Cuff Volume/units,Units,Respiratory,,Text
+223838,ETT Location,ETT Location,Respiratory,,Text
+224415,ETT Mark (cm),ETT Mark (cm),Respiratory,,Text
+224391,ETT Mark (location),ETT Mark (location),Respiratory,,Text
+225277,ETT Position (cm at teeth),ETT Position (cm at teeth),Respiratory,,Numeric
+224392,ETT Position Change,ETT Position Change,Respiratory,,Text
+227809,ETT Position Change,ETT Position Change,Respiratory,,Checkbox
+223840,ETT Re-taped,ETT Re-taped,Respiratory,,Text
+227810,ETT Re-taped,ETT Re-taped,Respiratory,,Checkbox
+225278,ETT Route,ETT Route,Respiratory,,Text
+223837,ETT Size (ID),ETT Size (ID),Respiratory,,Text
+224832,ETT Type,ETT Type,Respiratory,,Text
+226871,Expiratory Ratio,Expiratory Ratio,Respiratory,,Numeric
+229992,Filters changed (Anes),Filters changed (Anes),Respiratory,,Checkbox
+229987,Filters checked,Filters checked,Respiratory,,Checkbox
+229990,Filters checked (Anes),Filters checked (Anes),Respiratory,,Checkbox
+224692,Flow Pattern,Flow Pattern,Respiratory,,Text
+224691,Flow Rate (L/min),Flow Rate (L/min),Respiratory,L/min,Numeric
+224735,Flow Rate (variable/fixed),Flow Rate (variable/fixed),Respiratory,,Text
+224865,Flow Sensitivity,Flow Sensitivity,Respiratory,,Text
+223875,Fspn High,Fspn High,Respiratory,insp/min,Numeric
+224721,HR > 140,HR > 140,Respiratory,,Text
+227808,Heliox,Heliox,Respiratory,,Text
+227517,Humidification,Humidification,Respiratory,,Text
+229245,Humidifier Water % Fill Level,Humidifier Water % Fill Level,Respiratory,,Text
+229244,Humidifier Water Changed,Humidifier Water Changed,Respiratory,,Text
+227807,In-line Suction Catheter Changed,In-line Suction Changed,Respiratory,,Checkbox
+229504,Inner Cannula Change,Inner Cannula Change,Respiratory,,Checkbox
+226873,Inspiratory Ratio,Inspiratory Ratio,Respiratory,,Numeric
+224738,Inspiratory Time,IT,Respiratory,sec,Numeric
+223872,Inspired Gas Temp.,Inspired Gas Temp.,Respiratory,°C,Numeric
+223835,Inspired O2 Fraction,FiO2,Respiratory,,Numeric
+230045,Intellivent (Hamilton Vent Mode),Intellivent (Hamilton Vent Mode),Respiratory,,Checkbox
+223059,Intubation - Details,Intubation - Details,Respiratory,,Text
+226814,Known difficult intubation,Known difficult intubation,Respiratory,,Text
+229986,Leak test done (Anes),Leak test done (Anes),Respiratory,,Checkbox
+224170,MDI #1 Drug,MDI #1 Drug,Respiratory,,Text
+224169,MDI #1 Puff,MDI #1 Puff,Respiratory,,Numeric
+224173,MDI #2 Drug,MDI #2 Drug,Respiratory,,Text
+224172,MDI #2 Puff,MDI #2 Puff,Respiratory,,Numeric
+224176,MDI #3 Drug,MDI #3 Drug,Respiratory,,Text
+224175,MDI #3 Puff,MDI #3 Puff,Respiratory,,Numeric
+229985,Machine checked (Anes),Machine checked (Anes),Respiratory,,Checkbox
+224697,Mean Airway Pressure,Mean Airway Pressure,Respiratory,cmH2O,Numeric
+224687,Minute Volume,Minute Volume,Respiratory,L/min,Numeric
+225949,NIV Mask,NIV Mask,Respiratory,,Text
+224419,Negative Insp. Force,Negative Insp. Force,Respiratory,cmH2O,Numeric
+224749,Nitric Oxide,Nitric Oxide,Respiratory,ppm,Numeric
+224750,Nitric Oxide Tank Pressure,Nitric Oxide Tank Pressure,Respiratory,psi,Numeric
+224726,O2 Consumption,O2 Consumption,Respiratory,ml/min,Numeric
+226732,O2 Delivery Device(s),O2 Delivery Device(s),Respiratory,,Text
+223834,O2 Flow,O2 Flow,Respiratory,L/min,Numeric
+227287,O2 Flow (additional cannula),O2 Flow (additional cannula),Respiratory,L/min,Numeric
+220277,O2 saturation pulseoxymetry,SpO2,Respiratory,%,Numeric
+224705,P High (APRV),P High (APRV),Respiratory,cmH2O,Numeric
+224706,P Low (APRV),P Low (APRV),Respiratory,cmH2O,Numeric
+230145,P0.1,P0.1,Respiratory,cmH2O,Numeric with tag
+224702,PCV Level,PCV Level,Respiratory,cmH2O,Numeric
+220339,PEEP set,PEEP set,Respiratory,cmH2O,Numeric
+229393,PF Ratio Value,PF Ratio Value,Respiratory,,Numeric
+229405,PF Value,PF Value,Respiratory,,Numeric
+229408,PFImputedRatio_Value,PFImputedRatio_Value,Respiratory,,Numeric
+229406,PFImputedValue,PFImputedValue,Respiratory,,Numeric
+229407,PFRatio_Value,PFRatio_Value,Respiratory,,Numeric
+224701,PSV Level,PSV Level,Respiratory,cmH2O,Numeric
+223847,Passey Muir Valve in use,Passey Muir Valve in use,Respiratory,,Text
+223873,Paw High,Paw High,Respiratory,cmH2O,Numeric
+228878,PeCO2,PeCO2,Respiratory,mmHg,Numeric
+224728,Peak Exp Flow Rate,Peak Exp Flow Rate,Respiratory,L/min,Numeric
+224695,Peak Insp. Pressure,Peak Insp. Pressure,Respiratory,cmH2O,Numeric
+223871,Physio,Physio,Respiratory,,Text
+227187,Pinsp (Draeger only),Pinsp (Draeger only),Respiratory,cmH2O,Numeric
+229663,Pinsp (Hamilton),Pinsp (Hamilton),Respiratory,cmH2O,Numeric
+224696,Plateau Pressure,Plateau Pressure,Respiratory,cmH2O,Numeric
+229662,Pminimum,Pminimum,Respiratory,,Numeric
+229660,RCexp (Measured Time Constant),RCexp (Measured Time Constant),Respiratory,sec,Numeric
+224718,RR > 35 for > 5 min,RR > 35 for > 5 min,Respiratory,,Text
+224740,RSBI Deferred,RSBI Deferred,Respiratory,,Text
+223851,Rate,Rate,Respiratory,,Text
+224711,Recruitment Duration,Recruitment Duration,Respiratory,sec,Numeric
+224712,Recruitment Mode,Recruitment Mode,Respiratory,,Text
+224710,Recruitment Press,Recruitment Press,Respiratory,cmH2O,Numeric
+220283,Resistance,Resistance,Respiratory,cmH2O/L/seconds,Numeric
+229664,Resistance Exp,Resistance Exp,Respiratory,cmH2O/L/seconds,Numeric
+229665,Resistance Insp,Resistance Insp,Respiratory,cmH2O/L/seconds,Numeric
+224745,Respiratory Quotient,RQ,Respiratory,,Numeric
+220210,Respiratory Rate,RR,Respiratory,insp/min,Numeric
+224688,Respiratory Rate (Set),Respiratory Rate (Set),Respiratory,insp/min,Numeric
+224690,Respiratory Rate (Total),Respiratory Rate (Total),Respiratory,insp/min,Numeric
+224689,Respiratory Rate (spontaneous),Respiratory Rate (spontaneous),Respiratory,insp/min,Numeric
+224727,Resting Energy Expenditure,REE,Respiratory,kcal/day,Numeric
+224833,SBT Deferred,SBT Deferred,Respiratory,,Text
+224715,SBT Started,SBT Started,Respiratory,,Text
+224716,SBT Stopped,SBT Stopped,Respiratory,,Text
+224717,SBT Successfully Completed,SBT Successfully Completed,Respiratory,,Text
+229394,SF Ratio Value,SF Ratio Value,Respiratory,,Numeric
+224719,SaO2 < 90% > 2 min,SaO2 < 90% > 2 min,Respiratory,,Text
+225978,Slope,Slope,Respiratory,,Text
+224178,Small Volume Neb Dose #2,SV Neb Dose #2,Respiratory,,Numeric
+224181,Small Volume Neb Drug #1,SV Neb Drug #1,Respiratory,,Text
+227133,Small Volume Neb Drug #2,SV Neb Drug #2,Respiratory,,Text
+227570,Small Volume Neb Drug/Dose #1,SV Neb Drug/Dose #1,Respiratory,,Text
+224422,Spont RR,Spont RR,Respiratory,bpm,Numeric
+224421,Spont Vt,Spont Vt,Respiratory,mL,Numeric
+224373,Sputum Amount,Sputum Amount,Respiratory,,Text
+224370,Sputum Color,Sputum Color,Respiratory,,Text
+224369,Sputum Consistency,Sputum Consistency,Respiratory,,Text
+224372,Sputum Source,Sputum Source,Respiratory,,Text
+224707,T High (APRV),T High (APRV),Respiratory,sec,Numeric
+224709,T Low (APRV),T Low (APRV),Respiratory,sec,Numeric
+224685,Tidal Volume (observed),Tidal Volume (observed),Respiratory,mL,Numeric
+224684,Tidal Volume (set),Tidal Volume (set),Respiratory,mL,Numeric
+224686,Tidal Volume (spontaneous),Tidal Volume (spontaneous),Respiratory,mL,Numeric
+224700,Total PEEP Level,Total PEEP Level,Respiratory,cmH2O,Numeric
+227130,Trach Care,Trach Care,Respiratory,,Checkbox
+224830,Trach Tube Manufacturer,Trach Tube Manufacturer,Respiratory,,Text
+224831,Trach Tube Size (I.D.),Trach Tube Size (I.D.),Respiratory,,Text
+224829,Trach Tube Type,Trach Tube Type,Respiratory,,Text
+224746,Transpulmonary Pressure (Exp. Hold),Transpulmonary Press (Exp. Hold),Respiratory,cmH2O,Numeric
+224747,Transpulmonary Pressure (Insp. Hold),Transpulmonary Press (Insp. Hold),Respiratory,cmH2O,Numeric
+229994,Vaporizer checked (Anes),Vaporizer checked (Anes),Respiratory,,Checkbox
+229993,Vaporizer filled (Anes),Vaporizer filled (Anes),Respiratory,,Checkbox
+224743,Vd/Vt Ratio,Vd/Vt Ratio,Respiratory,,Numeric
+223849,Ventilator Mode,Ventilator Mode,Respiratory,,Text
+229314,Ventilator Mode (Hamilton),Ventilator Mode (Hamilton),Respiratory,,Text
+227565,Ventilator Tank #1,Ventilator Tank #1,Respiratory,,Numeric
+227566,Ventilator Tank #2,Ventilator Tank #2,Respiratory,,Numeric
+223848,Ventilator Type,Ventilator Type,Respiratory,,Text
+224420,Vital Cap,Vital Cap,Respiratory,Liters,Numeric
+220218,Vital Capacity,VC,Respiratory,Liters,Numeric
+223874,Vti High,Vti High,Respiratory,mL,Numeric
+223870,Wean,Wean,Respiratory,,Text
+224703,ZATC Tube #,ZATC Tube #,Respiratory,,Numeric
+224699,ZAuto Peep Level,ZAuto Peep Level,Respiratory,cmH2O,Numeric
+224864,ZTrach Care,ZTrach Care,Respiratory,,Text
+225310,ART BP Diastolic,ART BP Diastolic,Routine Vital Signs,mmHg,Numeric
+225312,ART BP Mean,ART BP Mean,Routine Vital Signs,mmHg,Numeric
+225309,ART BP Systolic,ART BP Systolic,Routine Vital Signs,mmHg,Numeric
+227630,Arctic Sun Temp #1 Location,Arctic Sun Temp #1 Location,Routine Vital Signs,,Text
+227631,Arctic Sun Temp #2 Location,Arctic Sun Temp #2 Location,Routine Vital Signs,,Text
+227632,Arctic Sun/Alsius Temp #1 C,Arctic Sun/Alsius Temp #1 C,Routine Vital Signs,°C,Numeric
+227634,Arctic Sun/Alsius Temp #2 C,Arctic Sun/Alsius Temp #2 C,Routine Vital Signs,°C,Numeric
+220051,Arterial Blood Pressure diastolic,ABPd,Routine Vital Signs,mmHg,Numeric
+220052,Arterial Blood Pressure mean,ABPm,Routine Vital Signs,mmHg,Numeric
+220050,Arterial Blood Pressure systolic,ABPs,Routine Vital Signs,mmHg,Numeric
+223763,Bladder Pressure,Bladder Pressure,Routine Vital Signs,mmHg,Numeric
+226329,Blood Temperature CCO (C),Blood Temp CCO (C),Routine Vital Signs,°C,Numeric
+224166,Doppler BP,Doppler BP,Routine Vital Signs,mmHg,Numeric
+224651,Ectopy Frequency 1,Ectopy Frequency 1,Routine Vital Signs,,Text
+226480,Ectopy Frequency 2,Ectopy Frequency 2,Routine Vital Signs,,Text
+224650,Ectopy Type 1,Ectopy Type 1,Routine Vital Signs,,Text
+226479,Ectopy Type 2,Ectopy Type 2,Routine Vital Signs,,Text
+228640,EtCO2,EtCO2,Routine Vital Signs,,Numeric
+228641,EtCO2 Clinical indication,EtCO2 Clinical indication,Routine Vital Signs,,Text
+229863,Forehead Sensor Position Changed,Forehead Sensor Position Changed,Routine Vital Signs,,Checkbox
+229862,Forehead SpO2 Sensor in Place,Forehead SpO2 Sensor in Place,Routine Vital Signs,,Checkbox
+220045,Heart Rate,HR,Routine Vital Signs,bpm,Numeric
+220048,Heart Rhythm,Heart Rhythm,Routine Vital Signs,,Text
+224643,Manual Blood Pressure Diastolic Left,Manual BPd L,Routine Vital Signs,mmHg,Numeric
+227242,Manual Blood Pressure Diastolic Right,Manual BPd R,Routine Vital Signs,mmHg,Numeric
+224167,Manual Blood Pressure Systolic Left,Manual BPs L,Routine Vital Signs,mmHg,Numeric
+227243,Manual Blood Pressure Systolic Right,Manual BPs R,Routine Vital Signs,mmHg,Numeric
+220180,Non Invasive Blood Pressure diastolic,NBPd,Routine Vital Signs,mmHg,Numeric
+220181,Non Invasive Blood Pressure mean,NBPm,Routine Vital Signs,mmHg,Numeric
+220179,Non Invasive Blood Pressure systolic,NBPs,Routine Vital Signs,mmHg,Numeric
+226092,Orthostatic BPd lying,Orthostatic BPd lying,Routine Vital Signs,mmHg,Numeric
+226094,Orthostatic BPd sitting,Orthostatic BPd sitting,Routine Vital Signs,mmHg,Numeric
+226096,Orthostatic BPd standing,Orthostatic BPd standing,Routine Vital Signs,mmHg,Numeric
+224645,Orthostatic BPs lying,Orthostatic BPs lying,Routine Vital Signs,mmHg,Numeric
+224646,Orthostatic BPs sitting,Orthostatic BPs sitting,Routine Vital Signs,mmHg,Numeric
+223766,Orthostatic BPs standing,Orthostatic BPs standing,Routine Vital Signs,mmHg,Numeric
+223764,Orthostatic HR lying,Orthostatic HR lying,Routine Vital Signs,bpm,Numeric
+223765,Orthostatic HR sitting,Orthostatic HR sitting,Routine Vital Signs,bpm,Numeric
+224647,Orthostatic HR standing,Orthostatic HR standing,Routine Vital Signs,bpm,Numeric
+228229,PAR-Activity,PAR-Activity,Routine Vital Signs,,Text
+228230,PAR-Circulation,PAR-Circulation,Routine Vital Signs,,Text
+228231,PAR-Consciousness,PAR-Consciousness,Routine Vital Signs,,Text
+228232,PAR-Oxygen saturation,PAR-Oxygen saturation,Routine Vital Signs,,Text
+228233,PAR-Remain sedated,PAR-Remain sedated,Routine Vital Signs,,Checkbox
+228234,PAR-Respiration,PAR-Respiration,Routine Vital Signs,,Text
+224192,Pulsus Paradoxus,Pulsus Paradoxus,Routine Vital Signs,,Numeric
+224359,QTc,QTc,Routine Vital Signs,sec,Numeric
+223762,Temperature Celsius,Temperature C,Routine Vital Signs,°C,Numeric
+223761,Temperature Fahrenheit,Temperature F,Routine Vital Signs,°F,Numeric
+224642,Temperature Site,Temp Site,Routine Vital Signs,,Text
+226743,APACHE II,APACHE II,Scores - APACHE II,,Numeric
+226740,APACHE II Diagnosistic weight factors - Medical,Diagnostic weight category - Medical,Scores - APACHE II,,Text
+226742,APACHE II Diagnosistic weight factors - Surgical,Diagnosistic weight categories - Surgical,Scores - APACHE II,,Text
+226741,APACHE II Diagnosistic weight factors - Surgical emergency,Diagnosistic weight categories - Surgical emergenc,Scores - APACHE II,,Text
+226744,APACHE II PDR - Adjusted,APACHE II PDR - Adjusted,Scores - APACHE II,%,Numeric
+226745,APACHE II Predecited Death Rate,APACHE II PDR,Scores - APACHE II,%,Numeric
+226747,APACHEII-Chronic health points,APACHEII-Chp,Scores - APACHE II,,Text
+226748,APACHEII-Renal failure,APACHEII-Renal failure,Scores - APACHE II,,Checkbox
+226737,AaDO2ApacheIIValue,AaDO2ApacheIIValue,Scores - APACHE II,mmHg,Numeric
+226738,AgeApacheIIScore,AgeApacheIIScore,Scores - APACHE II,,Numeric
+226739,AgeApacheIIValue,AgeApacheIIValue,Scores - APACHE II,years,Numeric
+226746,ApacheII chronic health,ApacheII chronic health,Scores - APACHE II,,Text
+226749,ChpApacheIIScore,ChpApacheIIScore,Scores - APACHE II,,Numeric
+226751,CreatinineApacheIIScore,CreatinineApacheIIScore,Scores - APACHE II,,Numeric
+226752,CreatinineApacheIIValue,CreatinineApacheIIValue,Scores - APACHE II,,Numeric
+226753,DswfApacheScore,DswfApacheScore,Scores - APACHE II,,Numeric
+226754,FiO2ApacheIIValue,FiO2ApacheIIValue,Scores - APACHE II,%,Numeric
+226756,GCSEyeApacheIIValue,GCSEyeApacheIIValue,Scores - APACHE II,,Text
+226757,GCSMotorApacheIIValue,GCSMotorApacheIIValue,Scores - APACHE II,,Text
+226758,GCSVerbalApacheIIValue,GCSVerbalApacheIIValue,Scores - APACHE II,,Text
+228112,GCSVerbalApacheIIValue (intubated),GCSVerbalApacheIIValue (intubated),Scores - APACHE II,,Text
+226755,GcsApacheIIScore,GcsApacheIIScore,Scores - APACHE II,,Numeric
+226759,HCO3ApacheIIValue,HCO3ApacheIIValue,Scores - APACHE II,,Numeric
+226760,HCO3Score,HCO3Score,Scores - APACHE II,,Numeric
+226761,HematocritApacheIIScore,HematocritApacheIIScore,Scores - APACHE II,,Numeric
+226762,HematocritApacheIIValue,HematocritApacheIIValue,Scores - APACHE II,,Numeric
+226763,HrApacheIIScore,HrApacheIIScore,Scores - APACHE II,,Numeric
+226764,HrApacheIIValue,HrApacheIIValue,Scores - APACHE II,bpm,Numeric
+226765,MapApacheIIScore,MapApacheIIScore,Scores - APACHE II,,Numeric
+226766,MapApacheIIValue,MapApacheIIValue,Scores - APACHE II,mmHg,Numeric
+226767,OxygenApacheIIScore,OxygenApacheIIScore,Scores - APACHE II,,Numeric
+226769,PHApacheIIValue,PHApacheIIValue,Scores - APACHE II,,Numeric
+226770,PO2ApacheIIValue,PO2ApacheIIValue,Scores - APACHE II,,Numeric
+226768,PhApacheIIScore,PhApacheIIScore,Scores - APACHE II,,Numeric
+226771,PotassiumApacheIIScore,PotassiumApacheIIScore,Scores - APACHE II,,Numeric
+226772,PotassiumApacheIIValue,PotassiumApacheIIValue,Scores - APACHE II,,Numeric
+226774,RRApacheIIValue,RRApacheIIValue,Scores - APACHE II,insp/min,Numeric
+226773,RrApacheIIScore,RrApacheIIScore,Scores - APACHE II,,Numeric
+226775,SodiumApacheIIScore,SodiumApacheIIScore,Scores - APACHE II,,Numeric
+226776,SodiumApacheIIValue,SodiumApacheIIValue,Scores - APACHE II,,Numeric
+226777,TempApacheIIScore,TempApacheIIScore,Scores - APACHE II,,Numeric
+226778,TempApacheIIValue,TempApacheIIValue,Scores - APACHE II,°F,Numeric
+226780,WBCApacheIIValue,WBCApacheIIValue,Scores - APACHE II,,Numeric
+226779,WbcApacheIIScore,WbcApacheIIScore,Scores - APACHE II,,Numeric
+226987,APACHE IV diagnosis,APACHE IV diagnosis,Scores - APACHE IV,,Text
+226985,APACHE IV diagnosis choice 1,APACHE IV diagnosis choice 1,Scores - APACHE IV,,Text
+226986,APACHE IV diagnosis choice 2,APACHE IV diagnosis choice 2,Scores - APACHE IV,,Text
+226988,APACHE IV main groups non-operative,APACHE IV main group non-operatives,Scores - APACHE IV,,Text
+226989,APACHE IV main groups operative,APACHE IV main group operative,Scores - APACHE IV,,Text
+227025,Non-Operative Cardiovascular (CARDIOVASC),Cardiovascular Non-Operative,Scores - APACHE IV,,Text
+227026,Non-Operative Gastrointestinal (GI),Gastrointestinal Non-Operative,Scores - APACHE IV,,Text
+227027,Non-Operative Genitourinary (GENITOURIN),Genitourinary Non-Operative,Scores - APACHE IV,,Text
+227028,Non-Operative Hematology (HEMATO),Hematology Non-Operative,Scores - APACHE IV,,Text
+227029,Non-Operative Metabolic/Endocrine (METAB/ENDO),Metabolic/Endocrine Non-Operative,Scores - APACHE IV,,Text
+227030,Non-Operative Musculoskeletal/Skin (MUSKELSKIN),Musculoskeletal/Skin Non-Operative,Scores - APACHE IV,,Text
+227031,Non-Operative Neurologic (NEUROLOGIC),Neurologic Non-Operative,Scores - APACHE IV,,Text
+227032,Non-Operative Respiratory (RESPIRAT),Respiratory Non-Operative,Scores - APACHE IV,,Text
+227033,Non-Operative Transplant (TRANSPLANT),Transplant Non-Operative,Scores - APACHE IV,,Text
+227034,Non-Operative Trauma (TRAUMA),Trauma Non-Operative,Scores - APACHE IV,,Text
+227040,Post-Operative Cardiovascular (CARDIOVASC),Cardiovascular Post-Operative,Scores - APACHE IV,,Text
+227041,Post-Operative Gastrointestinal (GI),Gastrointestinal Post-Operative,Scores - APACHE IV,,Text
+227042,Post-Operative Genitourinary (GENITOURIN),Genitourinary Post-Operative,Scores - APACHE IV,,Text
+227043,Post-Operative Hematology (HEMATO),Hematology Post-Operative,Scores - APACHE IV,,Text
+227044,Post-Operative Metabolic/Endocrine (METAB/ENDO),Metabolic/Endocrine Post-Operative,Scores - APACHE IV,,Text
+227045,Post-Operative Musculoskeletal/Skin (MUSKELSKIN),Musculoskeletal/Skin Post-Operative,Scores - APACHE IV,,Text
+227046,Post-Operative Neurologic (NEUROLOGIC),Neurologic Post-Operative,Scores - APACHE IV,,Text
+227047,Post-Operative Respiratory (RESPIRAT),Respiratory Post-Operative,Scores - APACHE IV,,Text
+227048,Post-Operative Transplant (TRANSPLANT),Transplant Post-Operative,Scores - APACHE IV,,Text
+227049,Post-Operative Trauma (TRAUMA),Trauma Post-Operative,Scores - APACHE IV,,Text
+227056,Thrombolytic therapy,Thrombolytic therapy,Scores - APACHE IV,,Checkbox
+227057,Type of admission,Type of admission,Scores - APACHE IV,,Text
+227061,Ventilated at any time during ICU Day 1,Ventilated at any time during ICU Day 1,Scores - APACHE IV,,Checkbox
+226991,APACHEIII,APACHEIII,Scores - APACHE IV (2),,Numeric
+226996,APS,APS,Scores - APACHE IV (2),,Numeric
+226997,ARF,ARF,Scores - APACHE IV (2),,Checkbox
+226979,Admission location,Admission location,Scores - APACHE IV (2),,Text
+226980,AgeScore_ApacheIV,AgeScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+226982,AlbuminScore_ApacheIV,AlbuminScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+226981,Albumin_ApacheIV,Albumin_ApacheIV,Scores - APACHE IV (2),,Numeric
+226983,Apache IV A-aDO2,Apache IV A-aDO2,Scores - APACHE IV (2),,Numeric
+226984,Apache IV Age,Apache IV Age,Scores - APACHE IV (2),years,Numeric
+226990,Apache IV PaFiRatio,Apache IV PaFiRatio,Scores - APACHE IV (2),,Numeric
+226993,ApacheIV_LOS,ApacheIV_LOS,Scores - APACHE IV (2),%,Numeric
+226994,ApacheIV_Mortality prediction,ApacheIV_Mortality prediction,Scores - APACHE IV (2),,Numeric
+226995,ApacheIV_Natural antilog,ApacheIV_Natural antilog,Scores - APACHE IV (2),,Numeric
+227000,BUN_ApacheIV,BUN_ApacheIV,Scores - APACHE IV (2),,Numeric
+226999,BiliScore_ApacheIV,BiliScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+226998,Bilirubin_ApacheIV,Bilirubin_ApacheIV,Scores - APACHE IV (2),,Numeric
+227001,BunScore_ApacheIV,BunScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227002,CABG Patient,CABG Patient,Scores - APACHE IV (2),,Checkbox
+226750,Chronic Dilaysis,Chronic Dilaysis,Scores - APACHE IV (2),,Checkbox
+227003,Chronic health on admission,Chronic health on admission,Scores - APACHE IV (2),,Text
+227004,ChronicScore_ApacheIV,ChronicScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+226893,Coefficient Hospital Mortality,Coefficient Hospital Mortality,Scores - APACHE IV (2),,Text
+226894,Coefficient ICU length of stay,Coefficient ICU length of stay,Scores - APACHE IV (2),,Text
+227006,CreatScore_ApacheIV,CreatScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227005,Creatinine_ApacheIV,Creatinine_ApacheIV,Scores - APACHE IV (2),,Numeric
+227007,Diabetes,Diabetes,Scores - APACHE IV (2),,Checkbox
+227008,Ejection Fraction,Ejection Fraction,Scores - APACHE IV (2),%,Numeric
+227010,FiO2_ApacheIV,FiO2_ApacheIV,Scores - APACHE IV (2),%,Numeric
+227009,FiO2_ApacheIV_old,FiO2_ApacheIV_old,Scores - APACHE IV (2),,Numeric
+227011,GCSEye_ApacheIV,GCSEye_ApacheIV,Scores - APACHE IV (2),,Text
+227012,GCSMotor_ApacheIV,GCSMotor_ApacheIV,Scores - APACHE IV (2),,Text
+227014,GCSVerbal_ApacheIV,GCSVerbal_ApacheIV,Scores - APACHE IV (2),,Text
+227013,GcsScore_ApacheIV,GcsScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227016,GlucoseScore_ApacheIV,GlucoseScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227015,Glucose_ApacheIV,Glucose_ApacheIV,Scores - APACHE IV (2),,Numeric
+227018,HR_ApacheIV,HR_ApacheIV,Scores - APACHE IV (2),bpm,Numeric
+227017,Hematocrit_ApacheIV,Hematocrit_ApacheIV,Scores - APACHE IV (2),,Numeric
+227019,HrScore_ApacheIV,HrScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227020,HtScore_ApacheIV,HtScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227021,Intubated_ApacheIV,Intubated_ApacheIV,Scores - APACHE IV (2),,Checkbox
+227022,LOS pre-ICU admission,LOS pre-ICU admission,Scores - APACHE IV (2),,Numeric
+227023,MAP_ApacheIV,MAP_ApacheIV,Scores - APACHE IV (2),mmHg,Numeric
+227024,MapScore_ApacheIV,MapScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227035,OxygenScore_ApacheIV,OxygenScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227036,PCO2_ApacheIV,PCO2_ApacheIV,Scores - APACHE IV (2),,Numeric
+227038,PHPaCO2Score_ApacheIV,PHPaCO2Score_ApacheIV,Scores - APACHE IV (2),,Numeric
+227037,PH_ApacheIV,PH_ApacheIV,Scores - APACHE IV (2),,Numeric
+227039,PO2_ApacheIV,PO2_ApacheIV,Scores - APACHE IV (2),mmHg,Numeric
+227051,RRScore_ApacheIV,RRScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227050,RR_ApacheIV,RR_ApacheIV,Scores - APACHE IV (2),insp/min,Numeric
+228111,Readmission,Readmission,Scores - APACHE IV (2),,Checkbox
+227053,SodiumScore_ApacheIV,SodiumScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227052,Sodium_ApacheIV,Sodium_ApacheIV,Scores - APACHE IV (2),,Numeric
+227055,TempScore_ApacheIV,TempScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227054,TemperatureF_ApacheIV,TemperatureF_ApacheIV,Scores - APACHE IV (2),°F,Numeric
+227519,Urine output_ApacheIV,Urine output,Scores - APACHE IV (2),,Numeric
+227059,UrineScore_ApacheIV,UrineScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227060,Use A-aDO2,Use A-aDO2,Scores - APACHE IV (2),,Checkbox
+227063,WBCScore_ApacheIV,WBCScore_ApacheIV,Scores - APACHE IV (2),,Numeric
+227062,WBC_ApacheIV,WBC_ApacheIV,Scores - APACHE IV (2),,Numeric
+228189,CO-Tandem Heart Flow,CO-Flow (LifeSPARC),Tandem Heart,L/min,Numeric
+230086,FdO2,FdO2,Tandem Heart,%,Numeric
+228190,Infusate Drops/Minute,Infusate Drops/Minute,Tandem Heart,,Numeric
+228191,Infusion Pressure of Line,Infusion Pressure of Line,Tandem Heart,,Numeric
+228192,Oxygenator Sweep Rate,Oxygenator Sweep Rate,Tandem Heart,L/min,Numeric
+228195,Pump Speed,Pump Speed,Tandem Heart,,Numeric
+228198,Tandem Heart Flow,Flow (LifeSPARC),Tandem Heart,L/min,Numeric
+229798,Estimated Blood Loss (Thora),EBL (Thora),Thoracentesis,mL,Numeric
+225246,Fluid Removed (THCEN),Fluid Removed (THCEN),Thoracentesis,mL,Numeric
+224505,Lidocaine 1% (THCEN),Lidocaine 1% (THCEN),Thoracentesis,mL SC,Numeric
+228090,Number of attempts (THCEN),Number of attempts (THCEN),Thoracentesis,,Numeric
+223877,ZCath Lab Intake,ZCath Lab Intake,ZIntake,mL,Numeric
+223880,ZFree Form Intake,ZFree Form Intake,ZIntake,mL,Numeric
+223881,ZGU Irrigant Intake,ZGU Irrigant Intake,ZIntake,mL,Numeric
+223878,ZOR Intake,ZOR Intake,ZIntake,mL,Numeric
+223879,ZPACU Intake,ZPACU Intake,ZIntake,mL,Numeric

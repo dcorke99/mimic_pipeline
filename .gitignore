@@ -19,3 +19,7 @@ __pycache__/
 
 # Python environment
 .venv
+
+# Include pipeline configuration
+!config/
+!config/d_items_keep.csv
