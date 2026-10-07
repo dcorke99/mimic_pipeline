@@ -346,9 +346,11 @@ def fit_binary_model(features, target, model_type=None):
 def predict_binary_proba(pipe, features):
     feature_values = features.to_numpy(dtype=float)
     if "lightgbm" in pipe.named_steps:
+        # NumPy training generates names such as Column_0 in LightGBM.
+        # feature_names_in_ is only available when training used named columns.
         feature_values = pd.DataFrame(
             feature_values,
-            columns=pipe.named_steps["lightgbm"].feature_names_in_,
+            columns=pipe.named_steps["lightgbm"].feature_name_,
         )
     return pipe.predict_proba(feature_values)[:, 1]
 

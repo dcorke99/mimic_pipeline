@@ -51,7 +51,7 @@ For each panel and estimator, fixed-model results and diagnostics are saved in `
 
 `panel_analysis.py` provides a statistical descriptive analysis of `data/modelling_panel.csv`. It reads outcome feature rankings and saved propensity models from `artefacts/nuisance_models/xgboost` (configurable with `NUISANCE_MODEL_TYPE`).
 
-Run `./main_pipeline.ps1` in PowerShell to execute the main run order above using the project's `.venv` interpreter. The launcher stops immediately if any script fails.
+Run `./main_pipeline.ps1` in PowerShell to execute the main run order above using `python` from your active environment. Activate `PhDResearch` before running it. The launcher resolves Python from PATH, prints its path, and stops immediately if Python is unavailable or any script fails.
 
 ## Shared import modules
 
