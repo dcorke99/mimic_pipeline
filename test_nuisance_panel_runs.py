@@ -20,7 +20,7 @@ class NuisancePanelRunsTests(unittest.TestCase):
         self.addCleanup(settings.stop)
 
     def test_each_panel_gets_selected_models_and_separate_reports(self):
-        for selection in ("xgboost", "all"):
+        for selection in ("xgboost", "superlearner", "all"):
             with self.subTest(selection=selection), TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 panels = tuple(

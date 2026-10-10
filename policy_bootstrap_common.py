@@ -70,6 +70,7 @@ def refit_nuisance_predictions(panel, subjects, counts, estimator, n_splits=5, m
             model = nuisance.fit_crossfit_fold_model(
                 sample.loc[training, feature_columns], sample.loc[training, target],
                 f"{state}_{outcome}", fold, model_type=model_type,
+                groups=sample.loc[training, nuisance.ID_COL],
             )
             fallback_folds += int(model["fallback"])
             if outcome == "removal":

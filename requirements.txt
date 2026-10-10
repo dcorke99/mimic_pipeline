@@ -1,3 +1,4 @@
+catboost==1.2.10
 cloudpickle==3.1.2
 contourpy==1.4.0
 cycler==0.12.1

@@ -20,7 +20,9 @@ For fixed-model bootstrap, each evaluator’s `NUISANCE_MODEL_TYPE` must refer t
 
 Refitted-model bootstrap fits the selected learner during evaluation and can run without saved models or predictions.
 
-Implemented nuisance models are logistic regression, random forest, XGBoost and LightGBM.
+Implemented nuisance models are logistic regression, random forest, XGBoost, LightGBM and Super Learner. Set `MODEL_TYPE="superlearner"` to fit only the ensemble, or `MODEL_TYPE="all"` to include it with the standalone learners. Its outputs use the `superlearner` folder and the same prediction columns, diagnostics and saved-model formats; evaluators can select it with `NUISANCE_MODEL_TYPE="superlearner"`.
+
+Super Learner combines logistic regression, random forest, Extra Trees, XGBoost, LightGBM and CatBoost. Within each outer patient cross-fit training set, five inner patient-grouped folds produce out-of-fold probabilities. Nonnegative weights summing to one minimise Brier loss, then all six learners are refitted on that outer training set. Imputation and scaling are fitted separately within each inner training fold. The inner fold count is reduced for small patient sets; single-class or unusable-feature inner fits use training-only Laplace-smoothed probabilities. CatBoost runs on CPU and XGBoost retains the existing CUDA training configuration. Install the updated `requirements.txt` before selecting Super Learner. Nested fitting also applies to learning curves and refitted-model bootstrap, so these runs take longer than a standalone learner. `superlearner_weights_by_fold.csv` reports learner weights and inner Brier scores for each task and outer fold. Feature importance is reported as unavailable for the ensemble because the six learners' importance scales differ.
 
 “For semi-synthetic validation, to compare an estimated policy outcome with its known true value, that policy must be included in both `build_policy_panels.py` and `create_semi_synthetic_panel.py`.
 

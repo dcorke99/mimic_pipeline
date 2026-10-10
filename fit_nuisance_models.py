@@ -6,7 +6,7 @@ import joblib
 from lightgbm import LGBMClassifier
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -20,6 +20,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 import policy_eval_common as pec
+from superlearner import GroupedSuperLearner
 
 
 # Configuration
@@ -30,8 +31,9 @@ MODEL_TYPES = (
     "random_forest",
     "xgboost",
     "lightgbm",
+    "superlearner",
 )
-MODEL_TYPE = "all"  # Set to "all" to fit every learner in MODEL_TYPES.
+MODEL_TYPE = "superlearner"  # Set to "all" to fit every learner in MODEL_TYPES.
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -83,10 +85,15 @@ TOP_FEATURES_TO_SAVE = 15
 CALIBRATION_BINS = 10
 N_CROSSFIT_FOLDS = 5
 CROSSFIT_FOLD_COL = "_crossfit_fold"
-RUN_LEARNING_CURVES = True
+RUN_LEARNING_CURVES = False # set to True to produce learning curves for each nuisance model otherwise set to False
 LEARNING_CURVE_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
 FALLBACK_PRIOR_EVENTS = 1.0
 FALLBACK_PRIOR_NON_EVENTS = 1.0
+SUPERLEARNER_BASE_MODELS = (
+    "logistic_regression", "random_forest", "extra_trees",
+    "xgboost", "lightgbm", "catboost",
+)
+SUPERLEARNER_INNER_FOLDS = 5
 
 LEARNER_CONFIGURATIONS = {
     "logistic_regression": {
@@ -99,6 +106,25 @@ LEARNER_CONFIGURATIONS = {
         "min_samples_leaf": 5,
         "n_jobs": 1,
         "random_state": SEED,
+    },
+    "extra_trees": {
+        "n_estimators": 200,
+        "max_depth": None,
+        "min_samples_leaf": 5,
+        "n_jobs": 1,
+        "random_state": SEED,
+    },
+    "catboost": {
+        "iterations": 300,
+        "depth": 6,
+        "learning_rate": 0.05,
+        "loss_function": "Logloss",
+        "nan_mode": "Min",
+        "task_type": "GPU",
+        "random_seed": SEED,
+        "thread_count": 1,
+        "verbose": False,
+        "allow_writing_files": False,
     },
     "xgboost": {
         "objective": "binary:logistic",
@@ -142,6 +168,18 @@ LEARNER_PREPROCESSING = {
         "imputation_used": True,
         "scaling_used": False,
         "native_missing_handling": False,
+    },
+    "extra_trees": {
+        "preprocessing_type": "median_imputation",
+        "imputation_used": True,
+        "scaling_used": False,
+        "native_missing_handling": False,
+    },
+    "catboost": {
+        "preprocessing_type": "native_missing_values",
+        "imputation_used": False,
+        "scaling_used": False,
+        "native_missing_handling": True,
     },
     "xgboost": {
         "preprocessing_type": "native_missing_values",
@@ -317,15 +355,29 @@ def crossfit_row_assignments(df):
     return df[columns].copy()
 
 
-def fit_binary_model(features, target, model_type=None):
-    model_type = MODEL_TYPE if model_type is None else model_type
-    learner_configuration = LEARNER_CONFIGURATIONS[model_type]
-    estimator = {
+def make_binary_pipeline(model_type):
+    if model_type == "superlearner":
+        return Pipeline([("superlearner", GroupedSuperLearner(
+            estimators=[(name, make_binary_pipeline(name)) for name in SUPERLEARNER_BASE_MODELS],
+            n_splits=SUPERLEARNER_INNER_FOLDS,
+        ))])
+    estimator_types = {
         "logistic_regression": LogisticRegression,
         "random_forest": RandomForestClassifier,
+        "extra_trees": ExtraTreesClassifier,
         "xgboost": XGBClassifier,
         "lightgbm": LGBMClassifier,
-    }[model_type](**learner_configuration)
+    }
+    if model_type == "catboost":
+        try:
+            from catboost import CatBoostClassifier
+        except ImportError as exc:
+            raise ImportError(
+                "Super Learner requires CatBoost. Install requirements.txt in the active environment."
+            ) from exc
+        estimator_types["catboost"] = CatBoostClassifier
+    learner_configuration = LEARNER_CONFIGURATIONS[model_type]
+    estimator = estimator_types[model_type](**learner_configuration)
 
     steps = []
     if LEARNER_PREPROCESSING[model_type]["imputation_used"]:
@@ -333,8 +385,16 @@ def fit_binary_model(features, target, model_type=None):
     if LEARNER_PREPROCESSING[model_type]["scaling_used"]:
         steps.append(("standardiser", StandardScaler()))
     steps.append((model_type, estimator))
-    pipe = Pipeline(steps)
-    pipe.fit(features.to_numpy(dtype=float), target.to_numpy(dtype=int))
+    return Pipeline(steps)
+
+
+def fit_binary_model(features, target, model_type=None, groups=None):
+    model_type = MODEL_TYPE if model_type is None else model_type
+    pipe = make_binary_pipeline(model_type)
+    fit_params = {"superlearner__groups": np.asarray(groups)} if model_type == "superlearner" else {}
+    if model_type == "superlearner" and groups is None:
+        raise ValueError("Super Learner requires patient groups for inner cross-validation")
+    pipe.fit(features.to_numpy(dtype=float), target.to_numpy(dtype=int), **fit_params)
     # Training uses CUDA, but downstream predictions use NumPy arrays in CPU
     # memory. Match the fitted booster to those arrays to avoid XGBoost's
     # cross-device DMatrix fallback during prediction.
@@ -384,11 +444,16 @@ def fit_crossfit_fold_model(
     model_name,
     fold,
     model_type=None,
+    groups=None,
 ):
     # Fit crossfit fold model
     if len(features) == 0:
         raise ValueError(f"Cannot fit {model_name} fold {fold}: training risk set is empty")
     target = target.astype(int)
+    model_type = MODEL_TYPE if model_type is None else model_type
+    if model_type == "superlearner":
+        if groups is None or len(groups) != len(features) or pd.isna(groups).any():
+            raise ValueError("Super Learner requires aligned nonmissing patient groups")
     events = int(target.sum())
     non_events = int(len(target) - events)
     retained_feature_cols, constant_features = split_constant_features(features)
@@ -406,6 +471,8 @@ def fit_crossfit_fold_model(
         fallback_reason = "single_target_class"
     elif not retained_feature_cols:
         fallback_reason = "no_usable_features"
+    elif model_type == "superlearner" and len(pd.unique(np.asarray(groups))) < 2:
+        fallback_reason = "insufficient_inner_patient_groups"
     if fallback_reason is not None:
         # Beta(1, 1) / Laplace smoothing avoids exact zero or one while using
         # only this fold's training rows. Held-out outcomes are never used
@@ -434,6 +501,7 @@ def fit_crossfit_fold_model(
         features.loc[:, retained_feature_cols],
         target,
         model_type=model_type,
+        groups=groups,
     )
     return {
         **fold_details,
@@ -488,6 +556,37 @@ def mean_feature_importance_series(fold_models):
     if not importances:
         return pd.Series(dtype=float)
     return pd.concat(importances, axis=1).mean(axis=1).sort_values(ascending=False)
+
+
+def superlearner_weights_by_fold(propensity_fold_models, in_models, out_models):
+    columns = [
+        "model_group", "outcome", "fold", "learner", "weight",
+        "base_inner_brier", "ensemble_inner_brier", "inner_folds",
+        "fallback_reason",
+    ]
+    rows = []
+    tasks = [("propensity", "removal", propensity_fold_models)]
+    tasks.extend(("in_outcome", outcome, payload["fold_models"])
+                 for outcome, payload in in_models.items())
+    tasks.extend(("out_outcome", outcome, payload["fold_models"])
+                 for outcome, payload in out_models.items())
+    for model_group, outcome, fold_models in tasks:
+        for fold_model in fold_models:
+            estimator = (None if fold_model["fallback"]
+                         else fold_model["model"].named_steps["superlearner"])
+            for index, learner in enumerate(SUPERLEARNER_BASE_MODELS):
+                rows.append({
+                    "model_group": model_group,
+                    "outcome": outcome,
+                    "fold": fold_model["fold"],
+                    "learner": learner,
+                    "weight": np.nan if estimator is None else estimator.weights_[index],
+                    "base_inner_brier": np.nan if estimator is None else estimator.base_inner_brier_[index],
+                    "ensemble_inner_brier": np.nan if estimator is None else estimator.inner_brier_,
+                    "inner_folds": 0 if estimator is None else estimator.n_inner_splits_,
+                    "fallback_reason": fold_model["fallback_reason"],
+                })
+    return pd.DataFrame(rows, columns=columns)
 
 
 def constant_features_by_fold(propensity_fold_models, in_models, out_models):
@@ -1234,6 +1333,7 @@ def nuisance_learning_curves(
                         df.loc[subset_mask, task["target_col"]],
                         f"learning_curve_{task['model_name']}_{training_fraction:.2f}",
                         fold,
+                        groups=df.loc[subset_mask, ID_COL],
                     )
                 )
                 predictions = predict_crossfit_fold(
@@ -1346,6 +1446,7 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols, panel_name=None
             df.loc[train_mask, ACTION_COL],
             "propensity_removal",
             fold,
+            groups=df.loc[train_mask, ID_COL],
         )
         held_out_index = df.index[held_out_mask]
         # Predict crossfit fold
@@ -1452,6 +1553,7 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
                 df.loc[train_mask, target_col],
                 model_name,
                 fold,
+                groups=df.loc[train_mask, ID_COL],
             )
             counterfactual_features = df.loc[
                 held_out_mask, in_feature_cols
@@ -1574,6 +1676,7 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
                 df.loc[train_mask, target_col],
                 model_name,
                 fold,
+                groups=df.loc[train_mask, ID_COL],
             )
             # Predict crossfit fold
             df.loc[held_out_mask, score_col] = predict_crossfit_fold(
@@ -1892,6 +1995,11 @@ def run_nuisance_model(model_type, panel_name=None):
 
     # Validate exported probabilities
     validate_exported_probabilities(df)
+    if MODEL_TYPE == "superlearner":
+        save_nuisance_report(
+            superlearner_weights_by_fold(propensity_fold_models, in_models, out_models),
+            OUTDIR / "superlearner_weights_by_fold.csv",
+        )
 
     # Save combined performance metrics
     save_nuisance_report(
