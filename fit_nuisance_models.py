@@ -26,14 +26,16 @@ from superlearner import GroupedSuperLearner
 # Configuration
 
 SEED = 42
-MODEL_TYPES = (
-    "logistic_regression",
-    "random_forest",
-    "xgboost",
-    "lightgbm",
-    "superlearner",
-)
-MODEL_TYPE = "superlearner"  # Set to "all" to fit every learner in MODEL_TYPES.
+# Models to fit for each selected panel, in order; uncomment entries to include them.
+MODEL_TYPES = [
+    # "logistic_regression",
+    # "random_forest",
+    "extra_trees",
+    # "xgboost",
+    # "lightgbm",
+    "catboost",
+    # "superlearner",
+]
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -41,15 +43,17 @@ REPO_ROOT = Path(__file__).resolve().parent
 VALIDATION_DIR = REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding"
 PANEL_RUNS = (
     ("real", REPO_ROOT / "data/modelling_panel.csv", REPO_ROOT / "artefacts/nuisance_models"),
-    ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
-     VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),
-    ("confounder_omitted", VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
-     VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),
-    ("randomised_action", VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
-     VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"),
+    # ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
+    #  VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),
+    # ("confounder_omitted", VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
+    #  VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),
+    # ("randomised_action", VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
+    #  VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"),
 )
 _, INFILE, NUISANCE_ROOT = PANEL_RUNS[0]
 
+# Internal active-model state, updated by configure_model_run during fitting.
+MODEL_TYPE = MODEL_TYPES[0] if MODEL_TYPES else "logistic_regression"
 MODEL_OUTPUT_NAME = MODEL_TYPE
 OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 
@@ -373,7 +377,8 @@ def make_binary_pipeline(model_type):
             from catboost import CatBoostClassifier
         except ImportError as exc:
             raise ImportError(
-                "Super Learner requires CatBoost. Install requirements.txt in the active environment."
+                "CatBoost and Super Learner require the catboost package. "
+                "Install requirements.txt in the active environment."
             ) from exc
         estimator_types["catboost"] = CatBoostClassifier
     learner_configuration = LEARNER_CONFIGURATIONS[model_type]
@@ -2047,7 +2052,13 @@ def run_nuisance_model(model_type, panel_name=None):
 
 
 def main():
-    model_types = MODEL_TYPES if MODEL_TYPE == "all" else (MODEL_TYPE,)
+    model_types = tuple(MODEL_TYPES)
+    if not model_types:
+        print("[MODEL] No models selected in MODEL_TYPES; nothing to fit.", flush=True)
+        return
+    unknown_models = set(model_types) - (LEARNER_CONFIGURATIONS.keys() | {"superlearner"})
+    if unknown_models:
+        raise ValueError(f"Unknown nuisance models in MODEL_TYPES: {sorted(unknown_models)}")
     for panel_name, input_path, nuisance_root in PANEL_RUNS:
         configure_panel_run(input_path, nuisance_root)
         print(f"[PANEL] {panel_name}: {INFILE}", flush=True)

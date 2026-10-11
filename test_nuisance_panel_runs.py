@@ -20,12 +20,15 @@ class NuisancePanelRunsTests(unittest.TestCase):
         self.addCleanup(settings.stop)
 
     def test_each_panel_gets_selected_models_and_separate_reports(self):
-        for selection in ("xgboost", "superlearner", "all"):
+        for selection in (["xgboost"], ["superlearner"], ["extra_trees"], ["catboost"],
+                          ["lightgbm", "logistic_regression"],
+                          ["logistic_regression", "random_forest", "extra_trees",
+                           "xgboost", "lightgbm", "catboost", "superlearner"]):
             with self.subTest(selection=selection), TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 panels = tuple(
                     (name, root / f"{name}.csv", root / name / "nuisance_models")
-                    for name, _, _ in nuisance.PANEL_RUNS
+                    for name in ("first", "second")
                 )
                 for _, path, _ in panels:
                     path.touch()
@@ -40,15 +43,14 @@ class NuisancePanelRunsTests(unittest.TestCase):
                                      nuisance.OUTDIR / "crossfit_row_assignments.csv")
 
                 with patch.object(nuisance, "PANEL_RUNS", panels), \
-                     patch.object(nuisance, "MODEL_TYPE", selection), \
+                     patch.object(nuisance, "MODEL_TYPES", selection), \
                      patch.object(nuisance, "run_nuisance_model", side_effect=fit), \
                      patch.object(nuisance, "build_nuisance_model_comparison",
                                   side_effect=lambda: reports.append(nuisance.MODEL_COMPARISON_FILE)), \
                      redirect_stdout(StringIO()):
                     nuisance.main()
-                    self.assertEqual(nuisance.MODEL_TYPE,
-                                     nuisance.MODEL_TYPES[-1] if selection == "all" else selection)
-                models = nuisance.MODEL_TYPES if selection == "all" else (selection,)
+                    self.assertEqual(nuisance.MODEL_TYPE, selection[-1])
+                models = selection
                 self.assertEqual(runs, [(path, output / model, model)
                                         for _, path, output in panels for model in models])
                 self.assertEqual(reports, [output / "nuisance_model_comparison.csv"
@@ -69,7 +71,7 @@ class NuisancePanelRunsTests(unittest.TestCase):
             panels = (("real", existing, root / "real"),
                       ("missing", missing, root / "missing"))
             with patch.object(nuisance, "PANEL_RUNS", panels), \
-                 patch.object(nuisance, "MODEL_TYPE", "xgboost"), \
+                 patch.object(nuisance, "MODEL_TYPES", ["xgboost"]), \
                  patch.object(nuisance, "build_nuisance_model_comparison"), \
                  patch.object(nuisance, "run_nuisance_model",
                               side_effect=lambda model, panel_name: nuisance.INFILE.read_text()) as fit:
