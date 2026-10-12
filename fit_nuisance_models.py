@@ -21,43 +21,28 @@ from xgboost import XGBClassifier
 
 import policy_eval_common as pec
 from superlearner import GroupedSuperLearner
+import pipeline_config as run_config
+from pipeline_config import MODEL_TYPES, RUN_LEARNING_CURVES, SUPERLEARNER_BASE_MODELS
+from pipeline_runtime import first_panel_run, get_data_dir, get_panel_runs, validate_run_choices
+
+validate_run_choices()
 
 
 # Configuration
 
 SEED = 42
-# Models to fit for each selected panel, in order; uncomment entries to include them.
-MODEL_TYPES = [
-    # "logistic_regression",
-    # "random_forest",
-    "extra_trees",
-    # "xgboost",
-    # "lightgbm",
-    "catboost",
-    # "superlearner",
-]
-
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Panels to process in this script only; comment out entries to skip them.
-VALIDATION_DIR = REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding"
-PANEL_RUNS = (
-    ("real", REPO_ROOT / "data/modelling_panel.csv", REPO_ROOT / "artefacts/nuisance_models"),
-    # ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
-    #  VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),
-    # ("confounder_omitted", VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
-    #  VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),
-    # ("randomised_action", VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
-    #  VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"),
-)
-_, INFILE, NUISANCE_ROOT = PANEL_RUNS[0]
+# Run selections come from pipeline_config.py; paths are derived centrally.
+PANEL_RUNS = get_panel_runs(run_config.NUISANCE_PANELS)
+_, INFILE, NUISANCE_ROOT = first_panel_run(PANEL_RUNS)
 
 # Internal active-model state, updated by configure_model_run during fitting.
 MODEL_TYPE = MODEL_TYPES[0] if MODEL_TYPES else "logistic_regression"
 MODEL_OUTPUT_NAME = MODEL_TYPE
 OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 
-COVARIATE_DICT_FILE = REPO_ROOT / "data/covariate_dictionary.csv"
+COVARIATE_DICT_FILE = get_data_dir() / "covariate_dictionary.csv"
 NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
 PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
 CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
@@ -89,14 +74,9 @@ TOP_FEATURES_TO_SAVE = 15
 CALIBRATION_BINS = 10
 N_CROSSFIT_FOLDS = 5
 CROSSFIT_FOLD_COL = "_crossfit_fold"
-RUN_LEARNING_CURVES = False # set to True to produce learning curves for each nuisance model otherwise set to False
 LEARNING_CURVE_FRACTIONS = (0.25, 0.50, 0.75, 1.00)
 FALLBACK_PRIOR_EVENTS = 1.0
 FALLBACK_PRIOR_NON_EVENTS = 1.0
-SUPERLEARNER_BASE_MODELS = (
-    "logistic_regression", "random_forest", "extra_trees",
-    "xgboost", "lightgbm", "catboost",
-)
 SUPERLEARNER_INNER_FOLDS = 5
 
 LEARNER_CONFIGURATIONS = {

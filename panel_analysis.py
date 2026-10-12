@@ -12,14 +12,18 @@ import matplotlib.pyplot as plt
 
 from policy_eval_common import add_episode_day
 
-# Config
-REPO_ROOT = Path(__file__).resolve().parent
-DATA_FILE = REPO_ROOT / "data" / "modelling_panel.csv"
-RESULTS_DIR = REPO_ROOT / "artefacts" / "panel_analysis"
-COVARIATE_DICT_FILE = REPO_ROOT / "data" / "covariate_dictionary.csv"
+# Run choices come from pipeline_config.py; descriptive settings stay here.
+import pipeline_config as run_config
+from pipeline_config import NUISANCE_MODEL_TYPE
+from pipeline_runtime import get_data_dir, get_panel_run, validate_run_choices
 
-NUISANCE_MODEL_TYPE = "xgboost"
-NUISANCE_DIR = REPO_ROOT / "artefacts" / "nuisance_models" / NUISANCE_MODEL_TYPE
+validate_run_choices()
+
+REPO_ROOT = Path(__file__).resolve().parent
+_, DATA_FILE, _NUISANCE_ROOT = get_panel_run(run_config.ANALYSIS_PANEL)
+RESULTS_DIR = _NUISANCE_ROOT.parent / "panel_analysis"
+COVARIATE_DICT_FILE = get_data_dir() / "covariate_dictionary.csv"
+NUISANCE_DIR = _NUISANCE_ROOT / NUISANCE_MODEL_TYPE
 OUTCOME_FEATURES_FILE = NUISANCE_DIR / "outcome_top_model_features.csv"
 PROPENSITY_MODEL_FILE = NUISANCE_DIR / "propensity_model.pkl"
 
@@ -699,7 +703,9 @@ def build_duplicate_interval_reports(df):
 
 
 # Run the merged panel diagnostics and supervisor-facing descriptive/inferential analysis
-def main(include_age_split=True):
+def main(include_age_split=None):
+    if include_age_split is None:
+        include_age_split = run_config.ANALYSIS_INCLUDE_AGE_SPLIT
     RESULTS_DIR.mkdir(exist_ok=True, parents=True)
 
     # Load and standardise the panel

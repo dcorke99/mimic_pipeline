@@ -10,27 +10,22 @@ import fit_nuisance_models as nuisance
 from build_policy_panels import read_policy_collection
 
 
-# Configuration
+import pipeline_config as run_config
+from pipeline_config import BOOTSTRAP_MODES, NUISANCE_MODEL_TYPE
+from pipeline_runtime import get_panel_runs, validate_run_choices
+
+validate_run_choices()
+
+# Technical settings
 
 REPO_ROOT = Path(__file__).resolve().parent
-NUISANCE_MODEL_TYPE = "xgboost"
 N_BOOTSTRAP = 1000
 BOOTSTRAP_SEED = 20260923
 REFIT_CROSSFIT_FOLDS = 5
-BOOTSTRAP_MODES = ("fixed",)  # Use ("fixed", "refit") to run both modes.
 
 
-# Panels to process in this script only; comment out entries to skip them.
-VALIDATION_DIR = REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding"
-PANEL_RUNS = (
-    ("real", REPO_ROOT / "data/modelling_panel.csv", REPO_ROOT / "artefacts/nuisance_models"),
-    ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
-     VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),
-    ("confounder_omitted", VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
-     VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),
-    ("randomised_action", VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
-     VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"),
-)
+# Run selections come from pipeline_config.py; paths are derived centrally.
+PANEL_RUNS = get_panel_runs(run_config.EVALUATION_PANELS)
 
 OUTPUT_FILENAMES = {
     "summary": "ipw_policy_outcomes_summary.csv",

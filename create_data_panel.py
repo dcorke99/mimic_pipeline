@@ -7,13 +7,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from pipeline_runtime import get_data_dir, validate_run_choices
+
+validate_run_choices()
+
 # Define pipeline directories
 REPO_ROOT = Path(__file__).resolve().parent
 # Raw data lives outside the repository by default. Override with MIMIC_DIR
 MIMIC_DIR = Path(os.environ.get("MIMIC_DIR") or REPO_ROOT.parent / "Data" / "MIMIC-IV" / "mimic-iv-3.1").expanduser()
 if not MIMIC_DIR.is_absolute():
     MIMIC_DIR = REPO_ROOT / MIMIC_DIR
-DATA_DIR = REPO_ROOT / "data"
+# Use the shared baseline data directory.
+DATA_DIR = get_data_dir()
 CONFIG_DIR = REPO_ROOT / "config"
 
 # Limit memory use per read
@@ -453,6 +458,7 @@ def make_state_windows(state_start, state_end):
 
     # Return period boundaries
     return rows
+
 
 def validate_cauti_risk_set(panel, episode_keys):
     # Reconstruct first-event eligibility in episode-time order

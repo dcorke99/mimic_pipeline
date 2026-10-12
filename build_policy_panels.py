@@ -9,29 +9,24 @@ import pandas as pd
 
 import policy_eval_common as pec
 from policy_eval_common import add_episode_day
+import pipeline_config as run_config
+from pipeline_config import POLICY_DAYS
+from pipeline_runtime import first_panel_run, get_panel_runs, validate_run_choices
+
+validate_run_choices()
 
 
 # Configuration
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Panels to process in this script only; comment out entries to skip them.
-VALIDATION_DIR = REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding"
-PANEL_RUNS = (
-    ("real", REPO_ROOT / "data/modelling_panel.csv", REPO_ROOT / "artefacts/nuisance_models"),
-    ("semi_synthetic_with_confounding", VALIDATION_DIR / "semi_synthetic_panel.csv",
-     VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),
-    ("confounder_omitted", VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
-     VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),
-    ("randomised_action", VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
-     VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"),
-)
+# Run selections come from pipeline_config.py; paths are derived centrally.
+PANEL_RUNS = get_panel_runs(run_config.POLICY_PANELS)
 
 # Initial paths for direct single-panel calls use the first selected panel.
-_, INPUT_PATH, _NUISANCE_ROOT = PANEL_RUNS[0]
+_, INPUT_PATH, _NUISANCE_ROOT = first_panel_run(PANEL_RUNS)
 OUTDIR = _NUISANCE_ROOT.parent / "counterfactual_policies"
 
-POLICY_DAYS = [1, 2, 3, 4, 5]
 POLICY_MANIFEST_PATH = OUTDIR / "policy_panels.csv"
 CHECK_OUTPUT_PATH = OUTDIR / "policy_panel_checks.csv"
 

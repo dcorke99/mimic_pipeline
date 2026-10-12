@@ -13,19 +13,17 @@ from build_policy_panels import (
     build_long_policy_panel,
 )
 
-# Configuration: paths, reproducibility and policies
-# Running this script writes all three validation datasets.
+# Run choices come from pipeline_config.py; simulation settings stay here.
+from pipeline_config import POLICY_DAYS
+from pipeline_runtime import get_data_dir, get_validation_dir, validate_run_choices
+
+validate_run_choices()
 
 REPO_ROOT = Path(__file__).resolve().parent
-SOURCE_PANEL = REPO_ROOT / "data" / "modelling_panel.csv"
-OUTPUT_DIR = (
-    REPO_ROOT
-    / "artefacts"
-    / "semi-synthetic_validation"
-    / "semi_synthetic_measured_confounding"
-)
+SOURCE_PANEL = get_data_dir() / "modelling_panel.csv"
+OUTPUT_DIR = get_validation_dir()
 RANDOM_SEED = 20260811
-POLICY_DAYS = [1, 2, 3, 4, 5]  # Policies for known-truth calculations in this script.
+# Running this stage generates all three validation datasets.
 
 # Base-panel columns replaced in validation copies
 

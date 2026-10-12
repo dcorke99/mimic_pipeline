@@ -8,38 +8,42 @@ import numpy as np
 import pandas as pd
 
 import policy_eval_common as pec
+import pipeline_config as run_config
+from pipeline_runtime import get_panel_run, validate_run_choices
+
+validate_run_choices()
 
 
 # Configuration
 
 REPO_ROOT = Path(__file__).resolve().parent
-BOOTSTRAP_MODE = "fixed"  # Select "fixed" or "refit" results for this audit.
-if BOOTSTRAP_MODE not in ("fixed", "refit"):
-    raise ValueError(f"Unknown bootstrap mode: {BOOTSTRAP_MODE!r}")
+BOOTSTRAP_MODE = run_config.RESULT_CHECK_BOOTSTRAP_MODE
+_, _PANEL_PATH, _NUISANCE_ROOT = get_panel_run(run_config.RESULT_CHECK_PANEL)
+_ARTEFACT_ROOT = _NUISANCE_ROOT.parent
 
-POLICY_CHECK_PATH = REPO_ROOT / "artefacts" / "counterfactual_policies" / "policy_panel_checks.csv"
+POLICY_CHECK_PATH = _ARTEFACT_ROOT / "counterfactual_policies" / "policy_panel_checks.csv"
 GFORMULA_SUMMARY_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / BOOTSTRAP_MODE / "gformula_policy_outcomes_summary.csv"
+    _ARTEFACT_ROOT / "policy_eval" / "gformula" / BOOTSTRAP_MODE / "gformula_policy_outcomes_summary.csv"
 )
 GFORMULA_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "gformula" / BOOTSTRAP_MODE / "gformula_diagnostics.csv"
+    _ARTEFACT_ROOT / "policy_eval" / "gformula" / BOOTSTRAP_MODE / "gformula_diagnostics.csv"
 )
 AIPW_SUMMARY_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / BOOTSTRAP_MODE / "aipw_policy_outcomes_summary.csv"
+    _ARTEFACT_ROOT / "policy_eval" / "aipw" / BOOTSTRAP_MODE / "aipw_policy_outcomes_summary.csv"
 )
 AIPW_WEIGHT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "aipw" / BOOTSTRAP_MODE / "aipw_weight_diagnostics.csv"
+    _ARTEFACT_ROOT / "policy_eval" / "aipw" / BOOTSTRAP_MODE / "aipw_weight_diagnostics.csv"
 )
 IPW_SUMMARY_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_policy_outcomes_summary.csv"
+    _ARTEFACT_ROOT / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_policy_outcomes_summary.csv"
 )
 IPW_WEIGHT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_weight_diagnostics.csv"
+    _ARTEFACT_ROOT / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_weight_diagnostics.csv"
 )
 IPW_SUPPORT_DIAGNOSTICS_PATH = (
-    REPO_ROOT / "artefacts" / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_policy_support_diagnostics.csv"
+    _ARTEFACT_ROOT / "policy_eval" / "ipw" / BOOTSTRAP_MODE / "ipw_policy_support_diagnostics.csv"
 )
-OUTPUT_PATH = REPO_ROOT / "artefacts" / "policy_eval" / f"policy_results_checks_{BOOTSTRAP_MODE}.csv"
+OUTPUT_PATH = _ARTEFACT_ROOT / "policy_eval" / f"policy_results_checks_{BOOTSTRAP_MODE}.csv"
 
 CURRENT_PRACTICE_LABEL = "current_practice"
 TOLERANCE = 1e-10

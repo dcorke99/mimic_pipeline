@@ -284,7 +284,8 @@ class RefitBootstrapTests(unittest.TestCase):
         with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
             root = Path(temporary)
             panels = tuple((name, root / f"{name}.csv", root / name / "nuisance_models")
-                           for name, _, _ in nuisance.PANEL_RUNS)
+                           for name in ("real", "semi_synthetic_with_confounding",
+                                        "confounder_omitted", "randomised_action"))
             for _, panel_path, nuisance_root in panels:
                 self.panel.to_csv(panel_path, index=False)
                 predictions = nuisance_root / "logistic_regression/nuisance_predictions.csv"
