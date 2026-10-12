@@ -9,16 +9,13 @@ import pandas as pd
 
 import policy_eval_common as pec
 import pipeline_config as run_config
-from pipeline_runtime import get_panel_run, validate_run_choices
-
-validate_run_choices()
 
 
 # Configuration
 
 REPO_ROOT = Path(__file__).resolve().parent
 BOOTSTRAP_MODE = run_config.RESULT_CHECK_BOOTSTRAP_MODE
-_, _PANEL_PATH, _NUISANCE_ROOT = get_panel_run(run_config.RESULT_CHECK_PANEL)
+_PANEL_PATH, _NUISANCE_ROOT = run_config.PANEL_PATHS[run_config.RESULT_CHECK_PANEL]
 _ARTEFACT_ROOT = _NUISANCE_ROOT.parent
 
 POLICY_CHECK_PATH = _ARTEFACT_ROOT / "counterfactual_policies" / "policy_panel_checks.csv"

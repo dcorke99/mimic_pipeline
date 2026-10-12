@@ -18,9 +18,7 @@ from policy_eval_common import (
 
 import pipeline_config as run_config
 from pipeline_config import BOOTSTRAP_MODES, NUISANCE_MODEL_TYPE
-from pipeline_runtime import get_panel_runs, validate_run_choices
 
-validate_run_choices()
 
 # Technical settings
 
@@ -30,8 +28,8 @@ BOOTSTRAP_SEED = 20260923
 REFIT_CROSSFIT_FOLDS = 5
 
 
-# Run selections come from pipeline_config.py; paths are derived centrally.
-PANEL_RUNS = get_panel_runs(run_config.EVALUATION_PANELS)
+# Run selections and panel paths come from pipeline_config.py.
+PANEL_RUNS = tuple((name, *run_config.PANEL_PATHS[name]) for name in run_config.EVALUATION_PANELS)
 
 OUTPUT_FILENAMES = {
     "summary": "gformula_policy_outcomes_summary.csv",

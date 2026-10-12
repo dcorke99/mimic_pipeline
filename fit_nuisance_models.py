@@ -23,9 +23,6 @@ import policy_eval_common as pec
 from superlearner import GroupedSuperLearner
 import pipeline_config as run_config
 from pipeline_config import MODEL_TYPES, RUN_LEARNING_CURVES, SUPERLEARNER_BASE_MODELS
-from pipeline_runtime import first_panel_run, get_data_dir, get_panel_runs, validate_run_choices
-
-validate_run_choices()
 
 
 # Configuration
@@ -33,16 +30,16 @@ validate_run_choices()
 SEED = 42
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Run selections come from pipeline_config.py; paths are derived centrally.
-PANEL_RUNS = get_panel_runs(run_config.NUISANCE_PANELS)
-_, INFILE, NUISANCE_ROOT = first_panel_run(PANEL_RUNS)
+# Run selections and panel paths come from pipeline_config.py.
+PANEL_RUNS = tuple((name, *run_config.PANEL_PATHS[name]) for name in run_config.NUISANCE_PANELS)
+_, INFILE, NUISANCE_ROOT = (PANEL_RUNS[0] if PANEL_RUNS else ("real", *run_config.PANEL_PATHS["real"]))
 
 # Internal active-model state, updated by configure_model_run during fitting.
 MODEL_TYPE = MODEL_TYPES[0] if MODEL_TYPES else "logistic_regression"
 MODEL_OUTPUT_NAME = MODEL_TYPE
 OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 
-COVARIATE_DICT_FILE = get_data_dir() / "covariate_dictionary.csv"
+COVARIATE_DICT_FILE = REPO_ROOT / "data/covariate_dictionary.csv"
 NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
 PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
 CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"

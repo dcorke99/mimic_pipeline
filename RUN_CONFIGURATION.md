@@ -2,7 +2,7 @@
 
 Edit `pipeline_config.py` in this worktree to choose what runs. Individual Python scripts and the pipeline launcher read this same file at startup. Restart a running script after changing it.
 
-The config contains only run choices. Paths are derived in `pipeline_runtime.py`; model hyperparameters, training-device settings, random seeds, bootstrap replicate counts, fold counts, simulation coefficients, cleaning thresholds and column definitions remain in their implementation modules.
+The config contains run choices and a plain `PANEL_PATHS` table. Run choices are used directly without upfront validation; model hyperparameters, training-device settings, random seeds, bootstrap replicate counts, fold counts, simulation coefficients, cleaning thresholds and column definitions remain in their implementation modules.
 
 | Choice | Purpose |
 | --- | --- |

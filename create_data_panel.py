@@ -7,9 +7,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from pipeline_runtime import get_data_dir, validate_run_choices
-
-validate_run_choices()
 
 # Define pipeline directories
 REPO_ROOT = Path(__file__).resolve().parent
@@ -18,7 +15,7 @@ MIMIC_DIR = Path(os.environ.get("MIMIC_DIR") or REPO_ROOT.parent / "Data" / "MIM
 if not MIMIC_DIR.is_absolute():
     MIMIC_DIR = REPO_ROOT / MIMIC_DIR
 # Use the shared baseline data directory.
-DATA_DIR = get_data_dir()
+DATA_DIR = REPO_ROOT / "data"
 CONFIG_DIR = REPO_ROOT / "config"
 
 # Limit memory use per read

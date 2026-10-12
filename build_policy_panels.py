@@ -11,20 +11,17 @@ import policy_eval_common as pec
 from policy_eval_common import add_episode_day
 import pipeline_config as run_config
 from pipeline_config import POLICY_DAYS
-from pipeline_runtime import first_panel_run, get_panel_runs, validate_run_choices
-
-validate_run_choices()
 
 
 # Configuration
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-# Run selections come from pipeline_config.py; paths are derived centrally.
-PANEL_RUNS = get_panel_runs(run_config.POLICY_PANELS)
+# Run selections and panel paths come from pipeline_config.py.
+PANEL_RUNS = tuple((name, *run_config.PANEL_PATHS[name]) for name in run_config.POLICY_PANELS)
 
 # Initial paths for direct single-panel calls use the first selected panel.
-_, INPUT_PATH, _NUISANCE_ROOT = first_panel_run(PANEL_RUNS)
+_, INPUT_PATH, _NUISANCE_ROOT = (PANEL_RUNS[0] if PANEL_RUNS else ("real", *run_config.PANEL_PATHS["real"]))
 OUTDIR = _NUISANCE_ROOT.parent / "counterfactual_policies"
 
 POLICY_MANIFEST_PATH = OUTDIR / "policy_panels.csv"

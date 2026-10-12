@@ -14,14 +14,12 @@ from build_policy_panels import (
 )
 
 # Run choices come from pipeline_config.py; simulation settings stay here.
-from pipeline_config import POLICY_DAYS
-from pipeline_runtime import get_data_dir, get_validation_dir, validate_run_choices
+from pipeline_config import POLICY_DAYS, VALIDATION_DIR
 
-validate_run_choices()
 
 REPO_ROOT = Path(__file__).resolve().parent
-SOURCE_PANEL = get_data_dir() / "modelling_panel.csv"
-OUTPUT_DIR = get_validation_dir()
+SOURCE_PANEL = REPO_ROOT / "data/modelling_panel.csv"
+OUTPUT_DIR = VALIDATION_DIR
 RANDOM_SEED = 20260811
 # Running this stage generates all three validation datasets.
 

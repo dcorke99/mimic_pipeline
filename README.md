@@ -12,9 +12,9 @@ The panel builder uses the original `makic` timing: IN windows start at insertio
 
 The pipeline is run on separate data panels representing real data, semi-synthetic measured confounding, confounder omitted, and randomised actions. It supports 3 estimators (g-formula, IPW and AIPW) each with 2 confidence interval bootstrap modes (fixed-model and refit-model). For each selected learner this workflow generates up to **4 panels × 3 estimators × 2 bootstrap modes = 24 combinations**.
 
-All run choices live in `pipeline_config.py`. Paths, model hyperparameters, seeds, fold counts, simulation coefficients and cleaning settings stay in implementation modules.
+All run choices live in `pipeline_config.py`. Shared paths are listed in the same file. Model hyperparameters, seeds, fold counts, simulation coefficients and cleaning settings stay in implementation modules.
 
-Select stages with `PIPELINE_STAGES`; comment out scripts to skip them. Select panels independently with `NUISANCE_PANELS`, `POLICY_PANELS` and `EVALUATION_PANELS`. These lists contain panel names only; the shared path resolver supplies the baseline data and artefact locations. `ANALYSIS_PANEL` and `RESULT_CHECK_PANEL` select the panel for descriptive analysis and the result audit.
+Select stages with `PIPELINE_STAGES`; comment out scripts to skip them. Select panels independently with `NUISANCE_PANELS`, `POLICY_PANELS` and `EVALUATION_PANELS`. These lists contain panel names only; the `PANEL_PATHS` table lists the baseline data and artefact locations. `ANALYSIS_PANEL` and `RESULT_CHECK_PANEL` select the panel for descriptive analysis and the result audit.
 
 Select learners with `MODEL_TYPES`; comment or uncomment entries to include them. For example, `MODEL_TYPES = ["xgboost", "superlearner"]` runs those learners in order for each nuisance panel. An empty list skips fitting. `RUN_LEARNING_CURVES` enables or disables learning curves. `NUISANCE_MODEL_TYPE` chooses the learner for all evaluators and descriptive analysis; `BOOTSTRAP_MODES` selects fixed, refit, or both for all evaluators. AIPW uses Hájek normalization for its residual correction.
 
@@ -61,7 +61,6 @@ Run selections are centralized in `pipeline_config.py`. The panel builder retain
 
 ## Shared import modules
 
-- `pipeline_runtime.py` — Validates run choices and derives consistent panel/artefact paths.
 - `run_pipeline.py` — Executes only the centrally selected stages with the active interpreter.
 - `policy_eval_common.py` — Provides shared panel validation, prediction, and reporting helpers.
 - `policy_bootstrap_common.py` — Computes patient-level bootstrap confidence intervals, optionally refitting nuisance models.
@@ -69,7 +68,7 @@ Run selections are centralized in `pipeline_config.py`. The panel builder retain
 ## Tests
 
 - `test_base_panel.py` — Checks baseline snapshot equality, removal/terminal boundaries, risk sets and covariate timing.
-- `test_pipeline_config.py` — Checks config wiring across all stages, isolated paths, empty selections, invalid choices and launcher orchestration.
+- `test_pipeline_config.py` — Checks config wiring across all stages, isolated paths, empty selections and launcher orchestration.
 - `test_terminal_panel.py` — Checks terminal-event timing, episode boundaries, and CAUTI risk flags.
 - `test_nuisance_cauti_risk_set.py` — Checks that CAUTI nuisance models use the correct training risk set.
 - `test_nuisance_panel_runs.py` — Checks all-panel fitting, separate output paths, and normal errors when reading missing inputs.

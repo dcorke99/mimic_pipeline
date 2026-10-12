@@ -9,17 +9,19 @@ import unittest
 from unittest.mock import Mock, patch
 
 import pipeline_config as config
-import pipeline_runtime as runtime
 import run_pipeline as runner
+
+REPO_ROOT = Path(__file__).resolve().parent
 
 
 class PipelineConfigTests(unittest.TestCase):
     def load_stage(self, name):
-        return runpy.run_path(str(runtime.REPO_ROOT / name), run_name="config_wiring_test")
+        return runpy.run_path(str(REPO_ROOT / name), run_name="config_wiring_test")
 
-    def test_config_contains_only_run_choices(self):
+    def test_config_contains_run_choices_and_shared_paths(self):
         names = {name for name in vars(config) if not name.startswith("_")}
         self.assertEqual(names, {
+            "Path", "REPO_ROOT", "DATA_DIR", "ARTEFACT_ROOT", "VALIDATION_DIR", "PANEL_PATHS",
             "PIPELINE_STAGES", "MODEL_TYPES", "RUN_LEARNING_CURVES",
             "SUPERLEARNER_BASE_MODELS", "NUISANCE_PANELS", "POLICY_PANELS",
             "EVALUATION_PANELS", "NUISANCE_MODEL_TYPE", "BOOTSTRAP_MODES",
@@ -41,40 +43,36 @@ class PipelineConfigTests(unittest.TestCase):
         }
         with patch.multiple(config, **overrides):
             builder = self.load_stage("create_data_panel.py")
-            self.assertEqual(builder["DATA_DIR"], runtime.get_data_dir())
+            self.assertEqual(builder["DATA_DIR"], (REPO_ROOT / "data"))
             synthetic = self.load_stage("create_semi_synthetic_panel.py")
             self.assertEqual(synthetic["SOURCE_PANEL"], builder["DATA_DIR"] / "modelling_panel.csv")
-            self.assertEqual(synthetic["OUTPUT_DIR"], runtime.get_validation_dir())
+            self.assertEqual(synthetic["OUTPUT_DIR"], (REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding"))
             self.assertEqual(synthetic["POLICY_DAYS"], [2, 4])
             nuisance = self.load_stage("fit_nuisance_models.py")
             self.assertEqual(nuisance["MODEL_TYPES"], ["lightgbm", "superlearner"])
             self.assertTrue(nuisance["RUN_LEARNING_CURVES"])
             self.assertEqual(nuisance["SUPERLEARNER_BASE_MODELS"], overrides["SUPERLEARNER_BASE_MODELS"])
-            self.assertEqual(nuisance["PANEL_RUNS"], runtime.get_panel_runs(overrides["NUISANCE_PANELS"]))
+            self.assertEqual(nuisance["PANEL_RUNS"], (("confounder_omitted", config.VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv", config.VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"),))
             self.assertEqual(nuisance["COVARIATE_DICT_FILE"], builder["DATA_DIR"] / "covariate_dictionary.csv")
             policies = self.load_stage("build_policy_panels.py")
             self.assertEqual(policies["POLICY_DAYS"], synthetic["POLICY_DAYS"])
-            self.assertEqual(policies["PANEL_RUNS"], runtime.get_panel_runs(overrides["POLICY_PANELS"]))
+            self.assertEqual(policies["PANEL_RUNS"], (("real", config.DATA_DIR / "modelling_panel.csv", config.ARTEFACT_ROOT / "nuisance_models"), ("randomised_action", config.VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv", config.VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models")))
             for estimator in ("gformula", "ipw", "aipw"):
                 evaluation = self.load_stage(f"evaluate_{estimator}_policies.py")
                 self.assertEqual(evaluation["NUISANCE_MODEL_TYPE"], "catboost")
                 self.assertEqual(evaluation["BOOTSTRAP_MODES"], ["refit"])
-                self.assertEqual(evaluation["PANEL_RUNS"], runtime.get_panel_runs(overrides["EVALUATION_PANELS"]))
+                self.assertEqual(evaluation["PANEL_RUNS"], (("semi_synthetic_with_confounding", config.VALIDATION_DIR / "semi_synthetic_panel.csv", config.VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models"),))
             analysis = self.load_stage("panel_analysis.py")
-            _, path, nuisance_root = runtime.get_panel_run("randomised_action")
+            path = config.VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv"
+            nuisance_root = config.VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models"
             self.assertEqual(analysis["DATA_FILE"], path)
             self.assertEqual(analysis["NUISANCE_DIR"], nuisance_root / "catboost")
             self.assertEqual(analysis["RESULTS_DIR"], nuisance_root.parent / "panel_analysis")
             audit = self.load_stage("check_policy_results.py")
-            _, _, audit_nuisance = runtime.get_panel_run("confounder_omitted")
+            audit_nuisance = config.VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models"
             self.assertEqual(audit["BOOTSTRAP_MODE"], "refit")
             self.assertEqual(audit["POLICY_CHECK_PATH"], audit_nuisance.parent / "counterfactual_policies/policy_panel_checks.csv")
             self.assertEqual(audit["OUTPUT_PATH"], audit_nuisance.parent / "policy_eval/policy_results_checks_refit.csv")
-
-    def test_baseline_paths_and_semi_synthetic_layout_are_preserved(self):
-        self.assertEqual(runtime.get_data_dir(), runtime.REPO_ROOT / "data")
-        self.assertEqual(runtime.get_artefact_root(), runtime.REPO_ROOT / "artefacts")
-        self.assertEqual(runtime.get_validation_dir(), runtime.REPO_ROOT / "artefacts/semi-synthetic_validation/semi_synthetic_measured_confounding")
 
     def test_downstream_entry_points_consume_matching_paths_for_all_panels(self):
         filenames = {
@@ -84,9 +82,9 @@ class PipelineConfigTests(unittest.TestCase):
             "randomised_action": "semi_synthetic_panel_randomised_action.csv",
         }
         # These expected locations come from the documented layout,
-        # independently of the shared path resolver under test.
-        data = runtime.REPO_ROOT / "data"
-        artefacts = runtime.REPO_ROOT / "artefacts"
+        # independently of the shared path table.
+        data = REPO_ROOT / "data"
+        artefacts = REPO_ROOT / "artefacts"
         validation = artefacts / "semi-synthetic_validation/semi_synthetic_measured_confounding"
         expected = []
         for panel, filename in filenames.items():
@@ -172,7 +170,6 @@ class PipelineConfigTests(unittest.TestCase):
 
     def test_empty_panel_and_model_lists_allow_import_and_skip_work(self):
         with patch.multiple(config, MODEL_TYPES=[], NUISANCE_PANELS=[], POLICY_PANELS=[], EVALUATION_PANELS=[]):
-            runtime.validate_run_choices()
             nuisance = self.load_stage("fit_nuisance_models.py")
             policies = self.load_stage("build_policy_panels.py")
             with redirect_stdout(StringIO()):
@@ -183,24 +180,6 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertEqual(nuisance["PANEL_RUNS"], ())
             self.assertEqual(policies["PANEL_RUNS"], ())
 
-    def test_invalid_choices_fail_config_validation(self):
-        bad_choices = (
-            ("PIPELINE_STAGES", ["unknown.py"]),
-            ("MODEL_TYPES", ["unknown"]), ("MODEL_TYPES", ["xgboost", "xgboost"]),
-            ("SUPERLEARNER_BASE_MODELS", ["superlearner"]), ("SUPERLEARNER_BASE_MODELS", []),
-            ("NUISANCE_PANELS", ["unknown"]), ("POLICY_PANELS", "real"),
-            ("EVALUATION_PANELS", ["unknown"]), ("NUISANCE_MODEL_TYPE", "unknown"),
-            ("BOOTSTRAP_MODES", ["unknown"]), ("ANALYSIS_PANEL", "unknown"),
-            ("RESULT_CHECK_PANEL", "unknown"), ("RESULT_CHECK_BOOTSTRAP_MODE", "unknown"),
-            ("RUN_LEARNING_CURVES", "False"),
-            ("ANALYSIS_INCLUDE_AGE_SPLIT", 1), ("POLICY_DAYS", []),
-            ("POLICY_DAYS", [0]), ("POLICY_DAYS", [1, 1]), ("POLICY_DAYS", [True]),
-        )
-        for name, value in bad_choices:
-            with self.subTest(name=name, value=value), patch.object(config, name, value):
-                with self.assertRaises(ValueError):
-                    runtime.validate_run_choices()
-
     def test_runner_uses_active_python_and_only_selected_stages_in_order(self):
         stages = ["build_policy_panels.py", "evaluate_ipw_policies.py"]
         with patch.object(config, "PIPELINE_STAGES", stages), \
@@ -208,8 +187,8 @@ class PipelineConfigTests(unittest.TestCase):
              redirect_stdout(StringIO()):
             self.assertEqual(runner.main(), 0)
         self.assertEqual([call.args[0] for call in execute.call_args_list],
-                         [[runner.sys.executable, str(runtime.REPO_ROOT / stage)] for stage in stages])
-        self.assertTrue(all(call.kwargs["cwd"] == runtime.REPO_ROOT for call in execute.call_args_list))
+                         [[runner.sys.executable, str(REPO_ROOT / stage)] for stage in stages])
+        self.assertTrue(all(call.kwargs["cwd"] == REPO_ROOT for call in execute.call_args_list))
 
     def test_runner_stops_after_failed_stage(self):
         stages = ["create_data_panel.py", "fit_nuisance_models.py", "panel_analysis.py"]

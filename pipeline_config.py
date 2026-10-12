@@ -1,4 +1,28 @@
-"""Edit run and pipeline choices here. Technical settings stay in their scripts."""
+"""Edit run choices here. Shared paths are listed below; technical settings stay in their scripts."""
+
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent
+DATA_DIR = REPO_ROOT / "data"
+ARTEFACT_ROOT = REPO_ROOT / "artefacts"
+VALIDATION_DIR = ARTEFACT_ROOT / "semi-synthetic_validation/semi_synthetic_measured_confounding"
+
+# Each panel's input CSV and nuisance-model output directory.
+PANEL_PATHS = {
+    "real": (DATA_DIR / "modelling_panel.csv", ARTEFACT_ROOT / "nuisance_models"),
+    "semi_synthetic_with_confounding": (
+        VALIDATION_DIR / "semi_synthetic_panel.csv",
+        VALIDATION_DIR / "pipeline_runs/semi_synthetic_with_confounding/nuisance_models",
+    ),
+    "confounder_omitted": (
+        VALIDATION_DIR / "semi_synthetic_panel_confounder_omitted.csv",
+        VALIDATION_DIR / "pipeline_runs/confounder_omitted/nuisance_models",
+    ),
+    "randomised_action": (
+        VALIDATION_DIR / "semi_synthetic_panel_randomised_action.csv",
+        VALIDATION_DIR / "pipeline_runs/randomised_action/nuisance_models",
+    ),
+}
 
 # Pipeline stages to execute, in order. Comment out stages to skip them.
 # Running a Python stage directly still uses the choices below.

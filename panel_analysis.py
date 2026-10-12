@@ -15,14 +15,12 @@ from policy_eval_common import add_episode_day
 # Run choices come from pipeline_config.py; descriptive settings stay here.
 import pipeline_config as run_config
 from pipeline_config import NUISANCE_MODEL_TYPE
-from pipeline_runtime import get_data_dir, get_panel_run, validate_run_choices
 
-validate_run_choices()
 
 REPO_ROOT = Path(__file__).resolve().parent
-_, DATA_FILE, _NUISANCE_ROOT = get_panel_run(run_config.ANALYSIS_PANEL)
+DATA_FILE, _NUISANCE_ROOT = run_config.PANEL_PATHS[run_config.ANALYSIS_PANEL]
 RESULTS_DIR = _NUISANCE_ROOT.parent / "panel_analysis"
-COVARIATE_DICT_FILE = get_data_dir() / "covariate_dictionary.csv"
+COVARIATE_DICT_FILE = REPO_ROOT / "data/covariate_dictionary.csv"
 NUISANCE_DIR = _NUISANCE_ROOT / NUISANCE_MODEL_TYPE
 OUTCOME_FEATURES_FILE = NUISANCE_DIR / "outcome_top_model_features.csv"
 PROPENSITY_MODEL_FILE = NUISANCE_DIR / "propensity_model.pkl"
