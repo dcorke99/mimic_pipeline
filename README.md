@@ -16,7 +16,7 @@ All run choices live in `pipeline_config.py`. Paths, model hyperparameters, seed
 
 Select stages with `PIPELINE_STAGES`; comment out scripts to skip them. Select panels independently with `NUISANCE_PANELS`, `POLICY_PANELS` and `EVALUATION_PANELS`. These lists contain panel names only; the shared path resolver supplies the baseline data and artefact locations. `ANALYSIS_PANEL` and `RESULT_CHECK_PANEL` select the panel for descriptive analysis and the result audit.
 
-Select learners with `MODEL_TYPES`; comment or uncomment entries to include them. For example, `MODEL_TYPES = ["xgboost", "superlearner"]` runs those learners in order for each nuisance panel. An empty list skips fitting. `RUN_LEARNING_CURVES` enables or disables learning curves. `NUISANCE_MODEL_TYPE` chooses the learner for all evaluators and descriptive analysis; `BOOTSTRAP_MODES` selects fixed, refit, or both for all evaluators. `AIPW_RESIDUAL_NORMALISATION` selects the AIPW variant.
+Select learners with `MODEL_TYPES`; comment or uncomment entries to include them. For example, `MODEL_TYPES = ["xgboost", "superlearner"]` runs those learners in order for each nuisance panel. An empty list skips fitting. `RUN_LEARNING_CURVES` enables or disables learning curves. `NUISANCE_MODEL_TYPE` chooses the learner for all evaluators and descriptive analysis; `BOOTSTRAP_MODES` selects fixed, refit, or both for all evaluators. AIPW uses Hájek normalization for its residual correction.
 
 For fixed-model bootstrap, each evaluator’s `NUISANCE_MODEL_TYPE` must refer to a learner previously fitted for the selected panels by `fit_nuisance_models.py`.
 
@@ -55,7 +55,7 @@ For each panel and estimator, fixed-model results and diagnostics are saved in `
 
 `panel_analysis.py` describes `ANALYSIS_PANEL` and reads that panel's saved nuisance features and propensity models for `NUISANCE_MODEL_TYPE`. `ANALYSIS_INCLUDE_AGE_SPLIT` controls age-stratified reports.
 
-Run `python run_pipeline.py` or the local `./main_pipeline.ps1` launcher to execute `PIPELINE_STAGES` from `pipeline_config.py`. Activate `PhDResearch` first. The PowerShell launcher remains ignored by Git. It resolves Python from PATH and delegates stage selection to the shared runner, which stops immediately on a failed stage. Preview the selection without running scripts with `python run_pipeline.py --dry-run` or `./main_pipeline.ps1 -DryRun`.
+Run `python run_pipeline.py` to execute `PIPELINE_STAGES` from `pipeline_config.py`. Activate `PhDResearch` first. The runner executes the scripts in order and stops if a script fails.
 
 Run selections are centralized in `pipeline_config.py`. The panel builder retains the original timing and risk-set definitions. Explicit elapsed-time policies and duration-aware evaluation remain a separate methodological update.
 

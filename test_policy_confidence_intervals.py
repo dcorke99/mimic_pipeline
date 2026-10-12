@@ -94,7 +94,6 @@ def example_episodes():
                 else "any_" + outcome
             )] = obs
             aipw["residual_" + outcome] = obs - plugin
-            aipw["aipw_ht_score_" + outcome] = plugin + weights * (obs - plugin)
         frames["gformula"].append(gformula)
         # Match persisted IPW outputs: only adherent fixed-policy episodes,
         # plus every episode in the separately loaded observed baseline.
@@ -120,7 +119,7 @@ def example_summaries(episodes, policies, rounded=True):
         "gformula": gformula.build_policy_summary(
             episodes["gformula"], gformula.PREDICTION_MODE,
         ),
-        "aipw": aipw.build_policy_summary(episodes["aipw"], "hajek"),
+        "aipw": aipw.build_policy_summary(episodes["aipw"]),
     }
     rows = []
     for policy in policies.itertuples(index=False):
@@ -228,12 +227,11 @@ class PatientBootstrapTests(unittest.TestCase):
             rtol=1e-12, atol=1e-12, equal_nan=True,
         )
 
-    def test_hajek_residual_correction_is_not_average_ht_score(self):
+    def test_hajek_residual_correction_uses_sum_of_weights(self):
         values = self.design.estimate(np.ones(3, dtype=int))
         index = self.entry_index("aipw", "remove_on_day_1", "cauti")
         # mean(plugin)=.25; weighted residual sum=1.5; weight sum=6.
         self.assertAlmostEqual(values[index], 0.5)
-        self.assertNotAlmostEqual(values[index], 0.625)  # HT score mean
         self.assertAlmostEqual(values[self.entry_index(
             "aipw", "remove_on_day_1", "death")], 1.0)
         self.assertAlmostEqual(values[self.entry_index(

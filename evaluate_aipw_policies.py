@@ -47,7 +47,6 @@ OUTPUT_FILENAMES = {
 
 CLIP_LOWER = 0.01
 CLIP_UPPER = 0.99
-RESIDUAL_NORMALISATION = run_config.AIPW_RESIDUAL_NORMALISATION
 
 CURRENT_PRACTICE_LABEL = "current_practice"
 ESTIMATOR_NAME = "aipw"
@@ -522,10 +521,8 @@ def build_policy_episode_scores(df):
         observed_col = spec["observed"]
         residual_col = f"residual_{outcome_name}"
         weighted_residual_col = f"weighted_residual_{outcome_name}"
-        score_col = f"aipw_ht_score_{outcome_name}"
         episode_df[residual_col] = episode_df[observed_col] - episode_df[plugin_col]
         episode_df[weighted_residual_col] = residual_multiplier * episode_df[residual_col]
-        episode_df[score_col] = episode_df[plugin_col] + episode_df[weighted_residual_col]
 
     # Order episode-level output columns
     return order_episode_columns(episode_df), df
@@ -659,16 +656,13 @@ def build_current_practice_episode_scores(current_rows):
         observed_col = spec["observed"]
         residual_col = f"residual_{outcome_name}"
         weighted_residual_col = f"weighted_residual_{outcome_name}"
-        score_col = f"aipw_ht_score_{outcome_name}"
         episode_df[residual_col] = episode_df[observed_col] - episode_df[plugin_col]
         episode_df[weighted_residual_col] = episode_df[RESIDUAL_WEIGHT_COL] * episode_df[residual_col]
-        episode_df[score_col] = episode_df[observed_col].where(
-            episode_df[observed_col].notna(),
-            episode_df[plugin_col],
-        )
         episode_df[f"current_practice_observed_{outcome_name}"] = episode_df[observed_col]
         episode_df[f"current_practice_plugin_predicted_{outcome_name}"] = episode_df[plugin_col]
-        episode_df[f"current_practice_aipw_{outcome_name}"] = episode_df[score_col]
+        episode_df[f"current_practice_aipw_{outcome_name}"] = episode_df[observed_col].where(
+            episode_df[observed_col].notna(), episode_df[plugin_col],
+        )
     # Order episode-level output columns
     return order_episode_columns(episode_df)
 
@@ -680,7 +674,6 @@ def policy_summary_row(
     policy_name,
     policy_type,
     policy_remove_day,
-    residual_normalisation,
     weight_col=RESIDUAL_WEIGHT_COL,
 ):
     # Build one policy summary row
@@ -718,7 +711,7 @@ def policy_summary_row(
         POLICY_TYPE_COL: policy_type,
         "policy_remove_day": policy_remove_day,
         "estimator": ESTIMATOR_NAME,
-        "residual_normalisation": residual_normalisation,
+        "residual_normalisation": "hajek",
         "n_patients": int(policy_df["subject_id"].nunique()),
         "n_episodes": n_total,
         "n_complete_prediction_episodes": n_complete,
@@ -761,25 +754,19 @@ def policy_summary_row(
 
         mean_plugin = float(complete_df[plugin_col].mean()) if len(complete_df) else np.nan
         weighted_residual = residual_weight * pd.to_numeric(complete_df[residual_col], errors="coerce")
-        ht_scores = pd.to_numeric(complete_df[plugin_col], errors="coerce") + weighted_residual
-        ht_value = float(ht_scores.mean()) if len(ht_scores.dropna()) else np.nan
         valid_residual_rows = weighted_residual.notna() & residual_weight.notna() & np.isfinite(residual_weight)
         residual_weight_sum = float(residual_weight.loc[valid_residual_rows].sum())
         if residual_weight_sum > 0:
             hajek_correction = float(weighted_residual.loc[valid_residual_rows].sum() / residual_weight_sum)
         else:
             hajek_correction = np.nan
-        ht_correction = float(weighted_residual.mean()) if len(weighted_residual.dropna()) else np.nan
         hajek_value = mean_plugin + hajek_correction if pd.notna(mean_plugin) and pd.notna(hajek_correction) else np.nan
-        selected_value = ht_value if residual_normalisation == "ht" else hajek_value
-        selected_correction = ht_correction if residual_normalisation == "ht" else hajek_correction
 
         if outcome_name == "catheter_exposure_days":
             row["plugin_expected_mean_catheter_exposure_days"] = mean_plugin
-            row["aipw_ht_mean_catheter_exposure_days"] = ht_value
             row["aipw_hajek_mean_catheter_exposure_days"] = hajek_value
-            row["aipw_mean_catheter_exposure_days"] = selected_value
-            row["residual_correction_catheter_exposure_days"] = selected_correction
+            row["aipw_mean_catheter_exposure_days"] = hajek_value
+            row["residual_correction_catheter_exposure_days"] = hajek_correction
             row["plugin_expected_mean_catheter_in_interval_rows"] = float(
                 complete_df["plugin_expected_catheter_in_interval_rows"].mean()
             )
@@ -787,33 +774,26 @@ def policy_summary_row(
                 "plugin_expected_mean_catheter_in_interval_rows"
             ]
         else:
-            bounded_ht_value = float(np.clip(ht_value, 0.0, 1.0))
             bounded_hajek_value = float(np.clip(hajek_value, 0.0, 1.0))
-            bounded_selected_value = float(np.clip(selected_value, 0.0, 1.0))
             row[f"plugin_predicted_{summary_stub}"] = mean_plugin
-            row[f"aipw_ht_{summary_stub}"] = bounded_ht_value
             row[f"aipw_hajek_{summary_stub}"] = bounded_hajek_value
-            row[f"aipw_{summary_stub}"] = bounded_selected_value
+            row[f"aipw_{summary_stub}"] = bounded_hajek_value
             row[f"aipw_{summary_stub}_pct"] = (
-                bounded_selected_value * 100 if pd.notna(bounded_selected_value) else np.nan
+                bounded_hajek_value * 100 if pd.notna(bounded_hajek_value) else np.nan
             )
-            row[f"residual_correction_{outcome_name}"] = selected_correction
-            row[f"aipw_ht_unbounded_estimate_{outcome_name}"] = ht_value
+            row[f"residual_correction_{outcome_name}"] = hajek_correction
             row[f"aipw_hajek_unbounded_estimate_{outcome_name}"] = hajek_value
-            row[f"aipw_selected_unbounded_estimate_{outcome_name}"] = selected_value
-            row[f"aipw_ht_was_bounded_{outcome_name}"] = bool(
-                pd.notna(ht_value) and (ht_value < 0 or ht_value > 1)
-            )
+            row[f"aipw_selected_unbounded_estimate_{outcome_name}"] = hajek_value
             row[f"aipw_hajek_was_bounded_{outcome_name}"] = bool(
                 pd.notna(hajek_value) and (hajek_value < 0 or hajek_value > 1)
             )
             row[f"aipw_selected_was_bounded_{outcome_name}"] = bool(
-                pd.notna(selected_value) and (selected_value < 0 or selected_value > 1)
+                pd.notna(hajek_value) and (hajek_value < 0 or hajek_value > 1)
             )
     return row
 
 
-def build_policy_summary(episode_df, residual_normalisation):
+def build_policy_summary(episode_df):
     # Build policy-level summary estimates
     rows = []
     group_cols = ["policy_name", POLICY_TYPE_COL, "policy_remove_day"]
@@ -821,7 +801,7 @@ def build_policy_summary(episode_df, residual_normalisation):
     for policy_values, policy_df in episode_df.groupby(group_cols, dropna=False, sort=False):
         policy_name, policy_type, policy_remove_day = policy_values
         # Build one policy summary row
-        rows.append(policy_summary_row(policy_df, policy_name, policy_type, policy_remove_day, residual_normalisation))
+        rows.append(policy_summary_row(policy_df, policy_name, policy_type, policy_remove_day))
     # Add comparisons against current practice
     return add_current_practice_comparisons(pd.DataFrame(rows))
 
@@ -966,7 +946,6 @@ def build_weight_diagnostics(episode_df):
 
 def build_residual_diagnostics(
     episode_df,
-    residual_normalisation,
 ):
     # Build AIPW residual diagnostics
     rows = []
@@ -996,14 +975,11 @@ def build_residual_diagnostics(
             observed_col = spec["observed"]
             residual_col = f"residual_{outcome_name}"
             weighted_residual_col = f"weighted_residual_{outcome_name}"
-            ht_score_col = f"aipw_ht_score_{outcome_name}"
             plugin = pd.to_numeric(complete_df[plugin_col], errors="coerce")
             observed = pd.to_numeric(complete_df[observed_col], errors="coerce")
             residual = pd.to_numeric(complete_df[residual_col], errors="coerce")
             weighted_residual = pd.to_numeric(complete_df[weighted_residual_col], errors="coerce")
-            ht_score = pd.to_numeric(complete_df[ht_score_col], errors="coerce")
             mean_plugin = float(plugin.mean()) if len(plugin.dropna()) else np.nan
-            ht_value = float(ht_score.mean()) if len(ht_score.dropna()) else np.nan
             hajek_correction = (
                 float(weighted_residual.loc[valid_residual_weight].sum() / weight_sum)
                 if weight_sum > 0 and len(weighted_residual.dropna())
@@ -1014,20 +990,15 @@ def build_residual_diagnostics(
                 if pd.notna(mean_plugin) and pd.notna(hajek_correction)
                 else np.nan
             )
-            selected_value = ht_value if residual_normalisation == "ht" else hajek_value
             is_probability = outcome_name != "catheter_exposure_days"
-            bounded_ht_value = float(np.clip(ht_value, 0.0, 1.0)) if is_probability else ht_value
             bounded_hajek_value = float(np.clip(hajek_value, 0.0, 1.0)) if is_probability else hajek_value
-            bounded_selected_value = (
-                float(np.clip(selected_value, 0.0, 1.0)) if is_probability else selected_value
-            )
             # Calculate the effective sample size
             rows.append({
                 "policy_name": policy_name,
                 POLICY_TYPE_COL: policy_type,
                 "policy_remove_day": policy_remove_day,
                 "outcome": outcome_name,
-                "residual_normalisation": residual_normalisation,
+                "residual_normalisation": "hajek",
                 "n_episodes": int(len(policy_df)),
                 "n_complete_prediction_episodes": int(len(complete_df)),
                 "n_adherent_episodes": int(complete_df["episode_adherent_to_policy"].eq(1).sum()),
@@ -1041,22 +1012,15 @@ def build_residual_diagnostics(
                 "mean_weighted_residual": float(weighted_residual.mean()) if len(weighted_residual.dropna()) else np.nan,
                 "p99_abs_weighted_residual": float(weighted_residual.abs().quantile(0.99)) if len(weighted_residual.dropna()) else np.nan,
                 "max_abs_weighted_residual": float(weighted_residual.abs().max()) if len(weighted_residual.dropna()) else np.nan,
-                "min_episode_aipw_ht_score": float(ht_score.min()) if len(ht_score.dropna()) else np.nan,
-                "max_episode_aipw_ht_score": float(ht_score.max()) if len(ht_score.dropna()) else np.nan,
-                "aipw_ht_estimate": bounded_ht_value,
                 "aipw_hajek_estimate": bounded_hajek_value,
-                "aipw_selected_estimate": bounded_selected_value,
-                "aipw_ht_unbounded_estimate": ht_value,
+                "aipw_selected_estimate": bounded_hajek_value,
                 "aipw_hajek_unbounded_estimate": hajek_value,
-                "aipw_selected_unbounded_estimate": selected_value,
-                "aipw_ht_was_bounded": bool(
-                    is_probability and pd.notna(ht_value) and (ht_value < 0 or ht_value > 1)
-                ),
+                "aipw_selected_unbounded_estimate": hajek_value,
                 "aipw_hajek_was_bounded": bool(
                     is_probability and pd.notna(hajek_value) and (hajek_value < 0 or hajek_value > 1)
                 ),
                 "aipw_selected_was_bounded": bool(
-                    is_probability and pd.notna(selected_value) and (selected_value < 0 or selected_value > 1)
+                    is_probability and pd.notna(hajek_value) and (hajek_value < 0 or hajek_value > 1)
                 ),
             })
     return pd.DataFrame(rows)
@@ -1064,7 +1028,6 @@ def build_residual_diagnostics(
 
 def build_clipping_sensitivity(
     episode_df,
-    residual_normalisation,
     clip_lower,
     clip_upper,
 ):
@@ -1098,7 +1061,6 @@ def build_clipping_sensitivity(
                 policy_name,
                 policy_type,
                 policy_remove_day,
-                residual_normalisation,
                 "__sensitivity_weight",
             )
             numeric_weights = pd.to_numeric(weights, errors="coerce")
@@ -1157,27 +1119,22 @@ def order_episode_columns(df):
         "observed_any_cauti",
         "residual_cauti",
         "weighted_residual_cauti",
-        "aipw_ht_score_cauti",
         "plugin_predicted_any_recatheterisation",
         "observed_any_recatheterisation",
         "residual_recatheterisation",
         "weighted_residual_recatheterisation",
-        "aipw_ht_score_recatheterisation",
         "plugin_predicted_any_death",
         "observed_any_death",
         "residual_death",
         "weighted_residual_death",
-        "aipw_ht_score_death",
         "plugin_predicted_icu_exit_alive",
         "observed_icu_exit_alive",
         "residual_icu_exit_alive",
         "weighted_residual_icu_exit_alive",
-        "aipw_ht_score_icu_exit_alive",
         "plugin_expected_catheter_exposure_days",
         "observed_catheter_exposure_days",
         "residual_catheter_exposure_days",
         "weighted_residual_catheter_exposure_days",
-        "aipw_ht_score_catheter_exposure_days",
         "plugin_expected_catheter_in_interval_rows",
         "observed_catheter_in_interval_rows",
         "prediction_complete",
@@ -1279,7 +1236,7 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
     episode_df, row_df, current_episode_df = evaluate_policy_episodes(policy_df, nuisance_df)
 
     # Build policy-level summary estimates
-    summary_df = build_policy_summary(episode_df, RESIDUAL_NORMALISATION)
+    summary_df = build_policy_summary(episode_df)
     # Build support diagnostic output
     support_diagnostics_df = build_support_diagnostics(row_df)
     # Build weight diagnostic output
@@ -1293,12 +1250,10 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
     # Build AIPW residual diagnostics
     residual_diagnostics_df = build_residual_diagnostics(
         episode_df,
-        RESIDUAL_NORMALISATION,
     )
     # Build clipping-sensitivity output
     clipping_sensitivity_df = build_clipping_sensitivity(
         episode_df,
-        RESIDUAL_NORMALISATION,
         CLIP_LOWER,
         CLIP_UPPER,
     )

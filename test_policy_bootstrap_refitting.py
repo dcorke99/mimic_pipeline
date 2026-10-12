@@ -155,10 +155,10 @@ class RefitBootstrapTests(unittest.TestCase):
                     all_episodes, current = expanded[2:]
                     adherent = expanded[0].loc[~expanded[0].policy_name.eq("current_practice")]
                     summary = module.build_policy_summary(all_episodes, adherent, current)
+                elif name == "aipw":
+                    summary = module.build_policy_summary(expanded[0])
                 else:
-                    summary = module.build_policy_summary(
-                        expanded[0], "hajek" if name == "aipw" else module.PREDICTION_MODE,
-                    )
+                    summary = module.build_policy_summary(expanded[0], module.PREDICTION_MODE)
                 expected = summary.set_index("policy_name").loc[
                     policies.policy_name, list(SUMMARY_COLUMNS[name].values()),
                 ].to_numpy().ravel()

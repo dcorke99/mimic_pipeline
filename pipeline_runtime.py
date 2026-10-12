@@ -42,8 +42,6 @@ def validate_run_choices():
             raise ValueError(f"Unknown {name}: {getattr(run_config, name)!r}")
     if run_config.RESULT_CHECK_BOOTSTRAP_MODE not in ("fixed", "refit"):
         raise ValueError(f"Unknown RESULT_CHECK_BOOTSTRAP_MODE: {run_config.RESULT_CHECK_BOOTSTRAP_MODE!r}")
-    if run_config.AIPW_RESIDUAL_NORMALISATION not in ("hajek", "ht"):
-        raise ValueError(f"Unknown AIPW_RESIDUAL_NORMALISATION: {run_config.AIPW_RESIDUAL_NORMALISATION!r}")
     for name in ("RUN_LEARNING_CURVES", "ANALYSIS_INCLUDE_AGE_SPLIT"):
         if not isinstance(getattr(run_config, name), bool):
             raise ValueError(f"{name} must be True or False")

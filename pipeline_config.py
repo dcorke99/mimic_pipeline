@@ -42,15 +42,15 @@ NUISANCE_PANELS = [
 ]
 POLICY_PANELS = [
     "real",
-    "semi_synthetic_with_confounding",
-    "confounder_omitted",
-    "randomised_action",
+    # "semi_synthetic_with_confounding",
+    # "confounder_omitted",
+    # "randomised_action",
 ]
 EVALUATION_PANELS = [
     "real",
-    "semi_synthetic_with_confounding",
-    "confounder_omitted",
-    "randomised_action",
+    # "semi_synthetic_with_confounding",
+    # "confounder_omitted",
+    # "randomised_action",
 ]
 
 # Learner used by all evaluators and descriptive panel analysis.
@@ -58,8 +58,6 @@ EVALUATION_PANELS = [
 NUISANCE_MODEL_TYPE = "xgboost"
 # Select "fixed", "refit", or both; an empty list skips policy evaluation.
 BOOTSTRAP_MODES = ["fixed"]
-# AIPW estimator variant: "hajek" or "ht".
-AIPW_RESIDUAL_NORMALISATION = "hajek"
 
 # Shared by policy construction and semi-synthetic known-truth calculations.
 POLICY_DAYS = [1, 2, 3, 4, 5]

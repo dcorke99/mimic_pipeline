@@ -23,7 +23,7 @@ class PipelineConfigTests(unittest.TestCase):
             "PIPELINE_STAGES", "MODEL_TYPES", "RUN_LEARNING_CURVES",
             "SUPERLEARNER_BASE_MODELS", "NUISANCE_PANELS", "POLICY_PANELS",
             "EVALUATION_PANELS", "NUISANCE_MODEL_TYPE", "BOOTSTRAP_MODES",
-            "AIPW_RESIDUAL_NORMALISATION", "POLICY_DAYS", "ANALYSIS_PANEL",
+            "POLICY_DAYS", "ANALYSIS_PANEL",
             "ANALYSIS_INCLUDE_AGE_SPLIT", "RESULT_CHECK_PANEL", "RESULT_CHECK_BOOTSTRAP_MODE",
         })
 
@@ -35,7 +35,7 @@ class PipelineConfigTests(unittest.TestCase):
             "POLICY_PANELS": ["real", "randomised_action"],
             "EVALUATION_PANELS": ["semi_synthetic_with_confounding"],
             "NUISANCE_MODEL_TYPE": "catboost", "BOOTSTRAP_MODES": ["refit"],
-            "AIPW_RESIDUAL_NORMALISATION": "ht", "POLICY_DAYS": [2, 4],
+            "POLICY_DAYS": [2, 4],
             "ANALYSIS_PANEL": "randomised_action", "ANALYSIS_INCLUDE_AGE_SPLIT": False,
             "RESULT_CHECK_PANEL": "confounder_omitted", "RESULT_CHECK_BOOTSTRAP_MODE": "refit",
         }
@@ -60,8 +60,6 @@ class PipelineConfigTests(unittest.TestCase):
                 self.assertEqual(evaluation["NUISANCE_MODEL_TYPE"], "catboost")
                 self.assertEqual(evaluation["BOOTSTRAP_MODES"], ["refit"])
                 self.assertEqual(evaluation["PANEL_RUNS"], runtime.get_panel_runs(overrides["EVALUATION_PANELS"]))
-                if estimator == "aipw":
-                    self.assertEqual(evaluation["RESIDUAL_NORMALISATION"], "ht")
             analysis = self.load_stage("panel_analysis.py")
             _, path, nuisance_root = runtime.get_panel_run("randomised_action")
             self.assertEqual(analysis["DATA_FILE"], path)
@@ -171,14 +169,6 @@ class PipelineConfigTests(unittest.TestCase):
                                         self.assertTrue(value.is_relative_to(artefact / "policy_eval" / name.split("_")[0].lower() / mode))
                             self.assertEqual(audit["OUTPUT_PATH"], artefact / "policy_eval" / f"policy_results_checks_{mode}.csv")
 
-    def test_dry_run_reports_baseline_and_validation_roots(self):
-        output = StringIO()
-        with patch.object(runner.subprocess, "run") as execute, redirect_stdout(output):
-            self.assertEqual(runner.main(["--dry-run"]), 0)
-        self.assertIn(str(runtime.get_data_dir()), output.getvalue())
-        self.assertIn(str(runtime.get_artefact_root()), output.getvalue())
-        self.assertIn(str(runtime.get_validation_dir()), output.getvalue())
-        execute.assert_not_called()
 
     def test_empty_panel_and_model_lists_allow_import_and_skip_work(self):
         with patch.multiple(config, MODEL_TYPES=[], NUISANCE_PANELS=[], POLICY_PANELS=[], EVALUATION_PANELS=[]):
@@ -193,7 +183,7 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertEqual(nuisance["PANEL_RUNS"], ())
             self.assertEqual(policies["PANEL_RUNS"], ())
 
-    def test_invalid_choices_fail_before_pipeline_execution(self):
+    def test_invalid_choices_fail_config_validation(self):
         bad_choices = (
             ("PIPELINE_STAGES", ["unknown.py"]),
             ("MODEL_TYPES", ["unknown"]), ("MODEL_TYPES", ["xgboost", "xgboost"]),
@@ -202,23 +192,21 @@ class PipelineConfigTests(unittest.TestCase):
             ("EVALUATION_PANELS", ["unknown"]), ("NUISANCE_MODEL_TYPE", "unknown"),
             ("BOOTSTRAP_MODES", ["unknown"]), ("ANALYSIS_PANEL", "unknown"),
             ("RESULT_CHECK_PANEL", "unknown"), ("RESULT_CHECK_BOOTSTRAP_MODE", "unknown"),
-            ("AIPW_RESIDUAL_NORMALISATION", "unknown"), ("RUN_LEARNING_CURVES", "False"),
+            ("RUN_LEARNING_CURVES", "False"),
             ("ANALYSIS_INCLUDE_AGE_SPLIT", 1), ("POLICY_DAYS", []),
             ("POLICY_DAYS", [0]), ("POLICY_DAYS", [1, 1]), ("POLICY_DAYS", [True]),
         )
         for name, value in bad_choices:
-            with self.subTest(name=name, value=value), patch.object(config, name, value), \
-                 patch.object(runner.subprocess, "run") as execute:
+            with self.subTest(name=name, value=value), patch.object(config, name, value):
                 with self.assertRaises(ValueError):
-                    runner.main([])
-                execute.assert_not_called()
+                    runtime.validate_run_choices()
 
     def test_runner_uses_active_python_and_only_selected_stages_in_order(self):
         stages = ["build_policy_panels.py", "evaluate_ipw_policies.py"]
         with patch.object(config, "PIPELINE_STAGES", stages), \
              patch.object(runner.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as execute, \
              redirect_stdout(StringIO()):
-            self.assertEqual(runner.main([]), 0)
+            self.assertEqual(runner.main(), 0)
         self.assertEqual([call.args[0] for call in execute.call_args_list],
                          [[runner.sys.executable, str(runtime.REPO_ROOT / stage)] for stage in stages])
         self.assertTrue(all(call.kwargs["cwd"] == runtime.REPO_ROOT for call in execute.call_args_list))
@@ -228,14 +216,13 @@ class PipelineConfigTests(unittest.TestCase):
         with patch.object(config, "PIPELINE_STAGES", stages), \
              patch.object(runner.subprocess, "run", side_effect=[SimpleNamespace(returncode=0), SimpleNamespace(returncode=7)]) as execute, \
              redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            self.assertEqual(runner.main([]), 7)
+            self.assertEqual(runner.main(), 7)
         self.assertEqual(execute.call_count, 2)
 
-    def test_dry_run_and_empty_stage_list_never_execute_scripts(self):
-        with patch.object(runner.subprocess, "run") as execute, redirect_stdout(StringIO()):
-            self.assertEqual(runner.main(["--dry-run"]), 0)
-            with patch.object(config, "PIPELINE_STAGES", []):
-                self.assertEqual(runner.main([]), 0)
+    def test_empty_stage_list_executes_nothing(self):
+        with patch.object(config, "PIPELINE_STAGES", []), \
+             patch.object(runner.subprocess, "run") as execute:
+            self.assertEqual(runner.main(), 0)
         execute.assert_not_called()
 
 
