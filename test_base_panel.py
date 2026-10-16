@@ -1,4 +1,4 @@
-"""Baseline panel timing tests using synthetic episodes and chart observations."""
+"""Insertion-anchored decision grid, linked outcomes and pre-decision features."""
 
 from contextlib import redirect_stdout
 from io import StringIO
@@ -130,34 +130,104 @@ class BaselinePanelTests(unittest.TestCase):
     def build(self, episodes=None):
         return cdp.build_base_panel(self.episodes if episodes is None else episodes)
 
-    def test_baseline_matches_original_builder_snapshot_in_every_column(self):
+    def test_cohort_demographics_and_episode_event_counts_match_original_snapshot(self):
         fixture = Path(__file__).parent / "tests/fixtures/current_base_panel.json"
         baseline = json.loads(fixture.read_text(encoding="utf-8"))
-        self.assertEqual(json.loads(self.build().to_json(orient="table", date_format="iso")), baseline)
+        previous = pd.DataFrame(baseline["data"])
+        current = self.build()
+        events = ["removed_in_period", "cauti_in_period", "reinsertion_in_period",
+                  "death_in_period", "icu_exit_alive_in_period"]
+        pd.testing.assert_frame_equal(
+            previous.groupby("stay_id")[events].sum(), current.groupby("stay_id")[events].sum(),
+        )
+        demographics = ["subject_id", "hadm_id", "age", "sex_M", "sex_missing", "ethnicity_White"]
+        pd.testing.assert_frame_equal(
+            previous.groupby("stay_id")[demographics].first(), current.groupby("stay_id")[demographics].first(),
+        )
 
-    def test_off_grid_removal_splits_in_and_restarts_out_windows(self):
+    def test_off_grid_removal_does_not_split_or_restart_the_insertion_clock(self):
         rows = self.build().query("stay_id == 1")
         actual = [((row.period_start - T0) / pd.Timedelta(hours=1),
                    (row.period_end - T0) / pd.Timedelta(hours=1),
                    row.catheter_state, row.removed_in_period)
                   for row in rows.itertuples()]
-        self.assertEqual(actual, [(0, 24, "in", 0), (24, 38, "in", 1),
-                                  (38, 62, "out", 0), (62, 86, "out", 0), (86, 110, "out", 0)])
+        self.assertEqual(actual, [(0, 24, "in", 0), (24, 48, "in", 1),
+                                  (48, 72, "out", 0), (72, 96, "out", 0), (96, 110, "out", 0)])
         self.assertEqual(rows.episode_index.tolist(), [0, 1, 2, 3, 4])
+        self.assertEqual(rows.episode_day.tolist(), [1, 2, 3, 4, 5])
+        self.assertEqual(rows.is_decision_row.tolist(), [True, True, False, False, False])
         self.assertEqual(rows.periods_in_state.tolist(), [1, 2, 1, 2, 3])
+        self.assertEqual(rows.catheter_in_hours.tolist(), [24, 14, 0, 0, 0])
+        self.assertEqual(rows.catheter_out_hours.tolist(), [0, 10, 24, 24, 14])
 
-    def test_removal_and_reinsertion_are_in_separate_state_rows(self):
+    def test_same_period_removal_and_reinsertion_remain_linked_to_final_decision(self):
         rows = self.build().query("stay_id == 5")
         removal = rows.loc[rows.removed_in_period.eq(1)].iloc[0]
         reinsertion = rows.loc[rows.reinsertion_in_period.eq(1)].iloc[0]
         self.assertEqual(removal.catheter_state, "in")
-        self.assertEqual(removal.period_end, T0 + pd.Timedelta(hours=38))
-        self.assertEqual(reinsertion.catheter_state, "out")
-        self.assertEqual(reinsertion.period_start, removal.period_end)
+        self.assertEqual(removal.period_end, T0 + pd.Timedelta(hours=42))
+        self.assertEqual(reinsertion.name, removal.name)
+        self.assertEqual(reinsertion.catheter_state, "in")
+        self.assertEqual(reinsertion.period_start, T0 + pd.Timedelta(hours=24))
         self.assertEqual(reinsertion.period_end, T0 + pd.Timedelta(hours=42))
         self.assertEqual(reinsertion.at_risk_reinsertion, 1)
+        self.assertEqual(reinsertion.catheter_in_hours, 14)
+        self.assertEqual(reinsertion.catheter_out_hours, 4)
+        self.assertEqual(len(rows), 2)
 
-    def test_baseline_stages_build_matching_outputs_without_experimental_metadata(self):
+    def test_boundary_removal_belongs_to_previous_period_and_stops_decisions(self):
+        rows = self.build().query("stay_id == 2")
+        removal = rows.loc[rows.removed_in_period.eq(1)].iloc[0]
+        self.assertEqual(removal.episode_day, 2)
+        self.assertEqual(removal.period_end, T0 + pd.Timedelta(hours=48))
+        self.assertEqual(removal.catheter_out_hours, 0)
+        self.assertTrue(rows.loc[rows.episode_index.gt(removal.episode_index), "is_decision_row"].eq(False).all())
+
+    def test_same_period_post_removal_cauti_is_retained_once(self):
+        episodes = cdp.add_episode_endpoints(pd.DataFrame([episode(1, removal=38, terminal=42,
+                                                                   reason="reinsertion", cauti=40)]))
+        rows = self.build(episodes)
+        final = rows.iloc[-1]
+        self.assertEqual(final.removed_in_period, 1)
+        self.assertEqual(final.reinsertion_in_period, 1)
+        self.assertEqual(final.cauti_in_period, 1)
+        self.assertEqual(final.at_risk_cauti, 1)
+        self.assertEqual(final.at_risk_reinsertion, 1)
+        self.assertEqual(rows.cauti_in_period.sum(), 1)
+
+    def test_out_followup_features_use_grid_start_not_actual_removal(self):
+        rows = self.build().query("stay_id == 1 and catheter_state == 'out'")
+        first = rows.iloc[0]
+        self.assertEqual(first.period_start, T0 + pd.Timedelta(hours=48))
+        self.assertEqual(first.cov_start, T0 + pd.Timedelta(hours=24))
+        self.assertEqual(first.cov_end, first.period_start)
+
+    def test_out_followup_aggregation_rebuilds_the_new_lookback_without_future_values(self):
+        row = self.build().query("stay_id == 1 and episode_index == 2").copy()
+        with TemporaryDirectory() as temporary, patch.object(cdp, "DATA_DIR", Path(temporary)), \
+             redirect_stdout(StringIO()):
+            chart = pd.DataFrame([
+                (1, 123, T0 + pd.Timedelta(hours=23), 1000),
+                (1, 123, T0 + pd.Timedelta(hours=24), 2),
+                (1, 123, T0 + pd.Timedelta(hours=37), 3),
+                (1, 123, T0 + pd.Timedelta(hours=47), 4),
+                (1, 123, T0 + pd.Timedelta(hours=48), 2000),
+                (1, 123, T0 + pd.Timedelta(hours=49), 3000),
+            ], columns=["stay_id", "itemid", "charttime", "valuenum"])
+            chart.to_csv(Path(temporary) / "cleaned_chart_covariates.csv", index=False)
+            aggregated = cdp.aggregate_itemid_covariates(row, {123: "synthetic"})[0].iloc[0]
+            self.assertEqual(aggregated["itemid_123__count"], 3)
+            self.assertEqual(aggregated["itemid_123__mean"], 3)
+            self.assertEqual(aggregated["itemid_123__last"], 4)
+
+    def test_pre_icu_insertion_retains_an_empty_feature_window(self):
+        episodes = self.episodes.copy()
+        episodes.loc[episodes.stay_id.eq(1), "ICU_in"] = T0 + pd.Timedelta(hours=1)
+        base = self.build(episodes)
+        initial = base.query("stay_id == 1 and episode_index == 0").iloc[0]
+        self.assertGreater(initial.cov_start, initial.cov_end)
+
+    def test_builder_stages_preserve_schema_actions_and_qa(self):
         with TemporaryDirectory() as temporary, patch.object(cdp, "DATA_DIR", Path(temporary)), \
              patch.object(cdp, "build_catheter_episodes", return_value=self.episodes), redirect_stdout(StringIO()):
             cdp.create_episode_cohort_and_base_panel()

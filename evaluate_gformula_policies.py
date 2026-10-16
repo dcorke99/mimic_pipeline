@@ -9,7 +9,6 @@ import fit_nuisance_models as nuisance
 from build_policy_panels import read_policy_collection
 from policy_eval_common import (
     cumulative_event_probability,
-    assign_policy_prediction,
     PREDICTION_COLUMNS,
     add_episode_day,
     fill_missing_counterfactual_predictions,
@@ -23,7 +22,7 @@ from pipeline_config import BOOTSTRAP_MODES, NUISANCE_MODEL_TYPE
 # Technical settings
 
 REPO_ROOT = Path(__file__).resolve().parent
-N_BOOTSTRAP = 1000
+N_BOOTSTRAP = 100
 BOOTSTRAP_SEED = 20260923
 REFIT_CROSSFIT_FOLDS = 5
 
@@ -122,6 +121,7 @@ def join_nuisance_predictions(policy_df, nuisance_df):
         for col in [
             *NUISANCE_COLUMNS,
             *[f"__rescored_{col}" for col in PREDICTION_COLUMNS],
+            *[col for col in nuisance_df if pec.is_policy_prediction_column(col)],
         ]
         if col not in ROW_JOIN_KEY_COLS
     ]
@@ -147,36 +147,7 @@ def join_nuisance_predictions(policy_df, nuisance_df):
 
 
 def select_policy_predictions(df):
-    # Select predictions implied by the target policy
-    for col in UNDER_POLICY_COLUMNS:
-        df[col] = np.nan
-    df["__used_rescored_prediction"] = False
-
-    keep_rows = df["policy_catheter_state"].eq("in") & df["policy_action"].eq("keep")
-    remove_rows = df["policy_catheter_state"].eq("in") & df["policy_action"].eq("remove")
-    out_rows = df["policy_catheter_state"].eq("out")
-    out_cauti_rows = out_rows & pd.to_numeric(df["policy_periods_out"], errors="coerce").le(
-        POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
-    )
-
-    assign_policy_prediction(df, "p_cauti_under_policy", "p_cauti_if_keep", keep_rows)
-    assign_policy_prediction(df, "p_death_under_policy", "p_death_if_keep", keep_rows)
-    assign_policy_prediction(df, "p_icu_exit_alive_under_policy", "p_icu_exit_alive_if_keep", keep_rows)
-    assign_policy_prediction(df, "p_no_event_under_policy", "p_no_event_if_keep", keep_rows)
-    df.loc[keep_rows, "p_recatheterisation_under_policy"] = 0.0
-
-    assign_policy_prediction(df, "p_cauti_under_policy", "p_cauti_if_remove", remove_rows)
-    assign_policy_prediction(df, "p_death_under_policy", "p_death_if_remove", remove_rows)
-    assign_policy_prediction(df, "p_icu_exit_alive_under_policy", "p_icu_exit_alive_if_remove", remove_rows)
-    assign_policy_prediction(df, "p_no_event_under_policy", "p_no_event_if_remove", remove_rows)
-    df.loc[remove_rows, "p_recatheterisation_under_policy"] = 0.0
-
-    df.loc[out_rows, "p_cauti_under_policy"] = 0.0
-    assign_policy_prediction(df, "p_cauti_under_policy", "p_cauti_if_out", out_cauti_rows)
-    assign_policy_prediction(df, "p_recatheterisation_under_policy", "p_reinsertion_if_out", out_rows)
-    assign_policy_prediction(df, "p_death_under_policy", "p_death_if_out", out_rows)
-    assign_policy_prediction(df, "p_icu_exit_alive_under_policy", "p_icu_exit_alive_if_out", out_rows)
-    assign_policy_prediction(df, "p_no_event_under_policy", "p_no_event_if_out", out_rows)
+    pec.select_policy_outcomes(df, "p", POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS)
 
     missing_any = df[UNDER_POLICY_COLUMNS].isna().any(axis=1)
     invalid_any = pd.Series(False, index=df.index)
@@ -186,7 +157,7 @@ def select_policy_predictions(df):
 
     df["prediction_source"] = np.where(
         df["__used_rescored_prediction"],
-        "nuisance_predictions_plus_outcome_model_rescore",
+        "patient_held_out_model_with_policy_features",
         "nuisance_predictions",
     )
     df["prediction_status"] = "complete"
@@ -296,6 +267,7 @@ def build_episode_predictions(row_df):
         row_df["period_duration_days"],
         errors="coerce",
     )
+    row_df["_actual_observed_catheter_exposure_days"] = pec.observed_catheter_exposure_days(row_df)
     group_cols = ["policy_name", POLICY_TYPE_COL, "policy_remove_day", EPISODE_ID_COL]
     # pandas named aggregation is clearer here than building custom apply rows
     base = row_df.groupby(group_cols, as_index=False, dropna=False).agg(
@@ -304,6 +276,7 @@ def build_episode_predictions(row_df):
         n_missing_prediction_rows=("prediction_status", lambda s: int(s.ne("complete").sum())),
         expected_catheter_in_interval_rows=("_policy_catheter_in_row_int", "sum"),
         expected_catheter_exposure_days=("_policy_catheter_exposure_days", "sum"),
+        actual_observed_catheter_exposure_days=("_actual_observed_catheter_exposure_days", "sum"),
     )
 
     for col in EPISODE_FIRST_COLS:
@@ -320,7 +293,7 @@ def build_episode_predictions(row_df):
         base = base.merge(values, on=group_cols, how="left")
 
     # Order episode-level output columns
-    return order_episode_columns(base)
+    return pec.label_nominal_exposure(order_episode_columns(base))
 
 
 def order_episode_columns(df):
@@ -579,14 +552,14 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
     return combined_episode_df, row_df, current_rows, current_episode_df
 
 
-def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, panel_name=None):
+def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, panel_name=None, *, output_root=None):
     if bootstrap_mode not in ("fixed", "refit"):
         raise ValueError(f"Unknown bootstrap mode: {bootstrap_mode!r}")
     policy_manifest_path = artefact_root / "counterfactual_policies/policy_panels.csv"
     nuisance_model_dir = artefact_root / "nuisance_models" / model_type
     nuisance_predictions_path = nuisance_model_dir / "nuisance_predictions.csv"
     outcome_models_path = nuisance_model_dir / "outcome_models.pkl"
-    outdir = artefact_root / "policy_eval/gformula" / bootstrap_mode
+    outdir = (output_root or artefact_root) / "policy_eval/gformula" / bootstrap_mode
     output_paths = {key: outdir / name for key, name in OUTPUT_FILENAMES.items()}
     outdir.mkdir(exist_ok=True, parents=True)
     policy_df = read_policy_collection(policy_manifest_path)

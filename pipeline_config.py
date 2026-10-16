@@ -1,5 +1,3 @@
-"""Edit run choices here. Shared paths are listed below; technical settings stay in their scripts."""
-
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -27,15 +25,13 @@ PANEL_PATHS = {
 # Pipeline stages to execute, in order. Comment out stages to skip them.
 # Running a Python stage directly still uses the choices below.
 PIPELINE_STAGES = [
-    "create_data_panel.py",
-    "create_semi_synthetic_panel.py",
-    "fit_nuisance_models.py",
-    "panel_analysis.py",
-    "build_policy_panels.py",
+    # "create_data_panel.py",
+    # "create_semi_synthetic_panel.py",
+    # "fit_nuisance_models.py",
+    # "panel_analysis.py",
+    # "build_policy_panels.py",
     "evaluate_gformula_policies.py",
-    "evaluate_ipw_policies.py",
-    "evaluate_aipw_policies.py",
-    "check_policy_results.py",
+    # "evaluate_policy_dml_policies.py",
 ]
 
 # Learners to fit, in order. An empty list skips nuisance fitting.
@@ -48,7 +44,6 @@ MODEL_TYPES = [
     # "catboost",
     # "superlearner",
 ]
-RUN_LEARNING_CURVES = False
 
 # Super Learner membership is independent of MODEL_TYPES.
 SUPERLEARNER_BASE_MODELS = [
@@ -60,19 +55,19 @@ SUPERLEARNER_BASE_MODELS = [
 # The semi-synthetic builder generates all three validation variants when run.
 NUISANCE_PANELS = [
     "real",
-    # "semi_synthetic_with_confounding",
+    "semi_synthetic_with_confounding",
     # "confounder_omitted",
     # "randomised_action",
 ]
 POLICY_PANELS = [
     "real",
-    # "semi_synthetic_with_confounding",
+    "semi_synthetic_with_confounding",
     # "confounder_omitted",
     # "randomised_action",
 ]
 EVALUATION_PANELS = [
-    "real",
-    # "semi_synthetic_with_confounding",
+    # "real",
+    "semi_synthetic_with_confounding",
     # "confounder_omitted",
     # "randomised_action",
 ]
@@ -81,13 +76,11 @@ EVALUATION_PANELS = [
 # For "fixed" evaluation, fit this learner on each selected panel first.
 NUISANCE_MODEL_TYPE = "xgboost"
 # Select "fixed", "refit", or both; an empty list skips policy evaluation.
-BOOTSTRAP_MODES = ["fixed"]
+BOOTSTRAP_MODES = ["refit"]
 
 # Shared by policy construction and semi-synthetic known-truth calculations.
 POLICY_DAYS = [1, 2, 3, 4, 5]
 
-# Descriptive analysis and cross-estimator result audit each use one panel.
+# Descriptive analysis uses one panel.
 ANALYSIS_PANEL = "real"
 ANALYSIS_INCLUDE_AGE_SPLIT = True
-RESULT_CHECK_PANEL = "real"
-RESULT_CHECK_BOOTSTRAP_MODE = "fixed"

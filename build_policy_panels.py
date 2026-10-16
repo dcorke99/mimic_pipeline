@@ -25,7 +25,6 @@ _, INPUT_PATH, _NUISANCE_ROOT = (PANEL_RUNS[0] if PANEL_RUNS else ("real", *run_
 OUTDIR = _NUISANCE_ROOT.parent / "counterfactual_policies"
 
 POLICY_MANIFEST_PATH = OUTDIR / "policy_panels.csv"
-CHECK_OUTPUT_PATH = OUTDIR / "policy_panel_checks.csv"
 
 
 # Input and output column definitions
@@ -58,6 +57,8 @@ POLICY_OUTPUT_COLS = [
     "policy_catheter_state",
     "policy_periods_in",
     "policy_periods_out",
+    f"policy_{pec.REINSERTION_CONTEXT_COL}",
+    f"policy_{pec.REINSERTION_PERIOD_COL}",
     "policy_removal_day_extra_row_treated_as_out",
     "policy_action",
     "policy_matches_observed",
@@ -258,75 +259,11 @@ def save_policy_panels(long_df, manifest_path):
     pd.DataFrame(entries, columns=POLICY_MANIFEST_COLS).to_csv(manifest_path, index=False)
 
 
-def check_row(policy_df):
-    # Count decisions and observed-policy agreement
-    applicable = policy_df["policy_applicable"]
-    matches = policy_df["policy_matches_observed_action_today"]
-    n_applicable = int(applicable.sum())
-    n_matches = int(matches.eq(1).sum())
-    n_disagrees = int(matches.eq(0).sum())
-    timeline_diagnostics = pec.policy_timeline_checks(
-        policy_df,
-        episode_id_col="catheter_episode_id",
-    ).iloc[0].to_dict()
-
-    return {
-        "policy_name": policy_df["policy_name"].iloc[0],
-        "policy_type": policy_df["policy_type"].iloc[0],
-        "policy_remove_day": int(policy_df["policy_remove_day"].iloc[0]),
-        "n_rows": int(len(policy_df)),
-        "n_decision_rows": int(policy_df["is_decision_row"].sum()),
-        "n_policy_applicable_rows": n_applicable,
-        "n_applicable_policy_keep_rows": int((applicable & policy_df["policy_action"].eq("keep")).sum()),
-        "n_applicable_policy_remove_rows": int(
-            (applicable & policy_df["policy_action"].eq("remove")).sum()
-        ),
-        "n_policy_remove_rows": int(
-            policy_df["policy_action"].eq("remove").sum()
-        ),
-        "n_episodes_with_more_than_one_remove_row": int(
-            timeline_diagnostics["n_episodes_with_more_than_one_remove_row"]
-        ),
-        "n_policy_removal_day_extra_rows_treated_as_out": int(
-            timeline_diagnostics["n_policy_removal_day_extra_rows_treated_as_out"]
-        ),
-        "n_policy_remove_row_shortfall_vs_reached_episodes": int(
-            timeline_diagnostics["n_policy_remove_row_shortfall_vs_reached_episodes"]
-        ),
-        "n_not_applicable_rows": int(
-            (
-                ~policy_df["policy_applicable"]
-                & ~policy_df["policy_action"].eq("out")
-            ).sum()
-        ),
-        "n_already_removed_under_policy_rows": int(
-            policy_df["policy_action"].eq("out").sum()
-        ),
-        "n_policy_matches_observed_action_today": n_matches,
-        "n_policy_disagrees_with_observed_action_today": n_disagrees,
-        "proportion_policy_matches_observed_action_today": (
-            n_matches / n_applicable if n_applicable else np.nan
-        ),
-    }
-
-
-def build_check_report(long_df, policy_days):
-    # Summarise each target policy
-    rows = []
-    for policy_remove_day in policy_days:
-        policy_name = f"remove_on_day_{policy_remove_day}"
-        policy_df = long_df.loc[long_df["policy_name"].eq(policy_name)]
-        rows.append(check_row(policy_df))
-    return pd.DataFrame(rows)
-
-
 def print_console_summary(
     input_path,
     base_df,
     long_df,
-    check_df,
     manifest_path,
-    check_output_path,
 ):
     # Print the main row counts and output paths
     print()
@@ -335,22 +272,10 @@ def print_console_summary(
     print(f"Panel interval rows retained: {len(base_df):,}")
     print(f"Catheter episodes: {base_df['catheter_episode_id'].nunique():,}")
     print(f"Decision rows: {int(base_df['is_decision_row'].sum()):,}")
-    print(f"Candidate policies: {check_df['policy_name'].nunique():,}")
+    print(f"Candidate policies: {long_df['policy_name'].nunique():,}")
     print(f"Total rows across policy panels: {len(long_df):,}")
     print()
-    print("Policy checks:")
-    for row in check_df.itertuples(index=False):
-        pct = row.proportion_policy_matches_observed_action_today
-        pct_text = "NA" if pd.isna(pct) else f"{100 * pct:.1f}%"
-        print(
-            f"  {row.policy_name}: applicable={row.n_policy_applicable_rows:,}, "
-            f"keep={row.n_applicable_policy_keep_rows:,}, "
-            f"remove={row.n_applicable_policy_remove_rows:,}, "
-            f"today-match={pct_text}"
-        )
-    print()
     print(f"Saved policy panel index: {manifest_path}")
-    print(f"Saved policy check report: {check_output_path}")
 
 
 def run_panel():
@@ -368,35 +293,24 @@ def run_panel():
     base_df = add_stable_ids_and_decision_flag(input_df)
     base_df = add_episode_day(base_df)
 
-    # Construct the policy panel and its check report
+    # Construct and export the policy panels.
     long_df = build_long_policy_panel(base_df, POLICY_DAYS)
-    # Export one explicit definition per policy, indexed for all evaluators.
     save_policy_panels(long_df, POLICY_MANIFEST_PATH)
-
-    # Audit the saved fields rather than a separate reconstructed policy.
-    saved_df = read_policy_collection(POLICY_MANIFEST_PATH)
-    check_df = build_check_report(saved_df, POLICY_DAYS)
-
-    # Save report data rounded to three decimal places
-    pec.save_report_df(check_df, CHECK_OUTPUT_PATH)
 
     print_console_summary(
         INPUT_PATH,
         base_df,
         long_df,
-        check_df,
         POLICY_MANIFEST_PATH,
-        CHECK_OUTPUT_PATH,
     )
 
 
 def main():
-    global INPUT_PATH, OUTDIR, POLICY_MANIFEST_PATH, CHECK_OUTPUT_PATH
+    global INPUT_PATH, OUTDIR, POLICY_MANIFEST_PATH
     for panel_name, input_path, nuisance_root in PANEL_RUNS:
         INPUT_PATH = input_path
         OUTDIR = nuisance_root.parent / "counterfactual_policies"
         POLICY_MANIFEST_PATH = OUTDIR / "policy_panels.csv"
-        CHECK_OUTPUT_PATH = OUTDIR / "policy_panel_checks.csv"
         print(f"[PANEL] {panel_name}: {INPUT_PATH}", flush=True)
         run_panel()
 

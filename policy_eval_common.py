@@ -4,15 +4,171 @@
 import joblib
 import numpy as np
 import pandas as pd
+import pipeline_config as run_config
+
+
+REINSERTION_CONTEXT_COL = "reinsertion_remove_period"
+REINSERTION_PERIOD_COL = "reinsertion_periods_out"
+REINSERTION_POLICY_PREFIX = "p_reinsertion_policy_day_"
+EXPOSURE_MEASURE = "nominal_catheter_in_decision_period_days"
+POLICY_OUTCOMES = ("cauti", "reinsertion", "death", "icu_exit_alive", "no_event")
+
+
+def policy_prediction_columns(days=None):
+    days = run_config.POLICY_DAYS if days is None else days
+    return [f"p_{outcome}_policy_day_{day}" for day in days for outcome in POLICY_OUTCOMES]
+
+
+def is_policy_prediction_column(column):
+    return any(column.startswith(f"p_{outcome}_policy_day_") for outcome in POLICY_OUTCOMES)
+
+
+def policy_feature_overrides(df, removal_day):
+    """Candidate inputs on the preserved grid; clinical history stays factual."""
+    day = ((pd.to_datetime(df.period_start, format="mixed")
+            - pd.to_datetime(df.inserted, format="mixed")) // pd.Timedelta(days=1) + 1).astype(int)
+    # On legacy split-day rows only the first interval receives REMOVE, as in
+    # the policy builder. The insertion-anchored panel has one row per day.
+    keys = ["subject_id", "hadm_id", "stay_id", "inserted", "removed"]
+    first = df.loc[day.eq(removal_day)].sort_values(["period_start", "period_end"]).groupby(
+        keys, dropna=False, sort=False,
+    ).head(1).index
+    remove = pd.Series(df.index.isin(first), index=df.index)
+    in_state = day.lt(removal_day) | remove
+    periods_out = (day - removal_day).clip(lower=1)
+    return {
+        "catheter_state": pd.Series(np.where(in_state, "in", "out"), index=df.index),
+        "removed_in_period": remove.astype(int),
+        "periods_in_state": day.where(in_state, periods_out),
+        REINSERTION_CONTEXT_COL: remove.astype(int),
+        REINSERTION_PERIOD_COL: periods_out.where(~in_state, 0),
+    }
+
+
+def add_policy_predictions(df, payload, *, predictor=None, days=None):
+    """Unmasked hazards from each patient's held-out models and policy inputs.
+
+    Factual eligibility defines training only. No factual at_risk_* flags or
+    masked factual predictions enter these candidate-policy hazards.
+    """
+    predictor = predict_fold_model if predictor is None else predictor
+    days = run_config.POLICY_DAYS if days is None else days
+    if df.groupby("subject_id", dropna=False)[CROSSFIT_FOLD_COL].nunique().gt(1).any():
+        raise ValueError("A patient appears in multiple held-out folds")
+    scores = pd.DataFrame(np.nan, index=df.index, columns=policy_prediction_columns(days))
+    for day in days:
+        overrides = policy_feature_overrides(df, day)
+        keep = overrides["catheter_state"].eq("in") & overrides["removed_in_period"].eq(0)
+        scores.loc[keep, f"p_reinsertion_policy_day_{day}"] = 0.0
+        for state in ("in", "out"):
+            for outcome, model in payload[f"{state}_models"].items():
+                features = model["features"]
+                eligible_state = (overrides["catheter_state"].eq("out") | overrides["removed_in_period"].eq(1)
+                                  if outcome == "reinsertion" else overrides["catheter_state"].eq(state))
+                column = f"p_{outcome}_policy_day_{day}"
+                for fold_model in model["fold_models"]:
+                    rows = eligible_state & df[CROSSFIT_FOLD_COL].eq(fold_model["fold"])
+                    if not rows.any():
+                        continue
+                    inputs = df.loc[rows, features].copy()
+                    for feature, values in overrides.items():
+                        if feature in inputs:
+                            inputs[feature] = values.loc[rows]
+                    scores.loc[rows, column] = predictor(fold_model, inputs)
+    if scores.isna().any().any():
+        raise ValueError("Policy hazards lack a corresponding held-out outcome model")
+    return pd.concat([df.drop(columns=scores.columns, errors="ignore"), scores], axis=1)
+
+
+def select_policy_outcomes(df, prefix, attribution_periods=2):
+    """Select raw policy hazards, then apply policy eligibility to contributions."""
+    current = df.policy_name.eq("current_practice")
+    suffix = df.policy_action.map({"keep": "keep", "remove": "remove", "out": "out"})
+    for outcome in POLICY_OUTCOMES:
+        target = f"{prefix}_{'recatheterisation' if outcome == 'reinsertion' else outcome}_under_policy"
+        df[target] = np.nan
+        for action in ("keep", "remove", "out"):
+            rows = current & suffix.eq(action)
+            if outcome == "reinsertion" and action == "keep":
+                df.loc[rows, target] = 0.0
+            else:
+                df.loc[rows, target] = df.loc[rows, f"p_{outcome}_if_{action}"]
+        for day in pd.to_numeric(df.loc[~current, "policy_remove_day"]).unique():
+            rows = ~current & df.policy_remove_day.eq(day)
+            df.loc[rows, target] = df.loc[rows, f"p_{outcome}_policy_day_{int(day)}"]
+    in_state = df.policy_catheter_state.eq("in")
+    window = in_state | pd.to_numeric(df.policy_periods_out).between(0, attribution_periods)
+    window.loc[current] = df.loc[current, "at_risk_cauti"].eq(1)
+    df["policy_at_risk_cauti"] = window.astype(int)
+    df["policy_cauti_hazard"] = df[f"{prefix}_cauti_under_policy"]
+    df.loc[~window, f"{prefix}_cauti_under_policy"] = 0.0
+    df.loc[current & df.at_risk_reinsertion.eq(0), f"{prefix}_recatheterisation_under_policy"] = 0.0
+    df["policy_periods_in_state"] = df.policy_periods_in.where(in_state, df.policy_periods_out.clip(lower=1))
+    df["__used_rescored_prediction"] = ~current
+    for column in (REINSERTION_CONTEXT_COL, REINSERTION_PERIOD_COL):
+        if current.any():
+            df.loc[current, f"policy_{column}"] = df.loc[current, column]
+
+
+def reinsertion_policy_columns():
+    return [f"{REINSERTION_POLICY_PREFIX}{day}" for day in run_config.POLICY_DAYS]
+
+
+def add_reinsertion_context(df):
+    """Pre-period timing; realised post-action exposure is never a predictor."""
+    out = df.copy()
+    in_rows = out["catheter_state"].eq("in")
+    out[REINSERTION_CONTEXT_COL] = (in_rows & out["removed_in_period"].eq(1)).astype(int)
+    # Zero denotes the REMOVE period. Subsequent periods use the one-based
+    # elapsed 24-hour bin from known removal, consistently across start states.
+    elapsed = pd.to_datetime(out["period_start"], format="mixed") - pd.to_datetime(out["removed"], format="mixed")
+    out[REINSERTION_PERIOD_COL] = np.where(in_rows, 0, elapsed // pd.Timedelta(days=1) + 1).astype(int)
+    return out
+
+
+def reinsertion_feature_columns(out_feature_cols):
+    return [col for col in out_feature_cols if col != "periods_in_state"] + [
+        REINSERTION_CONTEXT_COL, REINSERTION_PERIOD_COL,
+    ]
+
+
+def fixed_day_reinsertion_context(day, removal_day):
+    """Model inputs also exported as policy_reinsertion_* panel columns."""
+    return {
+        REINSERTION_CONTEXT_COL: day.eq(removal_day).astype(int),
+        REINSERTION_PERIOD_COL: (day - removal_day).clip(lower=0).astype(int),
+    }
+
+
+def predict_reinsertion_columns(fold_model, df, feature_cols, predictor=None):
+    """Score REMOVE, factual OUT, and each day-policy context with one model."""
+    predictor = predict_fold_model if predictor is None else predictor
+    if not {REINSERTION_CONTEXT_COL, REINSERTION_PERIOD_COL}.issubset(feature_cols):
+        raise ValueError("Reinsertion model predates the rebuilt grid; refit nuisance models")
+    base = df.reindex(columns=feature_cols).copy()
+    base[REINSERTION_CONTEXT_COL] = 0
+    base[REINSERTION_PERIOD_COL] = df[REINSERTION_PERIOD_COL].clip(lower=1)
+    scores = {"p_reinsertion_if_out": predictor(fold_model, base)}
+    base[REINSERTION_CONTEXT_COL] = 1
+    base[REINSERTION_PERIOD_COL] = 0
+    scores["p_reinsertion_if_remove"] = predictor(fold_model, base)
+    day = add_episode_day(df)["episode_day"]
+    for removal_day in run_config.POLICY_DAYS:
+        inputs = base.copy()
+        for column, values in fixed_day_reinsertion_context(day, removal_day).items():
+            inputs[column] = values
+        prediction = predictor(fold_model, inputs)
+        scores[f"{REINSERTION_POLICY_PREFIX}{removal_day}"] = np.where(day.lt(removal_day), 0.0, prediction)
+    return scores
+
+
+def factual_reinsertion_prediction(df):
+    return pd.Series(np.where(
+        df["catheter_state"].eq("in"), df["p_reinsertion_if_remove"], df["p_reinsertion_if_out"],
+    ), index=df.index)
 
 
 MAX_REASONABLE_PERIOD_DURATION_DAYS = 7.0
-LOW_ADHERENCE_THRESHOLD = 0.05
-LOW_ESS_MIN = 100.0
-LOW_ESS_FRACTION = 0.10
-LOW_SUPPORT_PCT_BELOW_005_THRESHOLD = 0.10
-EXTREME_WEIGHT_P99_THRESHOLD = 30.0
-EXTREME_WEIGHT_MAX_THRESHOLD = 100.0
 
 
 def save_report_df(df, path, decimals=3):
@@ -52,6 +208,27 @@ def add_period_duration_days(
             f"> {max_reasonable_days}. They are retained and flagged.",
             flush=True,
         )
+    return out
+
+
+def observed_catheter_exposure_days(df):
+    """Actual catheter-IN time, including the partial final REMOVE period."""
+    start = pd.to_datetime(df["period_start"], format="mixed")
+    end = pd.to_datetime(df["period_end"], format="mixed")
+    removed = pd.to_datetime(df["removed"], format="mixed")
+    catheter_end = end.clip(upper=removed)
+    return (catheter_end - start).dt.total_seconds().clip(lower=0) / 86400.0
+
+
+def label_nominal_exposure(df):
+    """Legacy comparison columns retain their nominal decision-period scale."""
+    aliases = {
+        f"nominal_{col}": df[col] for col in df
+        if "catheter_exposure_days" in col and not col.startswith(("nominal_", "actual_"))
+    }
+    out = df.drop(columns=list(aliases), errors="ignore")
+    out = pd.concat([out, pd.DataFrame(aliases, index=df.index)], axis=1)
+    out["catheter_exposure_measure"] = EXPOSURE_MEASURE
     return out
 
 
@@ -133,6 +310,8 @@ def add_fixed_day_target_policy_timeline(
     out.loc[later_row_on_remove_day, periods_out_col] = 0.0
     out.loc[after_remove, periods_out_col] = day.loc[after_remove] - remove_day.loc[after_remove]
     out["policy_removal_day_extra_row_treated_as_out"] = later_row_on_remove_day.astype(int)
+    for column, values in fixed_day_reinsertion_context(day, remove_day).items():
+        out[f"policy_{column}"] = values
     return out
 
 
@@ -271,61 +450,7 @@ def add_standard_comparisons(
             if pd.isna(value) or pd.isna(baseline_value) or baseline_value == 0
             else float(value / baseline_value)
         )
-    return out
-
-
-def add_overlap_quality_flags(
-    summary,
-    *,
-    support_diagnostics,
-    weight_diagnostics,
-    current_practice_label="current_practice",
-):
-    # Add overlap quality flags
-    out = summary.copy()
-    out["low_adherence_flag"] = out["pct_adherent_episodes"].lt(
-        LOW_ADHERENCE_THRESHOLD
-    )
-
-    n_col = "n_total_policy_episodes" if "n_total_policy_episodes" in out.columns else "n_episodes"
-    ess = pd.to_numeric(out["effective_sample_size"], errors="coerce")
-    n_total = pd.to_numeric(out[n_col], errors="coerce")
-    out["low_ess_flag"] = ess.lt(LOW_ESS_MIN) | ess.lt(LOW_ESS_FRACTION * n_total)
-
-    support_all = support_diagnostics.loc[
-        support_diagnostics["group"].eq("all"),
-        ["policy_name", "pct_below_0_05"],
-    ].drop_duplicates("policy_name")
-    support_all["low_support_flag"] = pd.to_numeric(
-        support_all["pct_below_0_05"],
-        errors="coerce",
-    ).gt(LOW_SUPPORT_PCT_BELOW_005_THRESHOLD)
-    out = out.merge(
-        support_all[["policy_name", "low_support_flag"]],
-        on="policy_name",
-        how="left",
-    )
-    out["low_support_flag"] = out["low_support_flag"].fillna(False)
-
-    weight_flags = weight_diagnostics[["policy_name"]].copy()
-    weight_flags["extreme_weight_flag"] = (
-        pd.to_numeric(
-            weight_diagnostics["p99_weight"],
-            errors="coerce",
-        ).gt(EXTREME_WEIGHT_P99_THRESHOLD)
-        | pd.to_numeric(
-            weight_diagnostics["max_weight"],
-            errors="coerce",
-        ).gt(EXTREME_WEIGHT_MAX_THRESHOLD)
-    )
-    weight_flags = weight_flags.drop_duplicates("policy_name")
-    out = out.merge(weight_flags, on="policy_name", how="left")
-    out["extreme_weight_flag"] = out["extreme_weight_flag"].fillna(False)
-
-    current = out["policy_name"].eq(current_practice_label)
-    for col in ["low_adherence_flag", "low_ess_flag", "low_support_flag", "extreme_weight_flag"]:
-        out.loc[current, col] = False
-    return out
+    return label_nominal_exposure(out)
 
 
 CROSSFIT_FOLD_COL = "_crossfit_fold"
@@ -336,6 +461,7 @@ PREDICTION_COLUMNS = [
     "p_cauti_if_remove",
     "p_cauti_if_out",
     "p_reinsertion_if_out",
+    "p_reinsertion_if_remove",
     "p_death_if_keep",
     "p_death_if_remove",
     "p_death_if_out",
@@ -383,7 +509,7 @@ def rescore_state_action_predictions(
 
     models_key = "in_models" if state == "in" else "out_models"
     x_cols_key = "x_cols_in" if state == "in" else "x_cols_out"
-    feature_cols = list(payload[x_cols_key])
+    feature_cols = list(payload[models_key][outcome].get("features", payload[x_cols_key]))
 
     fold_models = payload[models_key][outcome]["fold_models"]
     for fold_model in fold_models:
@@ -393,6 +519,12 @@ def rescore_state_action_predictions(
             errors="coerce",
         ).eq(fold)
         if int(rows.sum()) == 0:
+            continue
+        if outcome == "reinsertion":
+            scores = predict_reinsertion_columns(fold_model, df.loc[rows], feature_cols)
+            for column, values in scores.items():
+                df.loc[rows, column] = values
+            df.loc[rows, f"__rescored_{output_col}"] = True
             continue
         features = df.loc[rows, feature_cols].copy()
         if state == "in":
@@ -408,6 +540,9 @@ def fill_missing_counterfactual_predictions(
     outcome_models_path,
 ):
     # Standardise prediction columns and track rescored values
+    for column in [*PREDICTION_COLUMNS, *reinsertion_policy_columns()]:
+        if column not in df:
+            df[column] = np.nan
     df[PREDICTION_COLUMNS] = df[PREDICTION_COLUMNS].apply(
         pd.to_numeric,
         errors="coerce",
@@ -424,6 +559,7 @@ def fill_missing_counterfactual_predictions(
         ("in", "cauti", "p_cauti_if_remove", 1),
         ("out", "cauti", "p_cauti_if_out", None),
         ("out", "reinsertion", "p_reinsertion_if_out", None),
+        ("out", "reinsertion", "p_reinsertion_if_remove", None),
         ("in", "death", "p_death_if_keep", 0),
         ("in", "death", "p_death_if_remove", 1),
         ("out", "death", "p_death_if_out", None),
@@ -436,7 +572,10 @@ def fill_missing_counterfactual_predictions(
     ]
 
 
-    if not df[PREDICTION_COLUMNS].isna().any().any():
+    for column in reinsertion_policy_columns():
+        needed_specs.append(("out", "reinsertion", column, None))
+    policy_complete = df.reindex(columns=policy_prediction_columns()).notna().all().all()
+    if not df[[*PREDICTION_COLUMNS, *reinsertion_policy_columns()]].isna().any().any() and policy_complete:
         return df
 
     # Load saved outcome model artefacts
@@ -456,7 +595,7 @@ def fill_missing_counterfactual_predictions(
             action_remove,
         )
 
-    return df
+    return df if policy_complete else add_policy_predictions(df, payload)
 
 
 def effective_sample_size(weights):
@@ -469,13 +608,6 @@ def effective_sample_size(weights):
     sum_weights = float(weights.sum())
     sum_squared_weights = float(np.square(weights).sum())
     return float((sum_weights ** 2) / sum_squared_weights) if sum_squared_weights > 0 else np.nan
-
-
-def assign_policy_prediction(df, target_col, source_col, mask):
-    # Copy selected prediction values into mean columns
-    df.loc[mask, target_col] = pd.to_numeric(df.loc[mask, source_col], errors="coerce")
-    rescored_col = f"__rescored_{source_col}"
-    df.loc[mask & df[rescored_col], "__used_rescored_prediction"] = True
 
 
 def cumulative_event_probability(probabilities):

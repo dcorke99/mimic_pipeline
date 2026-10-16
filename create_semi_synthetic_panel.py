@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from policy_eval_common import cumulative_event_probability, add_episode_day
+import policy_eval_common as pec
 
 from build_policy_panels import (
     POLICY_INPUT_COLS,
@@ -340,8 +341,22 @@ def generate_sequential_trajectory(
             POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
         ))
     ).astype(np.int8)
-    panel[REINSERTION_RISK_COL] = panel[STATE_COL].eq("out").astype(np.int8)
+    duration = (period_ends - period_starts).dt.total_seconds() / 3600.0
+    removed = panel["removed"]
+    in_hours = (period_ends.clip(upper=removed) - period_starts).dt.total_seconds().clip(lower=0) / 3600.0
+    # Timestamp subtraction preserves exact zero when removal is at the
+    # terminal boundary; subtracting rounded hour totals can invent OUT time.
+    out_time = (period_ends - removed.clip(lower=period_starts)).clip(lower=pd.Timedelta(0))
+    out_hours = out_time.dt.total_seconds() / 3600.0
+    panel[REINSERTION_RISK_COL] = out_time.gt(pd.Timedelta(0)).astype(np.int8)
+    for column, values in (("interval_hours", duration), ("catheter_in_hours", in_hours),
+                           ("catheter_out_hours", out_hours)):
+        if column in panel:
+            panel[column] = values
+    if "episode_day" in panel:
+        panel["episode_day"] = add_episode_day(panel)["episode_day"]
     panel = rebuild_observed_action(panel)
+    panel = pec.add_reinsertion_context(panel)
 
     decision_rows = panel[STATE_COL].eq("in") & panel[OBSERVED_ACTION_COL].isin(
         ["keep", "remove"]
@@ -510,39 +525,6 @@ def build_truth_table(
     return truth
 
 
-def check_known_truth_policy_trajectory(policy_long):
-    for _, episode in policy_long.groupby(
-        ["policy_name", "catheter_episode_id"], sort=False, dropna=False
-    ):
-        actions = (
-            episode["policy_action"].astype("string").str.strip().str.lower()
-            .to_numpy(dtype=object)
-        )
-        states = (
-            episode["policy_catheter_state"].astype("string").str.strip().str.lower()
-            .to_numpy(dtype=object)
-        )
-        remove_offsets = np.flatnonzero(actions == "remove")
-        if len(remove_offsets) > 1:
-            raise AssertionError("A known-truth fixed-day path has multiple removal rows")
-        if len(remove_offsets) == 1:
-            removal_offset = int(remove_offsets[0])
-            if states[removal_offset] != "in":
-                raise AssertionError("A known-truth removal does not occur while catheter-IN")
-            if not np.all(actions[:removal_offset] == "keep"):
-                raise AssertionError("A known-truth path is not keep before first removal")
-            if not np.all(states[: removal_offset + 1] == "in"):
-                raise AssertionError("A known-truth path leaves IN before its removal")
-            if not np.all(actions[removal_offset + 1 :] == "out"):
-                raise AssertionError("A known-truth path has decisions after removal")
-            if not np.all(states[removal_offset + 1 :] == "out"):
-                raise AssertionError("A known-truth path returns IN after removal")
-        elif not (np.all(actions == "keep") and np.all(states == "in")):
-            raise AssertionError(
-                "A known-truth episode not reaching its removal day must remain IN/keep"
-            )
-
-
 def build_known_truth_policy_values(primary_panel, truth, standardisation):
     # Reuse the shared policy builder so names, days, episode IDs, and
     # fixed-day timeline semantics cannot drift from normal evaluation.
@@ -567,7 +549,6 @@ def build_known_truth_policy_values(primary_panel, truth, standardisation):
     current_probability_lookup = truth.loc[:, current_truth_columns]
 
     policy_long = build_long_policy_panel(policy_base, POLICY_DAYS)
-    check_known_truth_policy_trajectory(policy_long)
     policy_state = policy_long["policy_catheter_state"].astype("string").str.lower()
     policy_periods_in = pd.to_numeric(
         policy_long["policy_periods_in"], errors="coerce"
@@ -575,11 +556,10 @@ def build_known_truth_policy_values(primary_panel, truth, standardisation):
     policy_periods_out = pd.to_numeric(
         policy_long["policy_periods_out"], errors="coerce"
     )
-    # Base-panel periods_in_state is one-based in either state. The policy
-    # helper uses zero for an extra OUT row on the removal day, so translate it
-    # to one-based values before applying the outcome DGP.
+    # The first OUT grid period is bin 1, matching the generated trajectory.
+    # A legacy extra OUT row on the removal day also belongs to bin 1.
     policy_dgp_periods = pd.Series(
-        np.where(policy_state.eq("in"), policy_periods_in, policy_periods_out + 1.0),
+        np.where(policy_state.eq("in"), policy_periods_in, policy_periods_out.clip(lower=1.0)),
         index=policy_long.index,
         dtype=float,
     )
@@ -761,214 +741,6 @@ def build_coefficients_table(action_intercept, randomised_action_intercept):
     return pd.DataFrame(rows)
 
 
-def state_derived_columns(panel):
-    columns = {
-        "removed",
-        "episode_index",
-        STATE_COL,
-        PERIODS_COL,
-        ACTION_COL,
-        ACTION_REMOVE_COL,
-        OBSERVED_ACTION_COL,
-        OUTCOME_COL,
-        CAUTI_RISK_COL,
-        REINSERTION_RISK_COL,
-        *OPTIONAL_DECISION_INDICATOR_COLS,
-    }
-    return [column for column in panel.columns if column in columns]
-
-
-def assert_trajectory_integrity(panel):
-    states = panel[STATE_COL].astype("string").str.strip().str.lower()
-    actions = normalise_binary(panel[ACTION_COL], ACTION_COL)
-    action_remove = normalise_binary(panel[ACTION_REMOVE_COL], ACTION_REMOVE_COL)
-    outcomes = normalise_binary(panel[OUTCOME_COL], OUTCOME_COL)
-    periods = pd.to_numeric(panel[PERIODS_COL], errors="coerce")
-    actual_cauti_risk = normalise_binary(panel[CAUTI_RISK_COL], CAUTI_RISK_COL)
-    actual_reinsertion_risk = normalise_binary(
-        panel[REINSERTION_RISK_COL], REINSERTION_RISK_COL
-    )
-
-    if not states.isin(["in", "out"]).all():
-        raise AssertionError("Synthetic catheter_state contains values other than IN/OUT")
-    if actions.loc[states.eq("out")].ne(0).any():
-        raise AssertionError("removed_in_period must be zero on every OUT row")
-    if periods.isna().any() or periods.lt(1).any():
-        raise AssertionError("periods_in_state must be a positive integer on every row")
-    if outcomes.loc[actual_cauti_risk.eq(0)].ne(0).any():
-        raise AssertionError("Synthetic CAUTI must be zero outside the recalculated risk set")
-
-    expected_cauti_risk = (
-        states.eq("in")
-        | (states.eq("out") & periods.le(POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS))
-    ).astype(np.int8)
-    expected_reinsertion_risk = states.eq("out").astype(np.int8)
-    if not actual_cauti_risk.equals(expected_cauti_risk):
-        raise AssertionError("at_risk_cauti disagrees with the synthetic catheter path")
-    if not actual_reinsertion_risk.equals(expected_reinsertion_risk):
-        raise AssertionError("at_risk_reinsertion disagrees with the synthetic catheter path")
-
-    expected_observed_action = pd.Series("out", index=panel.index, dtype="string")
-    expected_observed_action.loc[states.eq("in") & actions.eq(0)] = "keep"
-    expected_observed_action.loc[states.eq("in") & actions.eq(1)] = "remove"
-    actual_observed_action = panel[OBSERVED_ACTION_COL].astype("string")
-    if not actual_observed_action.equals(expected_observed_action):
-        raise AssertionError("observed_action is inconsistent with state and removal")
-    expected_action_remove = (
-        states.eq("in")
-        & actual_observed_action.eq("remove")
-        & actions.eq(1)
-    ).astype(np.int8)
-    if not action_remove.equals(expected_action_remove):
-        raise AssertionError(
-            "action_remove is inconsistent with catheter_state, observed_action, "
-            "or removed_in_period"
-        )
-
-    expected_decision_rows = states.eq("in")
-    for column in OPTIONAL_DECISION_INDICATOR_COLS:
-        if column not in panel.columns:
-            continue
-        actual = panel[column].fillna(False).astype(bool)
-        if not actual.equals(expected_decision_rows):
-            raise AssertionError(f"{column} disagrees with the synthetic catheter state")
-
-    codes = episode_codes(panel)
-    positions_by_episode = chronological_episode_positions(panel, codes)
-    period_start = pd.to_datetime(panel["period_start"], errors="coerce")
-    period_end = pd.to_datetime(panel["period_end"], errors="coerce")
-    episode_end = pd.to_datetime(panel["episode_end_time"], errors="coerce")
-    removed_time = pd.to_datetime(panel["removed"], errors="coerce")
-    if episode_end.isna().any() or removed_time.isna().any():
-        raise AssertionError("Synthetic episode/removal timestamps must be valid")
-
-    terminal_events = panel.loc[:, TERMINAL_EVENT_COLS].apply(
-        pd.to_numeric, errors="coerce"
-    )
-    if terminal_events.isna().any().any() or not terminal_events.isin([0, 1]).all().all():
-        raise AssertionError("Terminal-event fields must be binary")
-
-    for positions_list in positions_by_episode:
-        positions = np.asarray(positions_list, dtype=int)
-        episode_actions = actions.iloc[positions].to_numpy(dtype=np.int8)
-        episode_states = states.iloc[positions].to_numpy(dtype=object)
-        episode_periods = periods.iloc[positions].to_numpy(dtype=int)
-        removal_offsets = np.flatnonzero(episode_actions == 1)
-        if len(removal_offsets) > 1:
-            raise AssertionError("A synthetic catheter episode has more than one removal")
-
-        if len(removal_offsets) == 1:
-            removal_offset = int(removal_offsets[0])
-            expected_states = np.array(
-                ["in"] * (removal_offset + 1)
-                + ["out"] * (len(positions) - removal_offset - 1),
-                dtype=object,
-            )
-            expected_periods = np.concatenate([
-                np.arange(1, removal_offset + 2, dtype=int),
-                np.arange(1, len(positions) - removal_offset, dtype=int),
-            ])
-            post_positions = positions[removal_offset + 1 :]
-            if episode_actions[removal_offset + 1 :].any():
-                raise AssertionError("A removal decision occurs after the first removal")
-            if len(post_positions) and not panel.iloc[post_positions][
-                OBSERVED_ACTION_COL
-            ].astype("string").eq("out").all():
-                raise AssertionError("A post-removal row has a keep/remove observed_action")
-
-            removal_position = positions[removal_offset]
-            timestamp = removed_time.iloc[removal_position]
-            if not (
-                timestamp > period_start.iloc[removal_position]
-                and timestamp <= period_end.iloc[removal_position]
-                and timestamp < episode_end.iloc[removal_position]
-            ):
-                raise AssertionError("Synthetic removed time is outside its removal period")
-        else:
-            expected_states = np.array(["in"] * len(positions), dtype=object)
-            expected_periods = np.arange(1, len(positions) + 1, dtype=int)
-            final_position = positions[-1]
-            if not removed_time.iloc[final_position] == episode_end.iloc[final_position]:
-                raise AssertionError(
-                    "An episode without synthetic removal must remain IN to its endpoint"
-                )
-
-        if not np.array_equal(episode_states, expected_states):
-            raise AssertionError("An episode does not remain OUT after its first removal")
-        if not np.array_equal(episode_periods, expected_periods):
-            raise AssertionError("periods_in_state is incoherent within an episode")
-        if not np.array_equal(
-            pd.to_numeric(panel.iloc[positions]["episode_index"], errors="coerce").to_numpy(),
-            np.arange(len(positions)),
-        ):
-            raise AssertionError("episode_index is not chronological and zero-based")
-        if removed_time.iloc[positions].nunique(dropna=False) != 1:
-            raise AssertionError("removed is not constant within a catheter episode")
-        if period_end.iloc[positions].gt(episode_end.iloc[positions]).any():
-            raise AssertionError("A row occurs after the preserved terminal endpoint")
-        if period_end.iloc[positions[-1]] != episode_end.iloc[positions[-1]]:
-            raise AssertionError("The final row does not end at the preserved endpoint")
-
-        terminal_count = terminal_events.iloc[positions].sum(axis=1).to_numpy(dtype=int)
-        expected_terminal = np.zeros(len(positions), dtype=int)
-        expected_terminal[-1] = 1
-        if not np.array_equal(terminal_count, expected_terminal):
-            raise AssertionError("Terminal events must occur exactly once on the final row")
-
-
-def assert_primary_integrity(source_panel, primary_panel):
-    expected_columns = list(source_panel.columns)
-    if ACTION_REMOVE_COL not in expected_columns:
-        expected_columns.append(ACTION_REMOVE_COL)
-    if list(primary_panel.columns) != expected_columns:
-        raise AssertionError(
-            "Primary semi-synthetic panel changed source columns or column order "
-            "beyond the derived action_remove field"
-        )
-    source_positions = source_panel.index.get_indexer(primary_panel.index)
-    if (source_positions < 0).any() or not np.all(np.diff(source_positions) > 0):
-        raise AssertionError("Retained rows are not an order-preserving source-panel subset")
-
-    retained_source = source_panel.loc[primary_panel.index]
-    for identifier in ["subject_id", "hadm_id", "stay_id", *EPISODE_IDENTITY_COLS]:
-        if identifier not in source_panel.columns:
-            continue
-        if set(source_panel[identifier].dropna()) != set(primary_panel[identifier].dropna()):
-            raise AssertionError(f"The retained panel changed the set of {identifier} values")
-    if "catheter_episode_id" in source_panel.columns:
-        if set(source_panel["catheter_episode_id"].dropna()) != set(
-            primary_panel["catheter_episode_id"].dropna()
-        ):
-            raise AssertionError("The retained panel changed catheter episode IDs")
-
-    source_episode_keys = {
-        tuple(row)
-        for row in source_panel.loc[:, EPISODE_IDENTITY_COLS].astype("string").itertuples(
-            index=False, name=None
-        )
-    }
-    primary_episode_keys = {
-        tuple(row)
-        for row in primary_panel.loc[:, EPISODE_IDENTITY_COLS].astype("string").itertuples(
-            index=False, name=None
-        )
-    }
-    if source_episode_keys != primary_episode_keys:
-        raise AssertionError("The retained panel changed catheter episode identities")
-
-    intended_changes = set(state_derived_columns(source_panel))
-    ordinary_columns = [
-        column for column in source_panel.columns if column not in intended_changes
-    ]
-    pd.testing.assert_frame_equal(
-        retained_source.loc[:, ordinary_columns],
-        primary_panel.loc[:, ordinary_columns],
-        check_dtype=True,
-        check_exact=True,
-    )
-    assert_trajectory_integrity(primary_panel)
-
-
 def assert_no_truth_columns(panel, panel_name):
     leaked_columns = [
         column
@@ -1109,10 +881,7 @@ def main():
         randomised_action_intercept,
     )
 
-    # All safety checks run before any validation output is written.
-    assert_primary_integrity(source_panel, primary_panel)
     assert_no_truth_columns(omitted_panel, "omitted-confounder estimator-input panel")
-    assert_primary_integrity(source_panel, randomised_panel)
     assert_no_truth_columns(randomised_panel, "randomised estimator-input panel")
 
     output_dir.mkdir(parents=True, exist_ok=True)

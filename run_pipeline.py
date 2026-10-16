@@ -8,7 +8,6 @@ import pipeline_config as config
 
 REPO_ROOT = Path(__file__).resolve().parent
 
-
 def main():
     for script in config.PIPELINE_STAGES:
         print(f"[PIPELINE] Starting {script}", flush=True)
@@ -16,8 +15,6 @@ def main():
         if result.returncode:
             print(f"{script} failed. Pipeline stopped.", file=sys.stderr)
             return result.returncode
-    return 0
-
 
 if __name__ == "__main__":
     main()

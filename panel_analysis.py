@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from policy_eval_common import add_episode_day
+import policy_eval_common as pec
 
 # Run choices come from pipeline_config.py; descriptive settings stay here.
 import pipeline_config as run_config
@@ -176,9 +177,7 @@ def build_risk_sets(df):
         ).cumsum()
     )
     out["cauti_risk_row"] = out["at_risk_cauti"].astype(int)
-    out["reinsertion_fit_row"] = (
-        out[STATE_COL].eq("out") & out["at_risk_reinsertion"].eq(1)
-    ).astype(int)
+    out["reinsertion_fit_row"] = out["at_risk_reinsertion"].eq(1).astype(int)
     out["removal_fit_row"] = out[DECISION_ROW_COL].astype(int)
     return out
 
@@ -218,13 +217,13 @@ def build_overview_tables(df):
             (df[DECISION_PERIOD_COL] >= LATE_REMOVAL_PERIOD_THRESHOLD)
         ),
         "cauti_in_period_on_cauti_risk_rows": df["cauti_risk_row"] == 1,
-        "reinsertion_in_period_on_out_fit_rows": df["reinsertion_fit_row"] == 1,
+        "reinsertion_in_period_on_risk_rows": df["reinsertion_fit_row"] == 1,
     }
     targets = {
         "removal_in_period_on_decision_rows": ACTION_COL,
         "late_removal_in_period_on_decision_rows": LATE_REMOVAL_COL,
         "cauti_in_period_on_cauti_risk_rows": Y_CAUTI,
-        "reinsertion_in_period_on_out_fit_rows": Y_REINS,
+        "reinsertion_in_period_on_risk_rows": Y_REINS,
     }
     for name, mask in masks.items():
         g = df.loc[mask]
@@ -251,8 +250,8 @@ def build_overview_tables(df):
         {"metric": "reinsertion_fit_rows", "value": int(df["reinsertion_fit_row"].sum())},
         {"metric": "post_cauti_rows_excluded_from_cauti_risk", "value": int(((df["prior_cauti_count"] > 0) & df["cauti_risk_row"].eq(0)).sum())},
         {
-            "metric": "out_rows_excluded_from_reinsertion_risk",
-            "value": int(((df[STATE_COL] == "out") & (df["reinsertion_fit_row"] == 0)).sum()),
+            "metric": "rows_excluded_from_reinsertion_risk",
+            "value": int(df["reinsertion_fit_row"].eq(0).sum()),
         },
     ])
 
@@ -594,8 +593,8 @@ def plot_event_rates(cauti_period, reinsertion_period, outdir):
     out_rows = cauti_period[cauti_period[STATE_COL] == "out"]
     ax.plot(in_rows[PERIODS_COL], in_rows["event_rate"], marker="o", label="CAUTI risk set: IN")
     ax.plot(out_rows[PERIODS_COL], out_rows["event_rate"], marker="o", label="CAUTI risk set: OUT")
-    ax.plot(reinsertion_period[PERIODS_COL], reinsertion_period["event_rate"], marker="o", label="Reinsertion on OUT fit rows")
-    ax.set_xlabel("periods_in_state")
+    ax.plot(reinsertion_period[pec.REINSERTION_PERIOD_COL], reinsertion_period["event_rate"], marker="o", label="Reinsertion on at-risk rows")
+    ax.set_xlabel("Period: CAUTI in-state; reinsertion post-removal (0 = REMOVE)")
     ax.set_ylabel("event rate")
     ax.set_title("Event rates by periods_in_state")
     ax.legend()
@@ -801,7 +800,7 @@ def main(include_age_split=None):
     )
     reinsertion_period = (
         df.loc[df["reinsertion_fit_row"] == 1]
-        .groupby(PERIODS_COL, dropna=False)[Y_REINS]
+        .groupby(pec.REINSERTION_PERIOD_COL, dropna=False)[Y_REINS]
         .agg(rows="count", events="sum", event_rate="mean")
         .reset_index()
     )
@@ -926,7 +925,7 @@ def main(include_age_split=None):
             top_covariate_screen(df_slice, cov_cols, outcome_col, analysis_set, TOP_N_COVARIATES)
             for df_slice, outcome_col, analysis_set in [
                 (decision_rows, ACTION_COL, "decision_rows_removal_in_period"),
-                (out_fit_rows, Y_REINS, "out_fit_rows_reinsertion_in_period"),
+                (out_fit_rows, Y_REINS, "reinsertion_risk_rows_in_period"),
                 (cauti_rows, Y_CAUTI, "cauti_risk_rows_cauti_in_period"),
             ]
         ],

@@ -6,6 +6,7 @@ from pathlib import Path
 # Data-processing libraries
 import numpy as np
 import pandas as pd
+import policy_eval_common as pec
 
 
 # Define pipeline directories
@@ -466,12 +467,8 @@ def validate_cauti_risk_set(panel, episode_keys):
         ordered.groupby(episode_keys, sort=False)[Y_CAUTI].cumsum()
         - ordered[Y_CAUTI]
     ).gt(0)
-    state_window_eligible = (
-        ordered["catheter_state"].eq("in")
-        | (
-            ordered["catheter_state"].eq("out")
-            & ordered["periods_in_state"].le(POST_REMOVE_RISK_PERIODS)
-        )
+    state_window_eligible = ordered["period_start"].lt(
+        ordered["removed"] + POST_REMOVE_RISK_PERIODS * PERIOD_DURATION
     )
     at_risk = ordered["at_risk_cauti"].eq(1)
 
@@ -488,7 +485,7 @@ def validate_cauti_risk_set(panel, episode_keys):
     expected_at_risk = state_window_eligible & ~prior_cauti
     if not at_risk.eq(expected_at_risk).all():
         raise ValueError(
-            "CAUTI risk set does not match catheter-state, post-removal-window, "
+            "CAUTI risk set does not match the elapsed post-removal window "
             "and first-event eligibility"
         )
 
@@ -498,39 +495,11 @@ def build_base_panel(catheterised):
 
     # Expand each catheter episode
     for episode in catheterised.itertuples():
-        # A terminal event can occur before the recorded procedure end time
-        in_state_end = min(episode.removed, episode.episode_end_time)
-
-        # Create catheter-in periods
-        for state_idx, period_start, period_end in make_state_windows(episode.inserted, in_state_end):
-            rows.append({
-                "subject_id": episode.subject_id,
-                "hadm_id": episode.hadm_id,
-                "stay_id": episode.stay_id,
-                "inserted": episode.inserted,
-                "removed": episode.removed,
-                "reinsertion_time": episode.reinsertion_time,
-                "episode_end_time": episode.episode_end_time,
-                "_episode_end_reason": episode.episode_end_reason,
-                "catheter_state": "in",
-                "state_index": state_idx,
-                "period_start": period_start,
-                "period_end": period_end,
-                "cauti_time": episode.cauti_time,
-                "death_time": episode.death_time,
-                "ICU_out": episode.ICU_out,
-                "intime": episode.ICU_in,
-                "gender": episode.gender,
-                "age": episode.age,
-                "ethnicity": episode.ethnicity,
-                "ethnicity_group": episode.ethnicity_group,
-                "ethnicity_missing": episode.ethnicity_missing,
-            })
-
-        # Create catheter-out periods only after a removal preceding the terminal event
+        # One insertion-anchored clock continues through removal and follow-up.
+        # State describes the start of the period; a REMOVE period may also
+        # contain post-removal time and outcomes. Only a terminal event clips it.
         for state_idx, period_start, period_end in make_state_windows(
-            episode.removed,
-            episode.episode_end_time,
+            episode.inserted, episode.episode_end_time
         ):
             rows.append({
                 "subject_id": episode.subject_id,
@@ -541,7 +510,7 @@ def build_base_panel(catheterised):
                 "reinsertion_time": episode.reinsertion_time,
                 "episode_end_time": episode.episode_end_time,
                 "_episode_end_reason": episode.episode_end_reason,
-                "catheter_state": "out",
+                "catheter_state": "in" if period_start < episode.removed else "out",
                 "state_index": state_idx,
                 "period_start": period_start,
                 "period_end": period_end,
@@ -564,15 +533,31 @@ def build_base_panel(catheterised):
 
     # Number periods within episodes
     panel["episode_index"] = panel.groupby(["stay_id", "inserted"]).cumcount()
-    panel["periods_in_state"] = panel["state_index"] + 1
+    panel["episode_day"] = panel["episode_index"] + 1
+    panel["is_decision_row"] = panel["catheter_state"].eq("in")
+    # OUT time is measured from actual removal, not from the first OUT row.
+    out_period = (panel["period_start"] - panel["removed"]) // PERIOD_DURATION + 1
+    panel["periods_in_state"] = np.where(
+        panel["is_decision_row"], panel["episode_day"], out_period
+    ).astype(int)
     panel = panel.drop(columns=["state_index"])
+
+    panel["interval_hours"] = (
+        panel["period_end"] - panel["period_start"]
+    ).dt.total_seconds() / 3600
+    catheter_end = panel[["removed", "episode_end_time"]].min(axis=1)
+    panel["catheter_in_hours"] = (
+        panel["period_end"].clip(upper=catheter_end) - panel["period_start"]
+    ).dt.total_seconds().clip(lower=0) / 3600
+    panel["catheter_out_hours"] = panel["interval_hours"] - panel["catheter_in_hours"]
 
     # Find each final period
     episode_keys = ["stay_id", "inserted"]
     last_row_index = panel.groupby(episode_keys)["period_end"].idxmax()
     is_last_period = panel.index.isin(last_row_index)
 
-    # Flag clinical removal periods; terminal-time ties are not removal decisions
+    # Events use (start, end], so removal exactly on a grid boundary belongs
+    # to the preceding period. Terminal-time ties remain non-removal endings.
     panel["removed_in_period"] = (
         (panel["catheter_state"] == "in") &
         (panel["removed"] < panel["episode_end_time"]) &
@@ -601,10 +586,10 @@ def build_base_panel(catheterised):
         (panel["cauti_time"] <= panel["period_end"])
     ).astype(int)
 
-    # Mark existing catheter-state and post-removal CAUTI eligibility
-    cauti_state_window_eligible = (
-        (panel["catheter_state"] == "in") |
-        ((panel["catheter_state"] == "out") & (panel["periods_in_state"] <= POST_REMOVE_RISK_PERIODS))
+    # Keep rows overlapping the actual 48-hour post-removal CAUTI window.
+    # This can include a partial OUT interval in the final REMOVE decision row.
+    cauti_state_window_eligible = panel["period_start"].lt(
+        panel["removed"] + POST_REMOVE_RISK_PERIODS * PERIOD_DURATION
     )
 
     # Retain the event row, then remove only later rows from the first-event risk set
@@ -616,8 +601,8 @@ def build_base_panel(catheterised):
         cauti_state_window_eligible & ~prior_cauti
     ).astype(int)
 
-    # Mark reinsertion risk periods
-    panel["at_risk_reinsertion"] = (panel["catheter_state"] == "out").astype(int)
+    # Reinsertion may occur after removal within that same decision period.
+    panel["at_risk_reinsertion"] = panel["catheter_out_hours"].gt(0).astype(int)
 
     # Record observed episode endings
     panel["episode_end_reason"] = panel["_episode_end_reason"].where(is_last_period)
@@ -667,6 +652,7 @@ def build_base_panel(catheterised):
     ])
 
     # Place columns consistently
+    panel = pec.add_reinsertion_context(panel)
     ethnicity_cols = sorted([c for c in panel.columns if c.startswith("ethnicity_")])
     ordered_cols = [
         "subject_id",
@@ -678,9 +664,16 @@ def build_base_panel(catheterised):
         "episode_end_time",
         "catheter_state",
         "episode_index",
+        "episode_day",
+        "is_decision_row",
         "period_start",
         "period_end",
+        "interval_hours",
+        "catheter_in_hours",
+        "catheter_out_hours",
         "periods_in_state",
+        pec.REINSERTION_CONTEXT_COL,
+        pec.REINSERTION_PERIOD_COL,
         "removed_in_period",
         "reinsertion_in_period",
         "cauti_in_period",
@@ -1350,6 +1343,7 @@ def build_modelling_panel():
 
     # Load the base panel
     df = pd.read_csv(base_panel_file, low_memory=False)
+    df = pec.add_reinsertion_context(df)
 
     # Parse panel timestamps
     for col in [
@@ -1363,6 +1357,9 @@ def build_modelling_panel():
         "cov_end",
     ]:
         df[col] = pd.to_datetime(df[col])
+
+    lookback_keys = ["stay_id", "inserted", "episode_index"]
+    lookbacks = df[[*lookback_keys, "cov_start", "cov_end"]].copy()
 
     # Add retained chart features
     df, retention_log = aggregate_itemid_covariates(
@@ -1441,6 +1438,7 @@ def build_modelling_panel():
     print(f"Features: {len(feature_cols)}")
     print("Retained chart columns:", int(retention_log["decision"].eq("retain").sum()))
     print("Dropped chart columns:", int(retention_log["decision"].eq("drop").sum()))
+
 
 def main():
     # Create the output directory

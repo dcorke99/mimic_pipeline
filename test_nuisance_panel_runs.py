@@ -14,7 +14,7 @@ class NuisancePanelRunsTests(unittest.TestCase):
     def setUp(self):
         names = ("MODEL_TYPE", "MODEL_OUTPUT_NAME", "INFILE", "NUISANCE_ROOT", "OUTDIR",
                  "NUISANCE_PREDICTIONS_FILE", "PERFORMANCE_METRICS_FILE",
-                 "CROSSFIT_ROW_ASSIGNMENTS_FILE", "CONSTANT_FEATURES_FILE", "MODEL_COMPARISON_FILE")
+                 "CROSSFIT_ROW_ASSIGNMENTS_FILE", "CONSTANT_FEATURES_FILE")
         settings = patch.multiple(nuisance, **{name: getattr(nuisance, name) for name in names})
         settings.start()
         self.addCleanup(settings.stop)
@@ -32,7 +32,7 @@ class NuisancePanelRunsTests(unittest.TestCase):
                 )
                 for _, path, _ in panels:
                     path.touch()
-                runs, reports = [], []
+                runs = []
 
                 def fit(model_type, panel_name=None):
                     nuisance.configure_model_run(model_type)
@@ -45,22 +45,15 @@ class NuisancePanelRunsTests(unittest.TestCase):
                 with patch.object(nuisance, "PANEL_RUNS", panels), \
                      patch.object(nuisance, "MODEL_TYPES", selection), \
                      patch.object(nuisance, "run_nuisance_model", side_effect=fit), \
-                     patch.object(nuisance, "build_nuisance_model_comparison",
-                                  side_effect=lambda: reports.append(nuisance.MODEL_COMPARISON_FILE)), \
                      redirect_stdout(StringIO()):
                     nuisance.main()
                     self.assertEqual(nuisance.MODEL_TYPE, selection[-1])
                 models = selection
                 self.assertEqual(runs, [(path, output / model, model)
                                         for _, path, output in panels for model in models])
-                self.assertEqual(reports, [output / "nuisance_model_comparison.csv"
-                                           for _, _, output in panels])
                 # The direct loop leaves paths configured for its final run.
-                self.assertEqual((nuisance.INFILE, nuisance.NUISANCE_ROOT,
-                                  nuisance.MODEL_COMPARISON_FILE, nuisance.OUTDIR),
-                                 (panels[-1][1], panels[-1][2],
-                                  panels[-1][2] / "nuisance_model_comparison.csv",
-                                  panels[-1][2] / models[-1]))
+                self.assertEqual((nuisance.INFILE, nuisance.NUISANCE_ROOT, nuisance.OUTDIR),
+                                 (panels[-1][1], panels[-1][2], panels[-1][2] / models[-1]))
 
     def test_missing_panel_raises_when_read(self):
         with TemporaryDirectory() as temporary:
@@ -72,7 +65,6 @@ class NuisancePanelRunsTests(unittest.TestCase):
                       ("missing", missing, root / "missing"))
             with patch.object(nuisance, "PANEL_RUNS", panels), \
                  patch.object(nuisance, "MODEL_TYPES", ["xgboost"]), \
-                 patch.object(nuisance, "build_nuisance_model_comparison"), \
                  patch.object(nuisance, "run_nuisance_model",
                               side_effect=lambda model, panel_name: nuisance.INFILE.read_text()) as fit:
                 with self.assertRaisesRegex(FileNotFoundError, "missing.csv"):
