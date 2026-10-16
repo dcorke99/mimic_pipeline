@@ -1,6 +1,7 @@
 # Ignore large data + pipeline outputs
 data/
 artefacts/
+makic_artefacts/
 
 # Common large file formats
 *.csv
