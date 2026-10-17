@@ -10,6 +10,7 @@ import create_data_panel as builder
 import create_semi_synthetic_panel as synthetic
 import fit_nuisance_models as nuisance
 import panel_analysis as analysis
+import policy_dml_common as dml
 import policy_eval_common as pec
 from test_base_panel import episode
 
@@ -35,6 +36,93 @@ def example_panel():
 
 
 class RestructuredPanelDownstreamTests(unittest.TestCase):
+    def test_synthetic_cauti_is_first_event_and_accepted_by_dml(self):
+        source = example_panel()
+        z_values, standardisation = synthetic.build_standardised_confounders(
+            source, source.catheter_state.eq("in"),
+        )
+        panel, _, _ = synthetic.generate_sequential_trajectory(
+            source, z_values, standardisation, Mock(binomial=Mock(return_value=1)),
+            randomised=True, target_prevalence=0.5,
+        )
+        n = len(panel)
+        events, probabilities, risk = synthetic.generate_outcome(
+            panel, panel.removed_in_period.to_numpy(),
+            np.full(n, 0.2), np.full(n, 0.1), np.full(n, 0.1), np.zeros(n),
+        )
+        panel[synthetic.OUTCOME_COL] = events
+        panel[synthetic.CAUTI_RISK_COL] = risk
+        self.assertEqual(int(events.sum()), 6)
+        decisions, _ = dml.prepare_decisions(panel)
+        self.assertEqual(int(decisions.reward_cauti.sum()), 6)
+        self.assertTrue(panel.groupby(synthetic.EPISODE_IDENTITY_COLS).cauti_in_period.sum().eq(1).all())
+        self.assertTrue((probabilities[events == 0] == 0).all())
+
+    def test_simulated_reinsertion_requires_prior_removal_and_keeps_full_cohort(self):
+        source = example_panel()
+        z_values, standardisation = synthetic.build_standardised_confounders(source, source.catheter_state.eq("in"))
+        panel, _, _ = synthetic.generate_sequential_trajectory(
+            source, z_values, standardisation, Mock(binomial=Mock(return_value=0)),
+            randomised=True, target_prevalence=.5,
+        )
+        events, _, risk = synthetic.generate_outcome(
+            panel, panel.removed_in_period.to_numpy(),
+            *([np.full(len(panel), .1)] * 3), np.ones(len(panel)),
+        )
+        panel[synthetic.OUTCOME_COL], panel[synthetic.CAUTI_RISK_COL] = events, risk
+        self.assertEqual(len(panel), len(source))
+        pd.testing.assert_series_equal(panel.episode_end_time, source.episode_end_time)
+        self.assertEqual(int(panel.episode_end_reason.eq("simulation_horizon").sum()), 4)
+        self.assertEqual(int(panel.reinsertion_in_period.sum()), 0)
+        self.assertEqual(panel.subject_id.nunique(), source.subject_id.nunique())
+        dml.prepare_decisions(panel)
+        with self.assertRaisesRegex(ValueError, "explicit fixed episode cutoff"):
+            dml.prepare_decisions(panel.drop(columns="simulation_end_time"))
+        panel.loc[panel.episode_end_reason.eq("simulation_horizon"), "reinsertion_in_period"] = 1
+        with self.assertRaisesRegex(ValueError, "terminal precedence"):
+            dml.prepare_decisions(panel)
+
+    def test_synthetic_first_event_uses_time_order_and_elapsed_48_hour_window(self):
+        starts = pd.date_range("2024-01-01", periods=7, freq="12h")
+        panel = pd.DataFrame({
+            "subject_id": 1, "hadm_id": 1, "stay_id": 1, "inserted": starts[0],
+            "period_start": starts, "removed": starts[1],
+            "catheter_state": ["in", *(["out"] * 6)],
+        }).iloc[::-1].reset_index(drop=True)
+        n = len(panel)
+        uniforms = np.where(panel.period_start.eq(starts[4]), 0.0, 1.0)
+        events, probabilities, risk = synthetic.generate_outcome(
+            panel, np.zeros(n, dtype=int), np.full(n, .5), np.full(n, .5),
+            np.full(n, .5), uniforms,
+        )
+        self.assertEqual(panel.loc[events == 1, "period_start"].tolist(), [starts[4]])
+        self.assertEqual(int(events.sum()), 1)
+        self.assertTrue((risk[panel.period_start.gt(starts[4])] == 0).all())
+        self.assertTrue((probabilities[panel.period_start.ge(starts[5])] == 0).all())
+
+    def test_current_known_truth_does_not_depend_on_realised_cauti_risk_mask(self):
+        panel = example_panel()
+        _, standardisation = synthetic.build_standardised_confounders(panel, panel.catheter_state.eq("in"))
+        truth = pd.DataFrame({
+            "validation_row_id": np.arange(1, len(panel) + 1),
+            "true_mu_keep": .2, "true_mu_remove": .1, "true_mu_out": .1,
+            "true_propensity_remove": .3,
+        })
+        expected = synthetic.build_known_truth_policy_values(panel, truth, standardisation)
+        panel[synthetic.CAUTI_RISK_COL] = 0
+        actual = synthetic.build_known_truth_policy_values(panel, truth, standardisation)
+        pd.testing.assert_frame_equal(actual, expected)
+        limited = synthetic.build_known_truth_policy_values(panel, truth, standardisation, horizon_hours=48)
+        baseline = limited.loc[limited.policy_name.eq("current_practice")].iloc[0]
+        self.assertAlmostEqual(baseline.known_truth_mean_episode_any_cauti_risk, (4 * .28 + 2 * .36) / 6)
+        self.assertTrue(limited.evaluation_horizon_hours.eq(48).all())
+        paired_truth = truth.copy()
+        for col in ("true_mu_keep", "true_mu_remove", "true_mu_out", "true_propensity_remove"):
+            paired_truth[col + "_randomised"] = truth[col]
+        by_panel = synthetic.build_policy_dml_known_truth(panel, panel, paired_truth, standardisation)
+        self.assertEqual(set(by_panel.panel_name), {"semi_synthetic_with_confounding", "confounder_omitted", "randomised_action"})
+        self.assertTrue(by_panel.evaluation_horizon_hours.eq(336).all())
+
     def test_reinsertion_risk_and_no_event_include_same_period_events(self):
         panel = nuisance.prepare_outcome_targets(example_panel())
         risk = nuisance.outcome_risk_mask(panel, "out", "reinsertion")

@@ -25,13 +25,13 @@ PANEL_PATHS = {
 # Pipeline stages to execute, in order. Comment out stages to skip them.
 # Running a Python stage directly still uses the choices below.
 PIPELINE_STAGES = [
-    # "create_data_panel.py",
-    # "create_semi_synthetic_panel.py",
-    # "fit_nuisance_models.py",
-    # "panel_analysis.py",
-    # "build_policy_panels.py",
+    "create_data_panel.py",
+    "create_semi_synthetic_panel.py",
+    "fit_nuisance_models.py",
+    "panel_analysis.py",
+    "build_policy_panels.py",
     "evaluate_gformula_policies.py",
-    # "evaluate_policy_dml_policies.py",
+    "evaluate_policy_dml_policies.py",
 ]
 
 # Learners to fit, in order. An empty list skips nuisance fitting.
@@ -56,30 +56,38 @@ SUPERLEARNER_BASE_MODELS = [
 NUISANCE_PANELS = [
     "real",
     "semi_synthetic_with_confounding",
-    # "confounder_omitted",
-    # "randomised_action",
+    "confounder_omitted",
+    "randomised_action",
 ]
 POLICY_PANELS = [
     "real",
     "semi_synthetic_with_confounding",
-    # "confounder_omitted",
-    # "randomised_action",
+    "confounder_omitted",
+    "randomised_action",
 ]
 EVALUATION_PANELS = [
-    # "real",
+    "real",
     "semi_synthetic_with_confounding",
-    # "confounder_omitted",
-    # "randomised_action",
+    "confounder_omitted",
+    "randomised_action",
 ]
 
 # Learner used by all evaluators and descriptive panel analysis.
 # For "fixed" evaluation, fit this learner on each selected panel first.
 NUISANCE_MODEL_TYPE = "xgboost"
 # Select "fixed", "refit", or both; an empty list skips policy evaluation.
-BOOTSTRAP_MODES = ["refit"]
+BOOTSTRAP_MODES = ["fixed"]
 
 # Shared by policy construction and semi-synthetic known-truth calculations.
 POLICY_DAYS = [1, 2, 3, 4, 5]
+
+# Policy-DML follow-up hours from insertion, by panel.
+POLICY_DML_HORIZON_HOURS = {
+    "real": 30 * 24,
+    "semi_synthetic_with_confounding": 14 * 24,
+    "confounder_omitted": 14 * 24,
+    "randomised_action": 14 * 24,
+}
 
 # Descriptive analysis uses one panel.
 ANALYSIS_PANEL = "real"

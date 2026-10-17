@@ -7,7 +7,7 @@ import runpy
 import sys
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pipeline_config as config
 import run_pipeline as runner
@@ -27,6 +27,7 @@ class PipelineConfigTests(unittest.TestCase):
             "SUPERLEARNER_BASE_MODELS", "NUISANCE_PANELS", "POLICY_PANELS",
             "EVALUATION_PANELS", "NUISANCE_MODEL_TYPE", "BOOTSTRAP_MODES",
             "POLICY_DAYS", "ANALYSIS_PANEL", "ANALYSIS_INCLUDE_AGE_SPLIT",
+            "POLICY_DML_HORIZON_HOURS",
         })
 
     def test_choices_reach_current_stage_modules(self):
@@ -82,6 +83,23 @@ class PipelineConfigTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in execute.call_args_list],
                          [[runner.sys.executable, str(REPO_ROOT / stage)] for stage in stages])
         self.assertTrue(all(call.kwargs["cwd"] == REPO_ROOT for call in execute.call_args_list))
+
+    def test_dml_can_resume_selected_panels_without_repeating_real(self):
+        evaluator = self.load_stage("evaluate_policy_dml_policies.py")
+        execute = Mock()
+        panels = ["semi_synthetic_with_confounding", "confounder_omitted", "randomised_action"]
+        with patch.object(sys, "argv", ["evaluate_policy_dml_policies.py", "--panel", *panels,
+                                        "--bootstrap-mode", "fixed"]), \
+             patch.dict(evaluator["main"].__globals__, run_panel_estimation=execute):
+            evaluator["main"]()
+        self.assertEqual([call.args[4] for call in execute.call_args_list], panels)
+        self.assertEqual([call.kwargs["settings"].horizon_hours for call in execute.call_args_list], [336] * 3)
+        execute.reset_mock()
+        with patch.object(sys, "argv", ["evaluate_policy_dml_policies.py", "--panel", "real", "randomised_action",
+                                        "--bootstrap-mode", "fixed", "--horizon-hours", "48"]), \
+             patch.dict(evaluator["main"].__globals__, run_panel_estimation=execute):
+            evaluator["main"]()
+        self.assertEqual([call.kwargs["settings"].horizon_hours for call in execute.call_args_list], [48, 48])
 
     def test_runner_stops_after_failed_stage(self):
         stages = ["create_data_panel.py", "fit_nuisance_models.py", "panel_analysis.py"]

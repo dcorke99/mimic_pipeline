@@ -214,6 +214,14 @@ class FittingTests(unittest.TestCase):
         self.assertTrue(self.folded.groupby("subject_id")[dml.FOLD].nunique().eq(1).all())
         self.assertTrue(self.rows.continuation_model_id.isin([m["model_id"] for m in self.audit]).all())
 
+    def test_unsupported_late_period_fails_before_fitting(self):
+        sparse = self.decisions.copy()
+        sparse.loc[sparse.index[-1], "decision_period"] = 99
+        with patch.object(dml, "fit_behaviour") as fit:
+            with self.assertRaisesRegex(ValueError, "No training trajectories.*99"):
+                dml.crossfit_policy_scores(sparse, self.policies, settings=self.settings)
+        fit.assert_not_called()
+
     def test_heldout_rewards_cannot_affect_own_q_even_indirectly(self):
         mutated = self.folded.copy()
         fold = mutated[dml.FOLD].iloc[0]

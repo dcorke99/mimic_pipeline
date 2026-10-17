@@ -15,7 +15,7 @@ from build_policy_panels import (
 )
 
 # Run choices come from pipeline_config.py; simulation settings stay here.
-from pipeline_config import POLICY_DAYS, VALIDATION_DIR
+from pipeline_config import POLICY_DAYS, POLICY_DML_HORIZON_HOURS, VALIDATION_DIR
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -82,6 +82,7 @@ OMITTED_PANEL_FILENAME = "semi_synthetic_panel_confounder_omitted.csv"
 RANDOMISED_PANEL_FILENAME = "semi_synthetic_panel_randomised_action.csv"
 TRUTH_FILENAME = "semi_synthetic_truth.csv"
 KNOWN_TRUTH_POLICY_FILENAME = "known_truth_policy_values.csv"
+KNOWN_TRUTH_DML_FILENAME = "known_truth_policy_values_policy_dml.csv"
 COEFFICIENTS_FILENAME = "simulation_coefficients.csv"
 
 TRUTH_ONLY_PREFIXES = (
@@ -335,12 +336,7 @@ def generate_sequential_trajectory(
     panel["episode_index"] = episode_index
     panel[PERIODS_COL] = periods_in_state
     panel[ACTION_COL] = synthetic_action
-    panel[CAUTI_RISK_COL] = (
-        panel[STATE_COL].eq("in")
-        | (panel[STATE_COL].eq("out") & panel[PERIODS_COL].le(
-            POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS
-        ))
-    ).astype(np.int8)
+    panel[CAUTI_RISK_COL] = cauti_followup_window(panel).astype(np.int8)
     duration = (period_ends - period_starts).dt.total_seconds() / 3600.0
     removed = panel["removed"]
     in_hours = (period_ends.clip(upper=removed) - period_starts).dt.total_seconds().clip(lower=0) / 3600.0
@@ -349,6 +345,13 @@ def generate_sequential_trajectory(
     out_time = (period_ends - removed.clip(lower=period_starts)).clip(lower=pd.Timedelta(0))
     out_hours = out_time.dt.total_seconds() / 3600.0
     panel[REINSERTION_RISK_COL] = out_time.gt(pd.Timedelta(0)).astype(np.int8)
+    # The source row grid supplies a fixed follow-up schedule. A source
+    # reinsertion endpoint is a simulated event only after simulated removal;
+    # otherwise it is explicitly a scheduled simulation cutoff.
+    panel["simulation_end_time"] = episode_ends
+    impossible_reinsertion = panel["reinsertion_in_period"].eq(1) & panel[REINSERTION_RISK_COL].eq(0)
+    panel.loc[impossible_reinsertion, "reinsertion_in_period"] = 0
+    panel.loc[impossible_reinsertion, "episode_end_reason"] = "simulation_horizon"
     for column, values in (("interval_hours", duration), ("catheter_in_hours", in_hours),
                            ("catheter_out_hours", out_hours)):
         if column in panel:
@@ -378,6 +381,12 @@ def outcome_potential_probabilities(z_values):
     true_mu_out = true_mu_remove.copy()
     return true_mu_keep, true_mu_remove, true_mu_out
 
+def cauti_followup_window(panel):
+    return pd.to_datetime(panel["period_start"]).lt(
+        pd.to_datetime(panel["removed"]) + pd.Timedelta(hours=48)
+    )
+
+
 def generate_outcome(
     panel,
     synthetic_action,
@@ -386,8 +395,9 @@ def generate_outcome(
     true_mu_out,
     outcome_uniform,
 ):
+    """Draw the first CAUTI per episode and end its risk set after that event."""
     states = panel[STATE_COL].astype("string").str.strip().str.lower()
-    outcome_risk = normalise_binary(panel[CAUTI_RISK_COL], CAUTI_RISK_COL).eq(1)
+    outcome_risk = cauti_followup_window(panel)
     in_rows = states.eq("in")
     out_rows = states.eq("out")
 
@@ -404,7 +414,12 @@ def generate_outcome(
     synthetic_outcome[risk_positions] = (
         outcome_uniform[risk_positions] < observed_probability[risk_positions]
     ).astype(np.int8)
-    return synthetic_outcome, observed_probability
+    starts = pd.to_datetime(panel["period_start"])
+    first_event = starts.where(synthetic_outcome == 1).groupby(episode_codes(panel)).transform("min")
+    outcome_risk &= first_event.isna() | starts.le(first_event)
+    synthetic_outcome[~outcome_risk.to_numpy()] = 0
+    observed_probability[~outcome_risk.to_numpy()] = 0.0
+    return synthetic_outcome, observed_probability, outcome_risk.to_numpy(dtype=np.int8)
 
 
 def make_omitted_confounder_panel(primary_panel):
@@ -452,6 +467,8 @@ def build_truth_table(
         "episode_index",
         PERIODS_COL,
         CAUTI_RISK_COL,
+        "simulation_end_time",
+        "episode_end_reason",
     ]
     identifier_columns = [
         column for column in preferred_identifiers if column in primary_panel.columns
@@ -497,6 +514,8 @@ def build_truth_table(
         PERIODS_COL,
         CAUTI_RISK_COL,
         REINSERTION_RISK_COL,
+        "simulation_end_time",
+        "episode_end_reason",
     ]:
         truth[f"{column}_randomised"] = randomised_panel[column].to_numpy()
     truth["dgp_action_eligible_randomised"] = randomised_states.eq("in").astype(
@@ -525,7 +544,7 @@ def build_truth_table(
     return truth
 
 
-def build_known_truth_policy_values(primary_panel, truth, standardisation):
+def build_known_truth_policy_values(primary_panel, truth, standardisation, horizon_hours=None):
     # Reuse the shared policy builder so names, days, episode IDs, and
     # fixed-day timeline semantics cannot drift from normal evaluation.
     base_columns = list(dict.fromkeys([
@@ -536,6 +555,12 @@ def build_known_truth_policy_values(primary_panel, truth, standardisation):
     ]))
     policy_base = primary_panel.loc[:, base_columns].copy()
     policy_base[VALIDATION_ROW_ID_COL] = truth[VALIDATION_ROW_ID_COL].to_numpy()
+    if horizon_hours is not None:
+        cutoff = pd.to_datetime(policy_base.inserted) + pd.Timedelta(hours=horizon_hours)
+        start, end = pd.to_datetime(policy_base.period_start), pd.to_datetime(policy_base.period_end)
+        if ((start < cutoff) & (end > cutoff)).any():
+            raise ValueError("Known-truth horizon cuts a period")
+        policy_base = policy_base.loc[end.le(cutoff)].copy()
     policy_base = add_stable_ids_and_decision_flag(policy_base)
     policy_base = add_episode_day(policy_base)
 
@@ -643,7 +668,8 @@ def build_known_truth_policy_values(primary_panel, truth, standardisation):
     )
     states = current[STATE_COL].astype("string").str.strip().str.lower()
     actions = normalise_binary(current[ACTION_COL], ACTION_COL)
-    risk = normalise_binary(current[CAUTI_RISK_COL], CAUTI_RISK_COL).eq(1)
+    # Integrate all time-eligible hazards, independently of realised CAUTI.
+    risk = cauti_followup_window(current)
     current["true_mu_under_policy"] = 0.0
     current_keep = risk & states.eq("in") & actions.eq(0)
     current_remove = risk & states.eq("in") & actions.eq(1)
@@ -690,7 +716,23 @@ def build_known_truth_policy_values(primary_panel, truth, standardisation):
     )
     known_truth["episode_aggregation"] = "1 - product(1 - row hazard)"
     known_truth["policy_aggregation"] = "unweighted mean of episode risks"
+    known_truth["evaluation_horizon_hours"] = horizon_hours
     return known_truth
+
+
+def build_policy_dml_known_truth(primary_panel, randomised_panel, truth, standardisation):
+    columns = ["true_mu_keep", "true_mu_remove", "true_mu_out", "true_propensity_remove"]
+    randomised_truth = truth[[VALIDATION_ROW_ID_COL, *[f"{col}_randomised" for col in columns]]].rename(
+        columns={f"{col}_randomised": col for col in columns}
+    )
+    tables = []
+    for name in ("semi_synthetic_with_confounding", "confounder_omitted", "randomised_action"):
+        panel, lookup = (randomised_panel, randomised_truth) if name == "randomised_action" else (primary_panel, truth)
+        table = build_known_truth_policy_values(panel, lookup, standardisation,
+                                               horizon_hours=POLICY_DML_HORIZON_HOURS[name])
+        table.insert(0, "panel_name", name)
+        tables.append(table)
+    return pd.concat(tables, ignore_index=True)
 
 
 def build_coefficients_table(action_intercept, randomised_action_intercept):
@@ -770,6 +812,7 @@ def main():
         "randomised_panel": output_dir / RANDOMISED_PANEL_FILENAME,
         "truth": output_dir / TRUTH_FILENAME,
         "known_truth_policy_values": output_dir / KNOWN_TRUTH_POLICY_FILENAME,
+        "policy_dml_known_truth": output_dir / KNOWN_TRUTH_DML_FILENAME,
         "coefficients": output_dir / COEFFICIENTS_FILENAME,
     }
     assert_output_safety(
@@ -811,7 +854,7 @@ def main():
     true_mu_keep, true_mu_remove, true_mu_out = outcome_potential_probabilities(
         primary_z_values
     )
-    synthetic_outcome, observed_probability = generate_outcome(
+    synthetic_outcome, observed_probability, synthetic_risk = generate_outcome(
         primary_trajectory,
         primary_trajectory[ACTION_COL].to_numpy(dtype=np.int8),
         true_mu_keep,
@@ -821,6 +864,7 @@ def main():
     )
     primary_panel = primary_trajectory.copy()
     primary_panel[OUTCOME_COL] = np.asarray(synthetic_outcome, dtype=np.int8)
+    primary_panel[CAUTI_RISK_COL] = synthetic_risk
     omitted_panel = make_omitted_confounder_panel(primary_panel)
 
     (
@@ -843,7 +887,7 @@ def main():
         randomised_mu_remove,
         randomised_mu_out,
     ) = outcome_potential_probabilities(randomised_z_values)
-    randomised_outcome, randomised_observed_probability = generate_outcome(
+    randomised_outcome, randomised_observed_probability, randomised_risk = generate_outcome(
         randomised_trajectory,
         randomised_trajectory[ACTION_COL].to_numpy(dtype=np.int8),
         randomised_mu_keep,
@@ -853,6 +897,7 @@ def main():
     )
     randomised_panel = randomised_trajectory.copy()
     randomised_panel[OUTCOME_COL] = np.asarray(randomised_outcome, dtype=np.int8)
+    randomised_panel[CAUTI_RISK_COL] = randomised_risk
     randomised_truth = {
         "panel": randomised_panel,
         "propensity": randomised_propensity,
@@ -876,6 +921,7 @@ def main():
     known_truth_policy_values = build_known_truth_policy_values(
         primary_panel, truth, standardisation
     )
+    policy_dml_known_truth = build_policy_dml_known_truth(primary_panel, randomised_panel, truth, standardisation)
     coefficients = build_coefficients_table(
         action_intercept,
         randomised_action_intercept,
@@ -889,6 +935,7 @@ def main():
     omitted_panel.to_csv(paths["omitted_panel"], index=False)
     truth.to_csv(paths["truth"], index=False)
     known_truth_policy_values.to_csv(paths["known_truth_policy_values"], index=False)
+    policy_dml_known_truth.to_csv(paths["policy_dml_known_truth"], index=False)
     coefficients.to_csv(paths["coefficients"], index=False)
     randomised_panel.to_csv(paths["randomised_panel"], index=False)
 

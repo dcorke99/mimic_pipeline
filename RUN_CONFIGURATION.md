@@ -13,6 +13,7 @@ All routine run choices are in `pipeline_config.py`.
 | `NUISANCE_MODEL_TYPE` | Learner consumed by evaluators. |
 | `BOOTSTRAP_MODES` | `fixed`, `refit`, both, or an empty list. |
 | `POLICY_DAYS` | One-based catheter-removal days to evaluate. |
+| `POLICY_DML_HORIZON_HOURS` | Policy-DML follow-up by panel: 720 hours for real data and 336 hours for each semi-synthetic panel. |
 | `ANALYSIS_PANEL` | Panel used by `panel_analysis.py`. |
 | `ANALYSIS_INCLUDE_AGE_SPLIT` | Enables the optional age split in descriptive analysis. |
 
@@ -23,9 +24,15 @@ that stage runs.
 The Policy-DML evaluator also accepts command-line overrides:
 
 ```powershell
-python evaluate_policy_dml_policies.py --panel real --bootstrap-mode fixed --n-bootstrap 5 --max-patients 100 --output-root artefacts/policy_dml_smoke --continuation-learner ridge
+python evaluate_policy_dml_policies.py --panel real --bootstrap-mode fixed --n-bootstrap 5 --max-patients 100 --horizon-hours 72 --output-root artefacts/policy_dml_smoke --continuation-learner ridge
 ```
 
 `--max-patients` requires a separate `--output-root`. Other options include
-`--horizon-hours` and `--propensity-clip`. The full Policy-DML bootstrap count
-is set by `N_BOOTSTRAP` in `evaluate_policy_dml_policies.py`.
+`--horizon-hours`, `--propensity-clip`, `--inner-folds`,
+`--continuation-trees`, and `--continuation-jobs`. Policy-DML defaults to five
+outer folds inherited from saved nuisance predictions, two inner folds, 100
+Extra Trees per continuation model using all processors, and 100 bootstrap
+draws. `--horizon-hours` overrides the selected panel's configured horizon.
+The g-formula comparator still covers complete episodes. Match horizons before
+comparing estimates. Continuation-model defaults are set near the top of
+`evaluate_policy_dml_policies.py`.

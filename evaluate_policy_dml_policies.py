@@ -15,9 +15,9 @@ import policy_eval_common as pec
 import policy_dml_common as dml
 import policy_inference as inference
 
-N_BOOTSTRAP = 1000
+N_BOOTSTRAP = 100
 BOOTSTRAP_SEED = 20260923
-SETTINGS = dml.DMLSettings()
+SETTINGS = dml.DMLSettings(inner_folds=2, continuation_jobs=-1, horizon_hours=run_config.POLICY_DML_HORIZON_HOURS["real"])
 # Empty by default: no universal support/clipping threshold is imposed.
 CLIPPING_SENSITIVITY = ()
 PANEL_RUNS = tuple((name, *run_config.PANEL_PATHS[name]) for name in run_config.EVALUATION_PANELS)
@@ -106,7 +106,8 @@ def run_bootstrap(episodes, decisions, policies, output, *, mode, settings, lear
         else:
             # Entire patient ownership, including duplicate copies, stays fixed.
             scored, _, _ = dml.crossfit_policy_scores(decisions, policies, settings=settings,
-                behaviour_learner=learner, patient_counts=multiplicity, regressor_factory=regressor_factory)
+                behaviour_learner=learner, patient_counts=multiplicity, regressor_factory=regressor_factory,
+                progress=True, progress_context=f"bootstrap={replicate + 1}")
             sampled = dml.episode_scores(scored)
             sampled_subjects, sampled_entries, sampled_stats = patient_statistics(sampled)
             if not sampled_entries.fillna(-1).equals(entries.fillna(-1)):
@@ -131,11 +132,14 @@ def run_bootstrap(episodes, decisions, policies, output, *, mode, settings, lear
 
 def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, panel_name=None, *, output_root=None,
                          settings=None, n_bootstrap=None, max_patients=None, regressor_factory=None):
-    settings = SETTINGS if settings is None else settings
+    settings = (replace(SETTINGS, horizon_hours=run_config.POLICY_DML_HORIZON_HOURS.get(panel_name, SETTINGS.horizon_hours))
+                if settings is None else settings)
     n_bootstrap = N_BOOTSTRAP if n_bootstrap is None else n_bootstrap
     if bootstrap_mode not in ("fixed", "refit"):
         raise ValueError("Unknown bootstrap mode")
+    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; bootstrap={bootstrap_mode}; phase=load_panel", flush=True)
     panel = nuisance.load_panel(panel_path)
+    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; phase=prepare_decisions", flush=True)
     decisions, _ = dml.prepare_decisions(panel, settings)
     policies = dml.configured_policies(run_config.POLICY_DAYS)
     saved, provenance = None, None
@@ -149,8 +153,19 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
         decisions = decisions.loc[decisions.subject_id.isin(selected)].copy()
         if saved is not None:
             saved = saved.loc[saved[dml.ROW].isin(decisions[dml.ROW])]
+    stages = int(decisions.decision_period.nunique())
+    outer_folds = int(saved[dml.FOLD].nunique()) if saved is not None else settings.n_folds
+    approximate_fits = outer_folds * (settings.inner_folds + 1) * len(policies) * len(dml.OUTCOMES) * stages
+    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; phase=point_estimate; "
+          f"patients={decisions.subject_id.nunique()}; decisions={len(decisions)}; stages={stages}; "
+          f"outer_folds={outer_folds}; inner_folds={settings.inner_folds}; policies={len(policies)}; "
+          f"continuation={settings.continuation_learner}; trees={settings.continuation_trees}; "
+          f"jobs={settings.continuation_jobs}; approximate_fits={approximate_fits}", flush=True)
     rows, audit, folded = dml.crossfit_policy_scores(decisions, policies, settings=settings, behaviour_learner=model_type,
-                                                   saved_behaviour=saved, regressor_factory=regressor_factory)
+                                                   saved_behaviour=saved, regressor_factory=regressor_factory,
+                                                   progress=True, progress_detail=True,
+                                                   progress_context=panel_name or Path(panel_path).stem)
+    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; phase=point_estimate; completed", flush=True)
     episodes = dml.episode_scores(rows)
     summary = policy_summary(episodes, decisions)
     output = Path(output_root or artefact_root) / "policy_eval/policy_dml" / bootstrap_mode
@@ -189,7 +204,7 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--panel", choices=list(run_config.PANEL_PATHS))
+    parser.add_argument("--panel", nargs="+", choices=list(run_config.PANEL_PATHS))
     parser.add_argument("--bootstrap-mode", choices=["fixed", "refit"])
     parser.add_argument("--n-bootstrap", type=int, default=N_BOOTSTRAP)
     parser.add_argument("--output-root", type=Path)
@@ -197,17 +212,24 @@ def main():
     parser.add_argument("--horizon-hours", type=float)
     parser.add_argument("--propensity-clip", type=float)
     parser.add_argument("--continuation-learner", choices=["ridge", "extra_trees", "random_forest"], default=SETTINGS.continuation_learner)
+    parser.add_argument("--inner-folds", type=int, default=SETTINGS.inner_folds)
+    parser.add_argument("--continuation-trees", type=int, default=SETTINGS.continuation_trees)
+    parser.add_argument("--continuation-jobs", type=int, default=SETTINGS.continuation_jobs)
     args = parser.parse_args()
     if args.max_patients is not None and (args.max_patients < 1 or args.output_root is None):
         parser.error("--max-patients requires a positive count and a separate --output-root")
-    settings = replace(SETTINGS, horizon_hours=args.horizon_hours, propensity_clip=args.propensity_clip, continuation_learner=args.continuation_learner)
-    runs = [(args.panel, *run_config.PANEL_PATHS[args.panel])] if args.panel else PANEL_RUNS
+    settings = replace(SETTINGS, propensity_clip=args.propensity_clip,
+                       continuation_learner=args.continuation_learner, inner_folds=args.inner_folds,
+                       continuation_trees=args.continuation_trees, continuation_jobs=args.continuation_jobs)
+    runs = [(name, *run_config.PANEL_PATHS[name]) for name in args.panel] if args.panel else PANEL_RUNS
     modes = [args.bootstrap_mode] if args.bootstrap_mode else BOOTSTRAP_MODES
     for name, panel, nuisance_root in runs:
+        panel_settings = replace(settings, horizon_hours=(args.horizon_hours if args.horizon_hours is not None
+                                 else run_config.POLICY_DML_HORIZON_HOURS[name]))
         for mode in modes:
             root = args.output_root / name if args.output_root else None
             run_panel_estimation(panel, nuisance_root.parent, NUISANCE_MODEL_TYPE, mode, name,
-                                 output_root=root, settings=settings, n_bootstrap=args.n_bootstrap, max_patients=args.max_patients)
+                                 output_root=root, settings=panel_settings, n_bootstrap=args.n_bootstrap, max_patients=args.max_patients)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,13 @@ Chart features use the interval
 `[max(ICU admission, period start - 24 hours), period start)`, so measurements
 at or after a decision time cannot enter that decision's predictors.
 
+Semi-synthetic CAUTI generation retains only the first event in each episode
+and ends its risk set afterwards. A source reinsertion endpoint becomes a
+simulated reinsertion only if simulated removal precedes it. Otherwise the
+episode ends at its explicitly recorded `simulation_end_time`, with reason
+`simulation_horizon` and no invented clinical event. All source episodes remain
+in the validation cohort.
+
 ## Pipeline stages
 
 1. `create_data_panel.py` builds `data/modelling_panel.csv`.
@@ -53,7 +60,17 @@ Policy-DML reads the modelling panel directly and creates fixed-day policies
 from `POLICY_DAYS`. In fixed bootstrap mode it reuses the saved out-of-fold
 behaviour probabilities. In refit mode it refits the behaviour and continuation
 models within each patient bootstrap sample. Both evaluators print bootstrap
-progress every five replicates.
+progress every five replicates. Policy-DML also reports its point-estimate work
+size and progress through the outer folds, inner folds, and policies.
+Its configured horizons are 30 days for real data and 14 days for the
+semi-synthetic validation panels. To resume only the validation panels:
+
+```powershell
+python evaluate_policy_dml_policies.py --panel semi_synthetic_with_confounding confounder_omitted randomised_action --bootstrap-mode fixed
+```
+
+The simulator exports matching CAUTI reference values in
+`known_truth_policy_values_policy_dml.csv`, with panel and horizon columns.
 
 The shared modelling panels, nuisance-model functions, and
 `policy_inference.py` bootstrap reporting helpers form the interface for the

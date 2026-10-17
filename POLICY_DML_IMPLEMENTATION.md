@@ -16,13 +16,15 @@ panels and nuisance-model conventions used elsewhere in the pipeline.
 | `V(pi) = mean_e psi_(e,1)` | `episode_scores` selects the first score and `policy_summary` averages episodes. |
 | `Delta = V(pi) - V(current)` | Summary and bootstrap contrasts use current practice as the paired comparator. |
 
-The default continuation learner is Extra Trees; Ridge and Random Forest are
-available. Scores are not clipped to `[0, 1]`.
+The default continuation learner is Extra Trees with 100 trees using all
+available processors; Ridge and Random Forest are available. Scores are not
+clipped to `[0, 1]`.
 
 ## Cross-fitting and nuisance models
 
-Patients, including all their episodes, stay in one outer fold. For each outer
-fold, inner patient folds produce out-of-fold recursive scores for the outer
+Patients, including all their episodes, stay in one outer fold. The saved
+nuisance predictions provide five outer folds. For each outer fold, two inner
+patient folds produce out-of-fold recursive scores for the outer
 continuation targets. The final outer models then score only the held-out outer
 patients. The model audit records model IDs, training folds, held-out fold,
 features, policy, outcome, and period without exporting patient lists.
@@ -42,6 +44,22 @@ Current practice is the cross-fitted stochastic behaviour policy
 IN decision on or after the requested day. `configured_policies` builds them
 directly from `pipeline_config.POLICY_DAYS`.
 
+The configured evaluation horizon is 30 days (720 hours) for the real panel and
+14 days (336 hours) for each semi-synthetic panel. Decisions and linked outcomes
+after the corresponding boundary do not contribute. Complete-episode g-formula
+estimates need the same cutoff before comparison. The simulator exports matching
+semi-synthetic CAUTI reference values by panel in
+`known_truth_policy_values_policy_dml.csv`, including the horizon. Before fitting, the
+evaluator checks that every required period has training trajectories in each
+outer and inner split, so unsupported tails fail before expensive model fits.
+
+Semi-synthetic episodes can also end at an explicitly recorded fixed
+`simulation_end_time`. A `simulation_horizon` endpoint must match that schedule
+and have no clinical terminal event. It represents the preserved simulation
+follow-up grid, rather than unmodelled loss to follow-up. Synthetic CAUTI and
+its risk flags stop after the first event; synthetic reinsertion requires a
+preceding synthetic removal.
+
 ## Bootstrap inference
 
 Fixed mode resamples patient-level sums of fitted episode scores. Refit mode
@@ -51,7 +69,10 @@ same patient draw. `policy_inference.py` contains the estimator-independent
 paired-difference and percentile-interval reporting used here and available to
 the future LTMLE evaluator.
 
-Progress is printed every five replicates and at completion.
+Before fitting, the evaluator reports the patient, decision, stage, fold,
+policy, learner, processor, and approximate model-fit counts. Point-estimate
+progress is reported by outer fold, inner fold, and policy. Bootstrap progress
+is printed every five replicates and at completion.
 
 ## Outputs
 
@@ -80,3 +101,8 @@ python -m unittest test_policy_dml -v
 `test_policy_dml.py` contains hand-calculated recursion checks, trajectory and
 risk-set checks, patient leakage tests, fixed and refit bootstrap checks, and an
 end-to-end output test.
+
+After correcting the synthetic outcomes, saved removal probabilities can be
+reused when actions, predictors, and fold ownership are unchanged. Policy-DML
+fits fresh continuation models from the corrected panels. Existing synthetic
+outcome models and g-formula results require refitting before reuse.

@@ -6,6 +6,7 @@ Hajek normalisation, simulated trajectories, or immediate-risk substitution.
 """
 
 from dataclasses import dataclass
+from time import monotonic
 
 import numpy as np
 import pandas as pd
@@ -42,12 +43,15 @@ class DMLSettings:
     continuation_learner: str = "extra_trees"
     continuation_trees: int = 100
     continuation_min_leaf: int = 5
+    continuation_jobs: int = -1
     propensity_clip: float | None = None
     horizon_hours: float | None = None
 
     def __post_init__(self):
         if self.n_folds < 2 or self.inner_folds < 2:
             raise ValueError("Patient cross-fitting requires at least two folds")
+        if self.continuation_trees < 1 or self.continuation_jobs == 0:
+            raise ValueError("Continuation trees must be positive and jobs cannot be zero")
         if self.propensity_clip is not None and not 0 < self.propensity_clip < .5:
             raise ValueError("propensity_clip must be None or strictly between 0 and 0.5")
         if self.horizon_hours is not None and (not np.isfinite(self.horizon_hours) or self.horizon_hours <= 0):
@@ -99,6 +103,8 @@ def prepare_decisions(panel, settings=DMLSettings()):
         df[col] = pd.to_datetime(df[col], format="mixed", errors="raise")
         if df[col].isna().any():
             raise ValueError(f"Missing {col}")
+    if "simulation_end_time" in df:
+        df["simulation_end_time"] = pd.to_datetime(df.simulation_end_time, format="mixed", errors="raise")
     for col in [*list(OUTCOME_COLUMNS.values())[:-1], "removed_in_period", "at_risk_cauti", "at_risk_reinsertion"]:
         df[col] = nuisance.binary_values(df[col])
     # No censoring probability exists in this repository. Do not invent one or
@@ -118,7 +124,10 @@ def prepare_decisions(panel, settings=DMLSettings()):
     terminal_cols = ["reinsertion_in_period", "death_in_period", "icu_exit_alive_in_period"]
     links = []
     grid_seconds = set()
-    for episode_id, group in df.groupby(EPISODE, sort=False):
+    trajectory_columns = list(dict.fromkeys([*required, EPISODE, ROW, "is_decision_row"]))
+    if "simulation_end_time" in df:
+        trajectory_columns.append("simulation_end_time")
+    for episode_id, group in df[trajectory_columns].groupby(EPISODE, sort=False):
         if not np.array_equal(group.episode_index, np.arange(len(group))):
             raise ValueError(f"Broken episode ordering in episode {episode_id}")
         if group.episode_end_time.nunique() != 1 or group.iloc[0].period_start != group.iloc[0].inserted:
@@ -136,9 +145,16 @@ def prepare_decisions(panel, settings=DMLSettings()):
         if last.period_end != last.episode_end_time:
             raise ValueError("Incomplete follow-up before episode endpoint")
         reasons = {"death": "death_in_period", "reinsertion": "reinsertion_in_period", "icu_exit_alive": "icu_exit_alive_in_period"}
-        if last.episode_end_reason not in reasons:
+        simulation_horizon = last.episode_end_reason == "simulation_horizon"
+        if simulation_horizon:
+            if ("simulation_end_time" not in group or group.simulation_end_time.isna().any()
+                    or group.simulation_end_time.nunique() != 1 or last.simulation_end_time != last.period_end):
+                raise ValueError("Simulation horizon must match its explicit fixed episode cutoff")
+        elif last.episode_end_reason not in reasons:
             raise NotImplementedError("Unresolved/nonterminal episode ending: censoring model required")
-        if group.iloc[:-1][terminal_cols].to_numpy().sum() != 0 or last[terminal_cols].sum() != 1 or last[reasons[last.episode_end_reason]] != 1:
+        if (group.iloc[:-1][terminal_cols].to_numpy().sum() != 0
+                or last[terminal_cols].sum() != (0 if simulation_horizon else 1)
+                or (not simulation_horizon and last[reasons[last.episode_end_reason]] != 1)):
             raise ValueError("Decision rows after termination or inconsistent terminal precedence")
         if group.iloc[:-1].episode_end_reason.notna().any():
             raise ValueError("Terminal reason before final period")
@@ -293,7 +309,7 @@ def make_regressor(settings):
     elif settings.continuation_learner in ("extra_trees", "random_forest"):
         cls = ExtraTreesRegressor if settings.continuation_learner == "extra_trees" else RandomForestRegressor
         learner = cls(n_estimators=settings.continuation_trees, min_samples_leaf=settings.continuation_min_leaf,
-                      random_state=settings.seed, n_jobs=1)
+                      random_state=settings.seed, n_jobs=settings.continuation_jobs)
     else:
         raise ValueError("Choose ridge, extra_trees, random_forest, or pass a regressor factory")
     return make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True), learner)
@@ -301,8 +317,11 @@ def make_regressor(settings):
 
 class FitAudit:
     """Compact fold-level provenance for models entering exported scores."""
-    def __init__(self):
+    def __init__(self, progress=False, context="panel"):
         self.records = []
+        self.progress = progress
+        self.context = context
+        self.started = self.last_message = monotonic()
 
     def add(self, train, predict, *, component, outer_fold, inner_fold=None,
             policy="all", outcome="all", period="all", action_counts=None, features=()):
@@ -317,6 +336,12 @@ class FitAudit:
                              "held_out_fold": int(outer_fold), "training_rows": len(train),
                              "held_out_rows": len(predict), "action_counts": action_counts,
                              "feature_columns": list(features)})
+        now = monotonic()
+        if self.progress and now - self.last_message >= 30:
+            print(f"[POLICY-DML FIT] {self.context}; models={len(self.records)}; "
+                  f"elapsed_minutes={(now - self.started) / 60:.1f}; outer_fold={outer_fold}; "
+                  f"inner_fold={inner_fold}; policy={policy}; outcome={outcome}; period={period}", flush=True)
+            self.last_message = now
         return model_id
 
 
@@ -409,7 +434,8 @@ def predict_actions(model, frame, features, outcome):
 
 
 def crossfit_policy_scores(decisions, policies, *, settings=DMLSettings(), behaviour_learner="logistic_regression",
-                          saved_behaviour=None, patient_counts=None, regressor_factory=None):
+                          saved_behaviour=None, patient_counts=None, regressor_factory=None,
+                          progress=False, progress_detail=False, progress_context="panel"):
     """Outer OOF score, with nested OOF targets isolated from the outer fold.
 
     saved_behaviour is a validated decision-row keyed table including g and
@@ -439,14 +465,33 @@ def crossfit_policy_scores(decisions, policies, *, settings=DMLSettings(), behav
         raise ValueError("Invalid patient bootstrap multiplicity")
     df = df.loc[count.gt(0)].reset_index(drop=True)
     validate_folds(df)
-    audit = FitAudit()
-    factory = regressor_factory or (lambda: make_regressor(settings))
-    results = []
-    for outer in sorted(df[FOLD].unique()):
-        train = df.loc[df[FOLD].ne(outer)].copy().reset_index(drop=True)
-        held = df.loc[df[FOLD].eq(outer)].copy().reset_index(drop=True)
+    outer_folds = sorted(df[FOLD].unique())
+    inner_assignments = {}
+    for outer in outer_folds:
+        train = df.loc[df[FOLD].ne(outer)].reset_index(drop=True)
         if train.subject_id.nunique() < 2:
             raise ValueError("Nested continuation cross-fitting requires two training patients outside each outer fold")
+        inner = nuisance.add_grouped_crossfit_folds(
+            train.drop(columns=FOLD).copy(),
+            n_splits=min(settings.inner_folds, train.subject_id.nunique()),
+        )[FOLD].to_numpy()
+        for inner_fold in (None, *np.unique(inner)):
+            training_periods = train.decision_period if inner_fold is None else train.loc[inner != inner_fold, "decision_period"]
+            required_periods = df.decision_period if inner_fold is None else train.decision_period
+            missing = sorted(set(required_periods) - set(training_periods))
+            if missing:
+                raise ValueError(f"No training trajectories at decision periods {missing} in outer fold {outer}, "
+                                 f"inner fold {inner_fold}. Choose an explicit evaluation horizon or a model "
+                                 "that pools information across periods; no continuation models have been fitted.")
+        inner_assignments[outer] = inner
+    audit = FitAudit(progress=progress, context=progress_context)
+    factory = regressor_factory or (lambda: make_regressor(settings))
+    results = []
+    for outer_number, outer in enumerate(outer_folds, start=1):
+        if progress:
+            print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; phase=targets", flush=True)
+        train = df.loc[df[FOLD].ne(outer)].copy().reset_index(drop=True)
+        held = df.loc[df[FOLD].eq(outer)].copy().reset_index(drop=True)
         expanded = train.loc[train.index.repeat(train.subject_id.map(patient_counts))].reset_index(drop=True)
         if saved_behaviour is None:
             g_held, behaviour_id, _ = fit_behaviour(expanded, held, behaviour_features, behaviour_learner, audit, outer)
@@ -454,10 +499,12 @@ def crossfit_policy_scores(decisions, policies, *, settings=DMLSettings(), behav
             g_held = held.p_remove_obs.to_numpy()
             behaviour_id = audit.add(train, held, component="reused_behaviour", outer_fold=outer, features=behaviour_features)
         # Inner assignment uses source patient identity, before multiplicity.
-        inner = nuisance.add_grouped_crossfit_folds(train.drop(columns=FOLD).copy(),
-                                                  n_splits=min(settings.inner_folds, train.subject_id.nunique()))[FOLD].to_numpy()
+        inner = inner_assignments[outer]
         inner_targets = {p.name: np.full((len(train), len(OUTCOMES)), np.nan) for p in policies}
         for inner_fold in np.unique(inner):
+            if progress_detail:
+                print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; "
+                      f"inner={int(inner_fold) + 1}/{len(np.unique(inner))}; phase=auxiliary", flush=True)
             training = train.loc[inner != inner_fold].copy().reset_index(drop=True)
             inner_held = train.loc[inner == inner_fold].copy().reset_index(drop=True)
             training = training.loc[training.index.repeat(training.subject_id.map(patient_counts))].reset_index(drop=True)
@@ -470,7 +517,13 @@ def crossfit_policy_scores(decisions, policies, *, settings=DMLSettings(), behav
                 inner_targets[policy.name][inner == inner_fold] = fit_backward_sequence(
                     training, inner_held, g_training, g_inner, policy, features, settings, audit,
                     outer, int(inner_fold), factory)
+                if progress_detail:
+                    print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; "
+                          f"inner={int(inner_fold) + 1}/{len(np.unique(inner))}; policy={policy.name}; completed", flush=True)
         for policy in policies:
+            if progress_detail:
+                print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; "
+                      f"policy={policy.name}; phase=outer_scores", flush=True)
             pi = policy.probabilities(held, g_held)
             quantities = ratio_quantities(held.removed_in_period, pi, g_held, settings.propensity_clip)
             scores = np.zeros((len(held), len(OUTCOMES)))
@@ -502,6 +555,8 @@ def crossfit_policy_scores(decisions, policies, *, settings=DMLSettings(), behav
                     part["continuation_model_id"], part["behaviour_model_id"] = model_id, behaviour_id
                     part["clipping_epsilon"] = settings.propensity_clip
                     results.append(part)
+        if progress:
+            print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; completed", flush=True)
     rows = pd.concat(results, ignore_index=True).sort_values(["policy_name", "outcome", EPISODE, "decision_period"]).reset_index(drop=True)
     groups = ["policy_name", "outcome", EPISODE]
     rows["cumulative_ratio"] = rows.groupby(groups).ratio.cumprod()
