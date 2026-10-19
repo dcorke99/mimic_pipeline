@@ -120,8 +120,7 @@ class SuperLearnerTests(unittest.TestCase):
     def test_standalone_run_exports_models_and_predictions(self):
         panel = example_panel()
         settings = ("MODEL_TYPE", "MODEL_OUTPUT_NAME", "INFILE", "NUISANCE_ROOT", "OUTDIR",
-                    "NUISANCE_PREDICTIONS_FILE", "PERFORMANCE_METRICS_FILE",
-                    "CROSSFIT_ROW_ASSIGNMENTS_FILE", "CONSTANT_FEATURES_FILE")
+                    "NUISANCE_PREDICTIONS_FILE", "PERFORMANCE_METRICS_FILE")
         with TemporaryDirectory() as temporary, self.small_library(), redirect_stdout(StringIO()), \
              patch.multiple(nuisance, **{name: getattr(nuisance, name) for name in settings}):
             root = Path(temporary)

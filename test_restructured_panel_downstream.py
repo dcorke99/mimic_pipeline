@@ -6,11 +6,11 @@ import unittest
 import numpy as np
 import pandas as pd
 
-import create_data_panel as builder
+import create_observed_panel as builder
 import create_semi_synthetic_panel as synthetic
 import fit_nuisance_models as nuisance
 import panel_analysis as analysis
-import policy_dml_common as dml
+import evaluate_policy_dml_policies as dml
 import policy_eval_common as pec
 from test_base_panel import episode
 

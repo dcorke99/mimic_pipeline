@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-import create_data_panel as cdp
+import create_observed_panel as cdp
 
 
 class TerminalPanelTests(unittest.TestCase):

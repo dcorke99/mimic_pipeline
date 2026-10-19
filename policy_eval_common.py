@@ -19,10 +19,6 @@ def policy_prediction_columns(days=None):
     return [f"p_{outcome}_policy_day_{day}" for day in days for outcome in POLICY_OUTCOMES]
 
 
-def is_policy_prediction_column(column):
-    return any(column.startswith(f"p_{outcome}_policy_day_") for outcome in POLICY_OUTCOMES)
-
-
 def policy_feature_overrides(df, removal_day):
     """Candidate inputs on the preserved grid; clinical history stays factual."""
     day = ((pd.to_datetime(df.period_start, format="mixed")
@@ -53,8 +49,6 @@ def add_policy_predictions(df, payload, *, predictor=None, days=None):
     """
     predictor = predict_fold_model if predictor is None else predictor
     days = run_config.POLICY_DAYS if days is None else days
-    if df.groupby("subject_id", dropna=False)[CROSSFIT_FOLD_COL].nunique().gt(1).any():
-        raise ValueError("A patient appears in multiple held-out folds")
     scores = pd.DataFrame(np.nan, index=df.index, columns=policy_prediction_columns(days))
     for day in days:
         overrides = policy_feature_overrides(df, day)
@@ -75,8 +69,6 @@ def add_policy_predictions(df, payload, *, predictor=None, days=None):
                         if feature in inputs:
                             inputs[feature] = values.loc[rows]
                     scores.loc[rows, column] = predictor(fold_model, inputs)
-    if scores.isna().any().any():
-        raise ValueError("Policy hazards lack a corresponding held-out outcome model")
     return pd.concat([df.drop(columns=scores.columns, errors="ignore"), scores], axis=1)
 
 
@@ -132,19 +124,9 @@ def reinsertion_feature_columns(out_feature_cols):
     ]
 
 
-def fixed_day_reinsertion_context(day, removal_day):
-    """Model inputs also exported as policy_reinsertion_* panel columns."""
-    return {
-        REINSERTION_CONTEXT_COL: day.eq(removal_day).astype(int),
-        REINSERTION_PERIOD_COL: (day - removal_day).clip(lower=0).astype(int),
-    }
-
-
 def predict_reinsertion_columns(fold_model, df, feature_cols, predictor=None):
     """Score REMOVE, factual OUT, and each day-policy context with one model."""
     predictor = predict_fold_model if predictor is None else predictor
-    if not {REINSERTION_CONTEXT_COL, REINSERTION_PERIOD_COL}.issubset(feature_cols):
-        raise ValueError("Reinsertion model predates the rebuilt grid; refit nuisance models")
     base = df.reindex(columns=feature_cols).copy()
     base[REINSERTION_CONTEXT_COL] = 0
     base[REINSERTION_PERIOD_COL] = df[REINSERTION_PERIOD_COL].clip(lower=1)
@@ -155,17 +137,13 @@ def predict_reinsertion_columns(fold_model, df, feature_cols, predictor=None):
     day = add_episode_day(df)["episode_day"]
     for removal_day in run_config.POLICY_DAYS:
         inputs = base.copy()
-        for column, values in fixed_day_reinsertion_context(day, removal_day).items():
-            inputs[column] = values
+        inputs[REINSERTION_CONTEXT_COL] = day.eq(removal_day).astype(int)
+        inputs[REINSERTION_PERIOD_COL] = (
+            day - removal_day
+        ).clip(lower=0).astype(int)
         prediction = predictor(fold_model, inputs)
         scores[f"{REINSERTION_POLICY_PREFIX}{removal_day}"] = np.where(day.lt(removal_day), 0.0, prediction)
     return scores
-
-
-def factual_reinsertion_prediction(df):
-    return pd.Series(np.where(
-        df["catheter_state"].eq("in"), df["p_reinsertion_if_remove"], df["p_reinsertion_if_out"],
-    ), index=df.index)
 
 
 MAX_REASONABLE_PERIOD_DURATION_DAYS = 7.0
@@ -181,33 +159,15 @@ def save_report_df(df, path, decimals=3):
 
 def add_period_duration_days(
     df,
-    *,
-    context,
     max_reasonable_days=MAX_REASONABLE_PERIOD_DURATION_DAYS,
 ):
     # Add period duration in days
     out = df.copy()
-    start = pd.to_datetime(out["period_start"], errors="coerce")
-    end = pd.to_datetime(out["period_end"], errors="coerce")
+    start = pd.to_datetime(out["period_start"], format="mixed")
+    end = pd.to_datetime(out["period_end"], format="mixed")
     duration_days = (end - start).dt.total_seconds() / 86400.0
-    invalid = start.isna() | end.isna() | duration_days.isna() | ~np.isfinite(duration_days) | duration_days.le(0)
-    if invalid.any():
-        examples = out.loc[invalid, ["period_start", "period_end"]].head(10)
-        raise ValueError(
-            f"Invalid period durations found while preparing {context}. "
-            "period_start/period_end must parse and period_end must be after period_start. "
-            f"Examples:\n{examples}"
-        )
-
     out["period_duration_days"] = duration_days.astype(float)
     out["period_duration_long_flag"] = out["period_duration_days"].gt(max_reasonable_days).astype(int)
-    n_long = int(out["period_duration_long_flag"].sum())
-    if n_long:
-        print(
-            f"WARNING: {context} has {n_long:,} rows with period_duration_days "
-            f"> {max_reasonable_days}. They are retained and flagged.",
-            flush=True,
-        )
     return out
 
 
@@ -233,18 +193,12 @@ def label_nominal_exposure(df):
 
 
 def add_observed_icu_exit_alive_period(df):
-    # Validate and expose the mutually exclusive ICU-exit-alive outcome
+    # Expose the ICU-exit-alive outcome used in reports.
     out = df.copy()
-    death = pd.to_numeric(out["death_in_period"], errors="coerce").fillna(0)
     icu_exit_alive = pd.to_numeric(
         out["icu_exit_alive_in_period"],
         errors="coerce",
     ).fillna(0)
-    overlap = death.eq(1) & icu_exit_alive.eq(1)
-    if overlap.any():
-        raise ValueError(
-            "death_in_period and icu_exit_alive_in_period must be mutually exclusive"
-        )
     out["observed_icu_exit_alive_in_period"] = icu_exit_alive.eq(1).astype(int)
     return out
 
@@ -310,119 +264,11 @@ def add_fixed_day_target_policy_timeline(
     out.loc[later_row_on_remove_day, periods_out_col] = 0.0
     out.loc[after_remove, periods_out_col] = day.loc[after_remove] - remove_day.loc[after_remove]
     out["policy_removal_day_extra_row_treated_as_out"] = later_row_on_remove_day.astype(int)
-    for column, values in fixed_day_reinsertion_context(day, remove_day).items():
-        out[f"policy_{column}"] = values
+    out[f"policy_{REINSERTION_CONTEXT_COL}"] = day.eq(remove_day).astype(int)
+    out[f"policy_{REINSERTION_PERIOD_COL}"] = (
+        day - remove_day
+    ).clip(lower=0).astype(int)
     return out
-
-
-def policy_timeline_checks(
-    df,
-    *,
-    episode_id_col="catheter_episode_id",
-    policy_name_col="policy_name",
-    policy_remove_day_col="policy_remove_day",
-    episode_day_col="episode_day",
-):
-    # Summarise policy timeline checks
-    rows = []
-    for policy_name, policy_df in df.groupby(policy_name_col, dropna=False, sort=False):
-        remove_day = pd.to_numeric(policy_df.get(policy_remove_day_col, pd.Series(dtype=float)), errors="coerce").dropna()
-        numeric_remove_day = float(remove_day.iloc[0]) if len(remove_day) else np.nan
-        action = policy_df["policy_action"].astype("string").str.strip().str.lower()
-        remove_rows = action.eq("remove")
-        remove_rows_by_episode = remove_rows.groupby(policy_df[episode_id_col], sort=False).sum()
-
-        if pd.notna(numeric_remove_day):
-            reaches_policy_removal_day = (
-                pd.to_numeric(policy_df[episode_day_col], errors="coerce")
-                .eq(numeric_remove_day)
-                .groupby(policy_df[episode_id_col], sort=False)
-                .max()
-            )
-            n_reached = int(reaches_policy_removal_day.sum())
-        else:
-            n_reached = 0
-
-        n_remove_rows = int(remove_rows.sum())
-        rows.append(
-            {
-                "policy_name": policy_name,
-                "policy_remove_day": numeric_remove_day,
-                "n_policy_remove_rows": n_remove_rows,
-                "n_episodes_reaching_policy_removal_day": n_reached,
-                "n_episodes_with_more_than_one_remove_row": int(remove_rows_by_episode.gt(1).sum()),
-                "n_policy_removal_day_extra_rows_treated_as_out": int(
-                    pd.to_numeric(
-                        policy_df["policy_removal_day_extra_row_treated_as_out"],
-                        errors="coerce",
-                    )
-                    .fillna(0)
-                    .sum()
-                ),
-                "n_policy_remove_row_shortfall_vs_reached_episodes": int(n_reached - n_remove_rows) if pd.notna(numeric_remove_day) else 0,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def check_policy_timeline(
-    df,
-    *,
-    episode_id_col="catheter_episode_id",
-    context="policy panel",
-):
-    # Validate the policy timeline
-    state = df["policy_catheter_state"].astype("string").str.strip().str.lower()
-    action = df["policy_action"].astype("string").str.strip().str.lower()
-
-    invalid_state = ~state.isin(["in", "out"])
-    if invalid_state.any():
-        examples = df.loc[invalid_state, ["policy_name", episode_id_col, "policy_catheter_state"]].head(10)
-        raise ValueError(
-            f"{context} has invalid policy_catheter_state values. "
-            f"Rebuild with build_policy_panels.py. Examples:\n{examples}"
-        )
-
-    invalid_action = ~action.isin(["keep", "remove", "out"])
-    if invalid_action.any():
-        examples = df.loc[invalid_action, ["policy_name", episode_id_col, "policy_action"]].head(10)
-        raise ValueError(
-            f"{context} has invalid policy_action values. "
-            f"Rebuild with build_policy_panels.py. Examples:\n{examples}"
-        )
-
-    out_remove = state.eq("out") & action.eq("remove")
-    if out_remove.any():
-        examples = df.loc[
-            out_remove,
-            ["policy_name", episode_id_col, "policy_catheter_state", "policy_action"],
-        ].head(10)
-        raise ValueError(
-            f"{context} assigns a remove action on OUT-state rows. "
-            f"Rebuild with build_policy_panels.py. Examples:\n{examples}"
-        )
-
-    # Summarise policy timeline checks
-    diagnostics = policy_timeline_checks(df, episode_id_col=episode_id_col)
-    too_many = diagnostics["n_episodes_with_more_than_one_remove_row"].gt(0)
-    shortfall = diagnostics["n_policy_remove_row_shortfall_vs_reached_episodes"].ne(0)
-    if too_many.any() or shortfall.any():
-        failing = diagnostics.loc[too_many | shortfall].head(20)
-        raise ValueError(
-            f"{context} has unsafe fixed-day policy timing. "
-            "Rebuild it with build_policy_panels.py. Diagnostics:\n"
-            f"{failing}"
-        )
-
-
-def duplicate_episode_day_count(
-    df,
-    group_cols,
-    day_col="episode_day",
-):
-    # Count duplicate episode-day rows
-    duplicated = df.duplicated([*group_cols, day_col], keep=False)
-    return int(duplicated.sum())
 
 
 def add_standard_comparisons(

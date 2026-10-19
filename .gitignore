@@ -24,3 +24,7 @@ __pycache__/
 # Include pipeline configuration
 !config/
 !config/d_items_keep.csv
+
+# Old generated DML audit and run metadata files
+/initial_dml_artefacts/**/policy_dml_model_audit.json
+/initial_dml_artefacts/**/policy_dml_run_metadata.json

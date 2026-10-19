@@ -13,8 +13,7 @@ import fit_nuisance_models as nuisance
 class NuisancePanelRunsTests(unittest.TestCase):
     def setUp(self):
         names = ("MODEL_TYPE", "MODEL_OUTPUT_NAME", "INFILE", "NUISANCE_ROOT", "OUTDIR",
-                 "NUISANCE_PREDICTIONS_FILE", "PERFORMANCE_METRICS_FILE",
-                 "CROSSFIT_ROW_ASSIGNMENTS_FILE", "CONSTANT_FEATURES_FILE")
+                 "NUISANCE_PREDICTIONS_FILE", "PERFORMANCE_METRICS_FILE")
         settings = patch.multiple(nuisance, **{name: getattr(nuisance, name) for name in names})
         settings.start()
         self.addCleanup(settings.stop)
@@ -39,8 +38,6 @@ class NuisancePanelRunsTests(unittest.TestCase):
                     runs.append((nuisance.INFILE, nuisance.OUTDIR, model_type))
                     self.assertEqual(nuisance.NUISANCE_PREDICTIONS_FILE,
                                      nuisance.OUTDIR / "nuisance_predictions.csv")
-                    self.assertEqual(nuisance.CROSSFIT_ROW_ASSIGNMENTS_FILE,
-                                     nuisance.OUTDIR / "crossfit_row_assignments.csv")
 
                 with patch.object(nuisance, "PANEL_RUNS", panels), \
                      patch.object(nuisance, "MODEL_TYPES", selection), \
@@ -58,10 +55,10 @@ class NuisancePanelRunsTests(unittest.TestCase):
     def test_missing_panel_raises_when_read(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
-            existing = root / "real.csv"
+            existing = root / "observed.csv"
             existing.touch()
             missing = root / "missing.csv"
-            panels = (("real", existing, root / "real"),
+            panels = (("observed", existing, root / "observed"),
                       ("missing", missing, root / "missing"))
             with patch.object(nuisance, "PANEL_RUNS", panels), \
                  patch.object(nuisance, "MODEL_TYPES", ["xgboost"]), \

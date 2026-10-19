@@ -1,3 +1,5 @@
+"""Build the observed catheter modelling panel."""
+
 import re
 import os
 from collections import defaultdict
@@ -98,31 +100,18 @@ def load_item_labels():
     # Return an ID lookup
     return d_items_df.set_index("itemid")["label"].to_dict()
 
-def print_section(title):
-    # Print a stage heading
-    print()
-    print(f"=== {title} ===")
-
-def normalise_ethnicity_text(value):
-    # Standardise whitespace and case for matching
-    if pd.isna(value):
-        return ""
-    return re.sub(r"\s+", " ", str(value).strip()).upper()
-
-def ethnicity_is_missing(value):
-    # Identify unavailable ethnicity information
-    ethnicity_text = normalise_ethnicity_text(value)
-    return not ethnicity_text or any(
-        marker in ethnicity_text for marker in ETHNICITY_UNAVAILABLE_MARKERS
-    )
-
 def map_ethnicity_group(value):
     # Collapse substantive raw ethnicity labels
-    if ethnicity_is_missing(value):
+    ethnicity_text = (
+        "" if pd.isna(value)
+        else re.sub(r"\s+", " ", str(value).strip()).upper()
+    )
+    if not ethnicity_text or any(
+        marker in ethnicity_text for marker in ETHNICITY_UNAVAILABLE_MARKERS
+    ):
         return pd.NA
 
     # Match broad groups
-    ethnicity_text = normalise_ethnicity_text(value)
     if "WHITE" in ethnicity_text:
         return "White"
     if "BLACK" in ethnicity_text:
@@ -306,7 +295,19 @@ def build_catheter_episodes():
         how="left",
     )
     icu["ethnicity_group"] = icu["ethnicity"].apply(map_ethnicity_group)
-    icu["ethnicity_missing"] = icu["ethnicity"].apply(ethnicity_is_missing).astype(int)
+    # Mark blank and unavailable source ethnicity labels.
+    ethnicity_text = icu["ethnicity"].astype("string").fillna("")
+    ethnicity_text = (
+        ethnicity_text.str.strip().str.replace(r"\s+", " ", regex=True).str.upper()
+    )
+    icu["ethnicity_missing"] = (
+        ethnicity_text.eq("")
+        | ethnicity_text.apply(
+            lambda value: any(
+                marker in value for marker in ETHNICITY_UNAVAILABLE_MARKERS
+            )
+        )
+    ).astype(int)
 
     # Load Foley procedures
     procedure_events = pd.read_csv(
@@ -1302,38 +1303,6 @@ def aggregate_itemid_covariates(panel, itemid_to_label):
     print("[EHR] Covariates aggregated.")
     return panel, retention_log
 
-def detect_covariate_itemids(columns):
-    # Match chart feature names
-    pattern = re.compile(r"^itemid_(\d+)__", flags=re.IGNORECASE)
-    itemids = set()
-
-    # Collect unique item IDs
-    for col in columns:
-        match = pattern.match(str(col))
-        if match:
-            itemids.add(int(match.group(1)))
-
-    # Return sorted IDs
-    return pd.DataFrame({"itemid": sorted(itemids)})
-
-def add_itemid_missing_indicators(df):
-    # Add one missingness indicator per final itemid-derived feature
-    chart_feature_cols = sorted(
-        col for col in df.columns
-        if col.startswith("itemid_") and not col.endswith("__missing")
-    )
-    missing_indicators = {
-        f"{col}__missing": df[col].isna().astype(int)
-        for col in chart_feature_cols
-        if f"{col}__missing" not in df.columns
-    }
-    if not missing_indicators:
-        return df
-    return pd.concat(
-        [df, pd.DataFrame(missing_indicators, index=df.index)],
-        axis=1,
-    ).copy()
-
 def build_modelling_panel():
     # Define stage files
     base_panel_file = DATA_DIR / "base_panel.csv"
@@ -1367,7 +1336,17 @@ def build_modelling_panel():
         load_item_labels(),
     )
 
-    df = add_itemid_missing_indicators(df)
+    # Add one missingness indicator per retained chart feature.
+    retained_chart_cols = sorted(
+        col for col in df.columns if col.startswith("itemid_") and not col.endswith("__missing")
+    )
+    missing_indicators = {
+        f"{col}__missing": df[col].isna().astype(int)
+        for col in retained_chart_cols
+        if f"{col}__missing" not in df.columns
+    }
+    if missing_indicators:
+        df = pd.concat([df, pd.DataFrame(missing_indicators, index=df.index)], axis=1).copy()
 
     # Remove aggregation helpers
     df = df.drop(columns=["cov_start", "cov_end", "row_id"])
@@ -1416,8 +1395,14 @@ def build_modelling_panel():
         float_format="%.3f",
     )
 
-    # Build the item dictionary
-    covariate_dict = detect_covariate_itemids(df.columns)
+    # Build the item dictionary from the final chart-feature column names.
+    itemid_pattern = re.compile(r"^itemid_(\d+)__", flags=re.IGNORECASE)
+    itemids = set()
+    for column in df.columns:
+        match = itemid_pattern.match(str(column))
+        if match:
+            itemids.add(int(match.group(1)))
+    covariate_dict = pd.DataFrame({"itemid": sorted(itemids)})
     itemid_to_label = load_item_labels()
     covariate_dict["label"] = covariate_dict["itemid"].map(itemid_to_label).fillna("UNKNOWN ITEMID")
     covariate_dict.sort_values(["label", "itemid"]).round(3).to_csv(
@@ -1451,20 +1436,24 @@ def main():
     print("[CONFIG] config dir:", CONFIG_DIR)
 
     # Build the episode panel
-    print_section("Define catheter episode cohort and base panel")
+    print()
+    print("=== Define catheter episode cohort and base panel ===")
     create_episode_cohort_and_base_panel()
 
     # Extract chart covariates
-    print_section("Extract and preprocess chart-event covariates")
+    print()
+    print("=== Extract and preprocess chart-event covariates ===")
     extract_chart_covariates()
 
     # Clean chart covariates
-    print_section("Clean chart covariates")
+    print()
+    print("=== Clean chart covariates ===")
     clean_chart_covariates()
     (DATA_DIR / "preprocessed_raw_chart_covariates_kept.csv").unlink()
 
     # Build the modelling panel
-    print_section("Aggregate cleaned covariates onto the base panel")
+    print()
+    print("=== Aggregate cleaned covariates onto the base panel ===")
     build_modelling_panel()
     (DATA_DIR / "cleaned_chart_covariates.csv").unlink()
 

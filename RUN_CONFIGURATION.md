@@ -8,31 +8,48 @@ All routine run choices are in `pipeline_config.py`.
 | `MODEL_TYPES` | Nuisance learners fitted for each selected panel. |
 | `SUPERLEARNER_BASE_MODELS` | Members of the Super Learner library. |
 | `NUISANCE_PANELS` | Panels passed to nuisance fitting. |
-| `POLICY_PANELS` | Panels used to build g-formula policy inputs. |
+| `POLICY_PANELS` | Datasets used to build policy inputs for both evaluators. |
 | `EVALUATION_PANELS` | Panels evaluated by g-formula or Policy-DML. |
 | `NUISANCE_MODEL_TYPE` | Learner consumed by evaluators. |
 | `BOOTSTRAP_MODES` | `fixed`, `refit`, both, or an empty list. |
 | `POLICY_DAYS` | One-based catheter-removal days to evaluate. |
-| `POLICY_DML_HORIZON_HOURS` | Policy-DML follow-up by panel: 720 hours for real data and 336 hours for each semi-synthetic panel. |
+| `POLICY_DML_HORIZON_HOURS` | Policy-DML follow-up by panel: 720 hours for observed data and 336 hours for each semi-synthetic panel. |
+| `POLICY_DML_CONTINUATION_LEARNER` | Continuation learner: `ridge`, `extra_trees`, `random_forest`, or `xgboost`. |
+| `POLICY_DML_N_BOOTSTRAP` | Number of Policy-DML bootstrap draws. |
+| `POLICY_DML_CLIPPING_SENSITIVITY` | Additional propensity-clipping values to evaluate; empty by default. |
 | `ANALYSIS_PANEL` | Panel used by `panel_analysis.py`. |
 | `ANALYSIS_INCLUDE_AGE_SPLIT` | Enables the optional age split in descriptive analysis. |
 
 `PANEL_PATHS` maps each panel name to its input CSV and nuisance-model root.
+`POLICY_DIRS` and `RESULT_DIRS` give the matching panel-specific intermediate
+and final-result directories.
 The semi-synthetic builder always creates all three validation variants when
 that stage runs.
 
-The Policy-DML evaluator also accepts command-line overrides:
+Build policy panels for every dataset selected in `EVALUATION_PANELS` before
+running either evaluator. Existing policy panels made before the shared
+`policy_dml_action` column was added must be rebuilt.
+
+Policy-DML has no command-line run options. Select its panels, bootstrap modes,
+horizons, continuation learner, and bootstrap count in `pipeline_config.py`, then run:
 
 ```powershell
-python evaluate_policy_dml_policies.py --panel real --bootstrap-mode fixed --n-bootstrap 5 --max-patients 100 --horizon-hours 72 --output-root artefacts/policy_dml_smoke --continuation-learner ridge
+python evaluate_policy_dml_policies.py
 ```
 
-`--max-patients` requires a separate `--output-root`. Other options include
-`--horizon-hours`, `--propensity-clip`, `--inner-folds`,
-`--continuation-trees`, and `--continuation-jobs`. Policy-DML defaults to five
-outer folds inherited from saved nuisance predictions, two inner folds, 100
-Extra Trees per continuation model using all processors, and 100 bootstrap
-draws. `--horizon-hours` overrides the selected panel's configured horizon.
+The DML evaluator defines its technical settings near the top of
+`evaluate_policy_dml_policies.py`:
+
+- `SETTINGS`: five outer folds, two inner folds, seed, horizon and clipping.
+- `LEARNER_CONFIGURATIONS`: separate parameter dictionaries for Ridge, Random
+  Forest, Extra Trees and XGBoost.
+- `LEARNER_PREPROCESSING`: imputation, standardisation and native missing-value
+  handling for each learner.
+
+The default run uses Extra Trees with 100 trees, all processors and 100 bootstrap
+draws. XGBoost uses squared-error loss and CPU histogram trees, with native
+missing-value handling. Ridge uses median imputation and standardisation; the
+forests use median imputation.
+
 The g-formula comparator still covers complete episodes. Match horizons before
-comparing estimates. Continuation-model defaults are set near the top of
-`evaluate_policy_dml_policies.py`.
+comparing estimates.

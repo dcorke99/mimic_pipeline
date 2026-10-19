@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-import create_data_panel as cdp
+import create_observed_panel as cdp
 
 
 T0 = pd.Timestamp("2024-01-01 06:00:00")

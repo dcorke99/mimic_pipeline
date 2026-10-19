@@ -11,16 +11,16 @@ import policy_eval_common as pec
 from build_policy_panels import (
     POLICY_INPUT_COLS,
     add_stable_ids_and_decision_flag,
-    build_long_policy_panel,
+    apply_fixed_day_policy,
 )
 
 # Run choices come from pipeline_config.py; simulation settings stay here.
-from pipeline_config import POLICY_DAYS, POLICY_DML_HORIZON_HOURS, VALIDATION_DIR
+from pipeline_config import POLICY_DAYS, POLICY_DML_HORIZON_HOURS
 
 
 REPO_ROOT = Path(__file__).resolve().parent
 SOURCE_PANEL = REPO_ROOT / "data/modelling_panel.csv"
-OUTPUT_DIR = VALIDATION_DIR
+OUTPUT_DIR = REPO_ROOT / "artefacts/validation"
 RANDOM_SEED = 20260811
 # Running this stage generates all three validation datasets.
 
@@ -77,12 +77,12 @@ TREATMENT_LOG_ODDS_EFFECT = -0.90
 POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS = 2
 VALIDATION_ROW_ID_COL = "validation_row_id"
 
-PRIMARY_PANEL_FILENAME = "semi_synthetic_panel.csv"
-OMITTED_PANEL_FILENAME = "semi_synthetic_panel_confounder_omitted.csv"
-RANDOMISED_PANEL_FILENAME = "semi_synthetic_panel_randomised_action.csv"
-TRUTH_FILENAME = "semi_synthetic_truth.csv"
-KNOWN_TRUTH_POLICY_FILENAME = "known_truth_policy_values.csv"
-KNOWN_TRUTH_DML_FILENAME = "known_truth_policy_values_policy_dml.csv"
+PRIMARY_PANEL_FILENAME = "with_confounding.csv"
+OMITTED_PANEL_FILENAME = "confounder_omitted.csv"
+RANDOMISED_PANEL_FILENAME = "randomised_action.csv"
+TRUTH_FILENAME = "row_truth.csv"
+KNOWN_TRUTH_POLICY_FILENAME = "known_truth_gformula.csv"
+KNOWN_TRUTH_DML_FILENAME = "known_truth_policy_dml.csv"
 COEFFICIENTS_FILENAME = "simulation_coefficients.csv"
 
 TRUTH_ONLY_PREFIXES = (
@@ -192,14 +192,6 @@ def chronological_episode_positions(panel, codes):
     )
     return order.groupby("_episode_code", sort=False)["_position"].apply(list)
 
-def linear_component(z_values, coefficients):
-    result = np.zeros(len(z_values), dtype=float)
-    for z_col, coefficient in coefficients.items():
-        result += float(coefficient) * pd.to_numeric(
-            z_values[z_col], errors="raise"
-        ).to_numpy(dtype=float)
-    return result
-
 def calibrate_action_intercept(linear_without_intercept, target_prevalence):
     if not ACTION_PROBABILITY_LOWER <= target_prevalence <= ACTION_PROBABILITY_UPPER:
         raise ValueError(
@@ -251,10 +243,13 @@ def generate_sequential_trajectory(
     if randomised:
         action_intercept = float(np.log(target_prevalence / (1.0 - target_prevalence)))
     else:
-        reference_linear = linear_component(
-            source_z_values.loc[source_decision_mask],
-            ACTION_COEFFICIENTS,
-        )
+        # Form the confounded action-model linear predictor.
+        reference_z = source_z_values.loc[source_decision_mask]
+        reference_linear = np.zeros(len(reference_z), dtype=float)
+        for z_col, coefficient in ACTION_COEFFICIENTS.items():
+            reference_linear += float(coefficient) * pd.to_numeric(
+                reference_z[z_col], errors="raise"
+            ).to_numpy(dtype=float)
         action_intercept = calibrate_action_intercept(
             reference_linear,
             target_prevalence,
@@ -336,7 +331,10 @@ def generate_sequential_trajectory(
     panel["episode_index"] = episode_index
     panel[PERIODS_COL] = periods_in_state
     panel[ACTION_COL] = synthetic_action
-    panel[CAUTI_RISK_COL] = cauti_followup_window(panel).astype(np.int8)
+    # CAUTI remains attributable through 48 hours after removal.
+    panel[CAUTI_RISK_COL] = pd.to_datetime(panel["period_start"]).lt(
+        pd.to_datetime(panel["removed"]) + pd.Timedelta(hours=48)
+    ).astype(np.int8)
     duration = (period_ends - period_starts).dt.total_seconds() / 3600.0
     removed = panel["removed"]
     in_hours = (period_ends.clip(upper=removed) - period_starts).dt.total_seconds().clip(lower=0) / 3600.0
@@ -371,21 +369,17 @@ def generate_sequential_trajectory(
     return panel, true_propensity, action_intercept
 
 def outcome_potential_probabilities(z_values):
-    baseline_linear = OUTCOME_INTERCEPT + linear_component(
-        z_values,
-        OUTCOME_COEFFICIENTS,
-    )
+    # Form the outcome-model linear predictor.
+    baseline_linear = np.full(len(z_values), OUTCOME_INTERCEPT, dtype=float)
+    for z_col, coefficient in OUTCOME_COEFFICIENTS.items():
+        baseline_linear += float(coefficient) * pd.to_numeric(
+            z_values[z_col], errors="raise"
+        ).to_numpy(dtype=float)
     true_mu_keep = expit(baseline_linear)
     true_mu_remove = expit(baseline_linear + TREATMENT_LOG_ODDS_EFFECT)
     # On the sequential trajectory, OUT means removal has already occurred.
     true_mu_out = true_mu_remove.copy()
     return true_mu_keep, true_mu_remove, true_mu_out
-
-def cauti_followup_window(panel):
-    return pd.to_datetime(panel["period_start"]).lt(
-        pd.to_datetime(panel["removed"]) + pd.Timedelta(hours=48)
-    )
-
 
 def generate_outcome(
     panel,
@@ -397,7 +391,10 @@ def generate_outcome(
 ):
     """Draw the first CAUTI per episode and end its risk set after that event."""
     states = panel[STATE_COL].astype("string").str.strip().str.lower()
-    outcome_risk = cauti_followup_window(panel)
+    # CAUTI remains attributable through 48 hours after removal.
+    outcome_risk = pd.to_datetime(panel["period_start"]).lt(
+        pd.to_datetime(panel["removed"]) + pd.Timedelta(hours=48)
+    )
     in_rows = states.eq("in")
     out_rows = states.eq("out")
 
@@ -573,7 +570,12 @@ def build_known_truth_policy_values(primary_panel, truth, standardisation, horiz
     ]
     current_probability_lookup = truth.loc[:, current_truth_columns]
 
-    policy_long = build_long_policy_panel(policy_base, POLICY_DAYS)
+    # Build one full panel copy per fixed-day policy.
+    policy_frames = [
+        apply_fixed_day_policy(policy_base, removal_day)
+        for removal_day in POLICY_DAYS
+    ]
+    policy_long = pd.concat(policy_frames, ignore_index=True)
     policy_state = policy_long["policy_catheter_state"].astype("string").str.lower()
     policy_periods_in = pd.to_numeric(
         policy_long["policy_periods_in"], errors="coerce"
@@ -669,7 +671,10 @@ def build_known_truth_policy_values(primary_panel, truth, standardisation, horiz
     states = current[STATE_COL].astype("string").str.strip().str.lower()
     actions = normalise_binary(current[ACTION_COL], ACTION_COL)
     # Integrate all time-eligible hazards, independently of realised CAUTI.
-    risk = cauti_followup_window(current)
+    # Match the 48-hour CAUTI attribution window used by the evaluator.
+    risk = pd.to_datetime(current["period_start"]).lt(
+        pd.to_datetime(current["removed"]) + pd.Timedelta(hours=48)
+    )
     current["true_mu_under_policy"] = 0.0
     current_keep = risk & states.eq("in") & actions.eq(0)
     current_remove = risk & states.eq("in") & actions.eq(1)
@@ -741,7 +746,7 @@ def build_coefficients_table(action_intercept, randomised_action_intercept):
             "mechanism": "observational_action",
             "term": "intercept",
             "coefficient": action_intercept,
-            "notes": "calibrated to real action prevalence on catheter-IN rows",
+            "notes": "calibrated to observed action prevalence on catheter-IN rows",
         }
     ]
     rows.extend(
@@ -800,7 +805,7 @@ def assert_output_safety(source_path, paths):
     source_resolved = source_path.resolve()
     for label, path in paths.items():
         if path.resolve() == source_resolved:
-            raise AssertionError(f"Output {label} would overwrite the real source panel")
+            raise AssertionError(f"Output {label} would overwrite the observed source panel")
 
 
 def main():
@@ -827,8 +832,8 @@ def main():
         source_panel[CAUTI_RISK_COL],
         CAUTI_RISK_COL,
     ).eq(1)
-    real_action = normalise_binary(source_panel[ACTION_COL], ACTION_COL)
-    target_action_prevalence = float(real_action.loc[decision_mask].mean())
+    observed_action = normalise_binary(source_panel[ACTION_COL], ACTION_COL)
+    target_action_prevalence = float(observed_action.loc[decision_mask].mean())
 
     z_values, standardisation = build_standardised_confounders(
         source_panel,

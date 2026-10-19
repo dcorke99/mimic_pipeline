@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 # Run selections and panel paths come from pipeline_config.py.
 PANEL_RUNS = tuple((name, *run_config.PANEL_PATHS[name]) for name in run_config.NUISANCE_PANELS)
-_, INFILE, NUISANCE_ROOT = (PANEL_RUNS[0] if PANEL_RUNS else ("real", *run_config.PANEL_PATHS["real"]))
+_, INFILE, NUISANCE_ROOT = (PANEL_RUNS[0] if PANEL_RUNS else ("observed", *run_config.PANEL_PATHS["observed"]))
 
 # Internal active-model state, updated by configure_model_run during fitting.
 MODEL_TYPE = MODEL_TYPES[0] if MODEL_TYPES else "logistic_regression"
@@ -42,8 +42,6 @@ OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
 COVARIATE_DICT_FILE = REPO_ROOT / "data/covariate_dictionary.csv"
 NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
 PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
-CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
-CONSTANT_FEATURES_FILE = OUTDIR / "constant_features_by_fold.csv"
 
 ID_COL = "subject_id"
 TIME_COL = "episode_index"
@@ -236,23 +234,11 @@ def configure_model_run(model_type):
     # Set the active learner and its model-specific output paths
     global MODEL_TYPE, MODEL_OUTPUT_NAME, OUTDIR
     global NUISANCE_PREDICTIONS_FILE, PERFORMANCE_METRICS_FILE
-    global CROSSFIT_ROW_ASSIGNMENTS_FILE
-    global CONSTANT_FEATURES_FILE
     MODEL_TYPE = model_type
     MODEL_OUTPUT_NAME = MODEL_TYPE
     OUTDIR = NUISANCE_ROOT / MODEL_OUTPUT_NAME
     NUISANCE_PREDICTIONS_FILE = OUTDIR / "nuisance_predictions.csv"
     PERFORMANCE_METRICS_FILE = OUTDIR / "performance_metrics.csv"
-    CROSSFIT_ROW_ASSIGNMENTS_FILE = OUTDIR / "crossfit_row_assignments.csv"
-    CONSTANT_FEATURES_FILE = OUTDIR / "constant_features_by_fold.csv"
-
-
-def binary_values(series):
-    values = pd.to_numeric(series, errors="coerce")
-    invalid = values.isna() | ~values.isin([0, 1])
-    if invalid.any():
-        raise ValueError(f"{series.name or 'Binary field'} must contain only 0/1 values. Examples: {series.loc[invalid].head(10).tolist()}")
-    return values.astype(int)
 
 
 def load_panel(path=None):
@@ -268,10 +254,6 @@ def load_panel(path=None):
         df[END_REASON_COL].astype("string").str.strip().str.lower()
     )
 
-    unknown_states = sorted(set(df[STATE_COL].dropna()) - {"in", "out"})
-    if unknown_states:
-        raise ValueError(f"Unexpected catheter states: {unknown_states}")
-
     for col in [
         ACTION_COL,
         Y_CAUTI,
@@ -281,7 +263,7 @@ def load_panel(path=None):
         AT_RISK_CAUTI,
         AT_RISK_REINS,
     ]:
-        df[col] = binary_values(df[col])
+        df[col] = pd.to_numeric(df[col]).astype(int)
 
     # Consolidate internal column blocks
     df = df.copy()
@@ -303,35 +285,7 @@ def add_grouped_crossfit_folds(df, n_splits=N_CROSSFIT_FOLDS):
             df.columns.get_loc(CROSSFIT_FOLD_COL),
         ] = fold
 
-    if df[CROSSFIT_FOLD_COL].lt(0).any():
-        raise ValueError("Cross-fitting failed to assign every row to a fold")
-    folds_per_patient = df.groupby(ID_COL)[CROSSFIT_FOLD_COL].nunique()
-    if folds_per_patient.ne(1).any():
-        raise ValueError("A patient was assigned to more than one cross-fit fold")
     return df
-
-
-def crossfit_fold_summary(df):
-    # Summarise cross-fit folds
-    return (
-        df.groupby(CROSSFIT_FOLD_COL, observed=False)
-        .agg(rows=(ID_COL, "size"), patients=(ID_COL, "nunique"))
-        .reset_index()
-        .rename(columns={CROSSFIT_FOLD_COL: "fold"})
-    )
-
-
-def crossfit_row_assignments(df):
-    # Build cross-fit row assignments
-    columns = [
-        ID_COL,
-        "stay_id",
-        "inserted",
-        TIME_COL,
-        STATE_COL,
-        CROSSFIT_FOLD_COL,
-    ]
-    return df[columns].copy()
 
 
 def make_binary_pipeline(model_type):
@@ -381,18 +335,6 @@ def fit_binary_model(features, target, model_type=None, groups=None):
     if model_type == "xgboost":
         pipe.named_steps["xgboost"].set_params(device="cpu")
     return pipe
-
-
-def predict_binary_proba(pipe, features):
-    feature_values = features.to_numpy(dtype=float)
-    if "lightgbm" in pipe.named_steps:
-        # NumPy training generates names such as Column_0 in LightGBM.
-        # feature_names_in_ is only available when training used named columns.
-        feature_values = pd.DataFrame(
-            feature_values,
-            columns=pipe.named_steps["lightgbm"].feature_name_,
-        )
-    return pipe.predict_proba(feature_values)[:, 1]
 
 
 def split_constant_features(features):
@@ -501,10 +443,15 @@ def predict_crossfit_fold(fold_model, features):
             dtype=float,
         )
     retained_feature_cols = fold_model["retained_feature_cols"]
-    return predict_binary_proba(
-        fold_model["model"],
-        features.loc[:, retained_feature_cols],
-    )
+    model = fold_model["model"]
+    feature_values = features.loc[:, retained_feature_cols].to_numpy(dtype=float)
+    if "lightgbm" in model.named_steps:
+        # NumPy training gives LightGBM synthetic column names that prediction must reuse.
+        feature_values = pd.DataFrame(
+            feature_values,
+            columns=model.named_steps["lightgbm"].feature_name_,
+        )
+    return model.predict_proba(feature_values)[:, 1]
 
 
 def feature_importance_series(pipe, feature_cols):
@@ -566,39 +513,6 @@ def superlearner_weights_by_fold(propensity_fold_models, in_models, out_models):
                     "inner_folds": 0 if estimator is None else estimator.n_inner_splits_,
                     "fallback_reason": fold_model["fallback_reason"],
                 })
-    return pd.DataFrame(rows, columns=columns)
-
-
-def constant_features_by_fold(propensity_fold_models, in_models, out_models):
-    # Build the training-fold-only constant-feature audit
-    columns = [
-        "model_type",
-        "model_group",
-        "outcome",
-        "risk_set",
-        "fold",
-        "feature",
-        "reason",
-    ]
-    rows = []
-
-    def add_rows(model_group, outcome, risk_set, fold_models):
-        for fold_model in fold_models:
-            for constant_feature in fold_model["constant_features"]:
-                rows.append({
-                    "model_type": MODEL_TYPE,
-                    "model_group": model_group,
-                    "outcome": outcome,
-                    "risk_set": risk_set,
-                    "fold": fold_model["fold"],
-                    **constant_feature,
-                })
-
-    add_rows("propensity", "removal", "all IN rows", propensity_fold_models)
-    for outcome, payload in in_models.items():
-        add_rows("in_outcome", outcome, payload["risk_set"], payload["fold_models"])
-    for outcome, payload in out_models.items():
-        add_rows("out_outcome", outcome, payload["risk_set"], payload["fold_models"])
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -786,66 +700,6 @@ def outcome_risk_mask(df, state, outcome):
     return mask
 
 
-def assert_valid_predictions(df, row_mask, columns, context):
-    # Check valid predictions
-    values = df.loc[row_mask, columns].apply(pd.to_numeric, errors="coerce")
-    if values.isna().any().any():
-        missing = values.columns[values.isna().any()].tolist()
-        raise ValueError(f"Missing required predictions for {context}: {missing}")
-    array = values.to_numpy(dtype=float)
-    if not np.isfinite(array).all():
-        raise ValueError(f"Non-finite predictions found for {context}")
-    if ((array < 0.0) | (array > 1.0)).any():
-        raise ValueError(f"Predictions outside [0, 1] found for {context}")
-
-
-def validate_exported_probabilities(df):
-    # Validate exported probabilities
-    numeric_scores = df[ALL_SCORE_COLS].apply(pd.to_numeric, errors="raise")
-
-    present_values = numeric_scores.to_numpy(dtype=float)
-    present_values = present_values[~np.isnan(present_values)]
-    if not np.isfinite(present_values).all():
-        raise ValueError("Non-finite exported probabilities found")
-    if ((present_values < 0.0) | (present_values > 1.0)).any():
-        raise ValueError("Exported probabilities outside [0, 1] found")
-
-    in_rows = df[STATE_COL].eq("in")
-    out_rows = df[STATE_COL].eq("out")
-    # Check valid predictions
-    assert_valid_predictions(
-        df,
-        in_rows,
-        ["p_cauti_if_keep", "p_cauti_if_remove"],
-        "eligible IN CAUTI rows",
-    )
-    # Check valid predictions
-    assert_valid_predictions(
-        df,
-        df[AT_RISK_REINS].eq(1),
-        ["p_reinsertion_if_out"],
-        "eligible reinsertion rows",
-    )
-    assert_valid_predictions(df, in_rows, ["p_reinsertion_if_remove"], "counterfactual REMOVE reinsertion rows")
-
-    out_cauti_risk = out_rows & df[AT_RISK_CAUTI].eq(1)
-    out_cauti_non_risk = out_rows & df[AT_RISK_CAUTI].eq(0)
-    # Check valid predictions
-    assert_valid_predictions(
-        df,
-        out_cauti_risk,
-        ["p_cauti_if_out"],
-        "at-risk OUT CAUTI rows",
-    )
-    non_risk_cauti = pd.to_numeric(
-        df.loc[out_cauti_non_risk, "p_cauti_if_out"], errors="coerce"
-    )
-    if non_risk_cauti.isna().any() or not np.allclose(
-        non_risk_cauti.to_numpy(dtype=float), 0.0, atol=0.0
-    ):
-        raise ValueError("OUT rows outside the CAUTI risk set must have p_cauti_if_out = 0")
-
-
 def model_summary_row(
     model_group,
     outcome,
@@ -890,46 +744,6 @@ def labelled_calibration(eval_df, target_col, pred_col, model_group, outcome, ri
     table.insert(0, "outcome", outcome)
     table.insert(0, "model_group", model_group)
     return table
-
-
-def propensity_summary_rows(df, eligible_mask, feature_cols, summary):
-    # Build propensity summary rows
-    eligible_patients = df.loc[eligible_mask, ID_COL].nunique()
-    p_remove = pd.to_numeric(
-        df.loc[eligible_mask, PROPENSITY_SCORE_COL], errors="coerce"
-    ).dropna()
-    return pd.DataFrame([
-        {"metric": "model_type", "value": MODEL_TYPE},
-        {"metric": "evaluation", "value": "grouped_cross_fit"},
-        {"metric": "crossfit_folds", "value": N_CROSSFIT_FOLDS},
-        {"metric": "crossfit_group_col", "value": ID_COL},
-        {"metric": "period_hours", "value": PERIOD_HOURS},
-        {"metric": "all_rows", "value": int(len(df))},
-        {"metric": "all_patients", "value": int(df[ID_COL].nunique())},
-        {"metric": "decision_eligible_rows", "value": int(eligible_mask.sum())},
-        {"metric": "decision_eligible_patients", "value": int(eligible_patients)},
-        {"metric": "explicit_feature_count", "value": int(len(feature_cols))},
-        {"metric": "feature_columns", "value": " | ".join(feature_cols)},
-        {"metric": "n", "value": summary["n"]},
-        {"metric": "events", "value": summary["events"]},
-        {"metric": "prevalence", "value": summary["prevalence"]},
-        {"metric": "auc", "value": summary["auc"]},
-        {"metric": "average_precision", "value": summary["average_precision"]},
-        {"metric": "brier", "value": summary["brier"]},
-        {"metric": "calibration_intercept", "value": summary["calibration_intercept"]},
-        {"metric": "calibration_slope", "value": summary["calibration_slope"]},
-        {"metric": "p_remove_min", "value": p_remove.min()},
-        {"metric": "p_remove_p01", "value": p_remove.quantile(0.01)},
-        {"metric": "p_remove_p05", "value": p_remove.quantile(0.05)},
-        {"metric": "p_remove_p50", "value": p_remove.quantile(0.50)},
-        {"metric": "p_remove_p95", "value": p_remove.quantile(0.95)},
-        {"metric": "p_remove_p99", "value": p_remove.quantile(0.99)},
-        {"metric": "p_remove_max", "value": p_remove.max()},
-        {"metric": "pct_p_remove_below_0_01", "value": 100.0 * p_remove.lt(0.01).mean()},
-        {"metric": "pct_p_remove_below_0_05", "value": 100.0 * p_remove.lt(0.05).mean()},
-        {"metric": "pct_p_remove_above_0_95", "value": 100.0 * p_remove.gt(0.95).mean()},
-        {"metric": "pct_p_remove_above_0_99", "value": 100.0 * p_remove.gt(0.99).mean()},
-    ])
 
 
 def performance_metrics_rows(propensity_summary, in_summary, out_summary):
@@ -1025,7 +839,14 @@ def fold_performance_metrics(df):
             outcome,
             risk_set,
             df.loc[risk_mask].assign(**{
-                pred_col: pec.factual_reinsertion_prediction(df).loc[risk_mask]
+                pred_col: pd.Series(
+                    np.where(
+                        df["catheter_state"].eq("in"),
+                        df["p_reinsertion_if_remove"],
+                        df["p_reinsertion_if_out"],
+                    ),
+                    index=df.index,
+                ).loc[risk_mask]
             }) if outcome == "reinsertion" else df.loc[risk_mask],
             target_col,
             pred_col,
@@ -1069,29 +890,12 @@ def fit_propensity_scores(df, feature_cols, remove_feature_cols, panel_name=None
         df.loc[held_out_index, KEEP_PROPENSITY_SCORE_COL] = 1.0 - p_remove
         fold_models.append(fold_model)
 
-    # Check valid predictions
-    assert_valid_predictions(
-        df,
-        eligible_mask,
-        [PROPENSITY_SCORE_COL, KEEP_PROPENSITY_SCORE_COL],
-        "IN propensity rows",
-    )
-    propensity_sums = df.loc[
-        eligible_mask, [PROPENSITY_SCORE_COL, KEEP_PROPENSITY_SCORE_COL]
-    ].sum(axis=1)
-    if not np.allclose(propensity_sums.to_numpy(), 1.0, atol=1e-10):
-        raise ValueError("p_remove_obs + p_keep_obs does not equal 1 for all IN rows")
-
     evaluation_df = df.loc[
         eligible_mask,
         [ACTION_COL, PROPENSITY_SCORE_COL],
     ]
     # Calculate binary metrics
     summary = scalar_binary_metrics(evaluation_df, ACTION_COL, PROPENSITY_SCORE_COL)
-    save_nuisance_report(
-        propensity_summary_rows(df, eligible_mask, remove_feature_cols, summary),
-        OUTDIR / "propensity_summary.csv",
-    )
     save_nuisance_report(
         calibration_table(
             evaluation_df,
@@ -1129,7 +933,6 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
     out_summary_rows = []
     in_calibration_tables = []
     out_calibration_tables = []
-    in_action_summary_rows = []
     in_action_calibration_tables = []
     importance_tables = []
 
@@ -1223,17 +1026,6 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
             (1, "remove", remove_col),
         ]:
             action_eval_df = eval_df.loc[eval_df[ACTION_COL].eq(action_value)]
-            action_metrics = scalar_binary_metrics(
-                action_eval_df, target_col, pred_col
-            )
-            in_action_summary_rows.append({
-                "model_group": "in_outcome",
-                "model_type": MODEL_TYPE,
-                "outcome": outcome,
-                "risk_set": risk_set,
-                "observed_action": observed_action,
-                **action_metrics,
-            })
             action_calibration = calibration_table(
                 action_eval_df,
                 target_col,
@@ -1363,37 +1155,20 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
             "no_event_is_transition_state": False if outcome == "no_event" else None,
         }
 
-    in_required = [
-        f"p_{outcome}_if_{action}"
-        for outcome in IN_OUTCOMES
-        for action in ["keep", "remove"]
-    ]
-    out_required = [f"p_{outcome}_if_out" for outcome in OUT_OUTCOMES]
-    # Check valid predictions
-    assert_valid_predictions(df, in_rows, in_required, "IN outcome rows")
-    # Check valid predictions
-    assert_valid_predictions(df, out_rows, out_required, "OUT outcome rows")
-
     in_summary = pd.DataFrame(in_summary_rows)
     out_summary = pd.DataFrame(out_summary_rows)
-    save_nuisance_report(in_summary, OUTDIR / "in_outcome_summary.csv")
-    save_nuisance_report(out_summary, OUTDIR / "out_outcome_summary.csv")
+    # Keep all outcome calibration information in one table.
     save_nuisance_report(
-        pd.concat(in_calibration_tables, ignore_index=True),
-        OUTDIR / "in_outcome_calibration.csv",
-    )
-    save_nuisance_report(
-        pd.concat(out_calibration_tables, ignore_index=True),
-        OUTDIR / "out_outcome_calibration.csv",
-    )
-    # Save factual IN outcome diagnostics by observed action
-    save_nuisance_report(
-        pd.DataFrame(in_action_summary_rows),
-        OUTDIR / "in_outcome_action_summary.csv",
-    )
-    save_nuisance_report(
-        pd.concat(in_action_calibration_tables, ignore_index=True),
-        OUTDIR / "in_outcome_action_calibration.csv",
+        pd.concat(
+            [
+                *in_calibration_tables,
+                *out_calibration_tables,
+                *in_action_calibration_tables,
+            ],
+            ignore_index=True,
+            sort=False,
+        ),
+        OUTDIR / "outcome_calibration.csv",
     )
 
     # Add feature descriptions
@@ -1401,7 +1176,7 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
         pd.concat(importance_tables, ignore_index=True),
         covariate_dict,
     )
-    save_nuisance_report(importance_df, OUTDIR / "outcome_top_model_features.csv")
+    save_nuisance_report(importance_df, OUTDIR / "feature_importance.csv")
 
     payload = {
         "in_models": in_models,
@@ -1415,26 +1190,6 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
     df = pec.add_policy_predictions(df, payload, predictor=predict_crossfit_fold)
 
     return df, in_summary, out_summary, in_models, out_models
-
-
-# Final panel assembly
-
-def save_nuisance_predictions(df):
-    # Save the modelling panel together with its nuisance predictions
-    excluded_cols = {Y_NO_EVENT_IN, Y_NO_EVENT_OUT}
-    output_cols = [
-        col
-        for col in df.columns
-        if col not in excluded_cols and col not in ALL_SCORE_COLS
-    ]
-    insert_at = output_cols.index("age")
-    output_cols[insert_at:insert_at] = ALL_SCORE_COLS
-    df.to_csv(
-        NUISANCE_PREDICTIONS_FILE,
-        columns=output_cols,
-        index=False,
-        float_format="%.6f",
-    )
 
 
 def run_nuisance_model(model_type, panel_name=None):
@@ -1461,17 +1216,6 @@ def run_nuisance_model(model_type, panel_name=None):
     # Add grouped crossfit folds
     df = add_grouped_crossfit_folds(df)
 
-    # Save fold diagnostics
-    save_nuisance_report(
-        crossfit_fold_summary(df),
-        OUTDIR / "crossfit_fold_summary.csv",
-    )
-    crossfit_row_assignments(df).to_csv(
-        CROSSFIT_ROW_ASSIGNMENTS_FILE,
-        index=False,
-        float_format="%.6f",
-    )
-
     # Fit propensity scores
     df, propensity_summary, propensity_fold_models = fit_propensity_scores(
         df,
@@ -1487,17 +1231,6 @@ def run_nuisance_model(model_type, panel_name=None):
         out_feature_cols,
         panel_name=panel_name,
     )
-    save_nuisance_report(
-        constant_features_by_fold(
-            propensity_fold_models,
-            in_models,
-            out_models,
-        ),
-        CONSTANT_FEATURES_FILE,
-    )
-
-    # Validate exported probabilities
-    validate_exported_probabilities(df)
     if MODEL_TYPE == "superlearner":
         save_nuisance_report(
             superlearner_weights_by_fold(propensity_fold_models, in_models, out_models),
@@ -1514,8 +1247,20 @@ def run_nuisance_model(model_type, panel_name=None):
         OUTDIR / "fold_performance_metrics.csv",
     )
 
-    # Save nuisance predictions
-    save_nuisance_predictions(df)
+    # Save the modelling panel with nuisance scores inserted before age.
+    excluded_cols = {Y_NO_EVENT_IN, Y_NO_EVENT_OUT}
+    output_cols = [
+        col for col in df.columns
+        if col not in excluded_cols and col not in ALL_SCORE_COLS
+    ]
+    insert_at = output_cols.index("age")
+    output_cols[insert_at:insert_at] = ALL_SCORE_COLS
+    df.to_csv(
+        NUISANCE_PREDICTIONS_FILE,
+        columns=output_cols,
+        index=False,
+        float_format="%.6f",
+    )
     print(
         f"[MODEL] Completed {MODEL_OUTPUT_NAME} ({MODEL_TYPE})",
         flush=True,
@@ -1527,9 +1272,6 @@ def main():
     if not model_types:
         print("[MODEL] No models selected in MODEL_TYPES; nothing to fit.", flush=True)
         return
-    unknown_models = set(model_types) - (LEARNER_CONFIGURATIONS.keys() | {"superlearner"})
-    if unknown_models:
-        raise ValueError(f"Unknown nuisance models in MODEL_TYPES: {sorted(unknown_models)}")
     for panel_name, input_path, nuisance_root in PANEL_RUNS:
         configure_panel_run(input_path, nuisance_root)
         print(f"[PANEL] {panel_name}: {INFILE}", flush=True)

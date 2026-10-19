@@ -1,8 +1,10 @@
 # Recursive longitudinal Policy-DML
 
 `evaluate_policy_dml_policies.py` implements the recursive estimator described
-in CoR Section 3.5 and Appendix B.2. It operates directly on the same modelling
-panels and nuisance-model conventions used elsewhere in the pipeline.
+in CoR Section 3.5 and Appendix B.2. It reads the modelling panel, shared
+fixed-day policy panels, and nuisance predictions. Decision preparation,
+continuation fitting, recursive scoring, diagnostics and bootstrap reporting
+are defined in this evaluator. Settings and policy definitions use dictionaries.
 
 ## Estimator mapping
 
@@ -17,8 +19,14 @@ panels and nuisance-model conventions used elsewhere in the pipeline.
 | `Delta = V(pi) - V(current)` | Summary and bootstrap contrasts use current practice as the paired comparator. |
 
 The default continuation learner is Extra Trees with 100 trees using all
-available processors; Ridge and Random Forest are available. Scores are not
-clipped to `[0, 1]`.
+available processors; Ridge, Random Forest and XGBoost are available. Select
+`"xgboost"` in `POLICY_DML_CONTINUATION_LEARNER` to use squared-error regression
+with CPU histogram trees. Each learner's parameters are in the evaluator's
+`LEARNER_CONFIGURATIONS` dictionary, following the nuisance fitting script's
+layout. `LEARNER_PREPROCESSING` controls imputation and standardisation. XGBoost
+uses native missing-value handling; Ridge uses median imputation and
+standardisation; the forests use median imputation. Scores are not clipped
+to `[0, 1]`.
 
 ## Cross-fitting and nuisance models
 
@@ -41,17 +49,24 @@ and unexplained censoring. CAUTI uses the 48-hour post-removal window.
 
 Current practice is the cross-fitted stochastic behaviour policy
 `pi_current(a|S)=g_hat(a|S)`. Fixed-day policies remove at the first available
-IN decision on or after the requested day. `configured_policies` builds them
-directly from `pipeline_config.POLICY_DAYS`.
+IN decision on or after the requested day. The shared policy panels provide
+these instructions in `policy_dml_action`, including on observed IN rows after
+the requested day. The g-formula `policy_action` instead describes the policy
+trajectory, which is OUT after removal. Current practice uses the fitted
+behaviour probabilities.
 
-The configured evaluation horizon is 30 days (720 hours) for the real panel and
+The configured evaluation horizon is 30 days (720 hours) for the observed panel and
 14 days (336 hours) for each semi-synthetic panel. Decisions and linked outcomes
 after the corresponding boundary do not contribute. Complete-episode g-formula
 estimates need the same cutoff before comparison. The simulator exports matching
 semi-synthetic CAUTI reference values by panel in
-`known_truth_policy_values_policy_dml.csv`, including the horizon. Before fitting, the
+`known_truth_policy_dml.csv`, including the horizon. Before fitting, the
 evaluator checks that every required period has training trajectories in each
 outer and inner split, so unsupported tails fail before expensive model fits.
+Run choices (panels, bootstrap modes, horizons, continuation learner and
+bootstrap count) are read from `pipeline_config.py`. Technical fitting settings
+are in the evaluator's `SETTINGS`, `LEARNER_CONFIGURATIONS` and
+`LEARNER_PREPROCESSING` dictionaries.
 
 Semi-synthetic episodes can also end at an explicitly recorded fixed
 `simulation_end_time`. A `simulation_horizon` endpoint must match that schedule
@@ -76,20 +91,19 @@ is printed every five replicates and at completion.
 
 ## Outputs
 
-Files below `policy_eval/policy_dml/{fixed,refit}/` are:
+Files below `artefacts/results/<panel>/policy_dml/<fixed or refit>/` are:
 
 | File | Content |
 | --- | --- |
-| `policy_dml_policy_outcomes_summary.csv` | Policy values, contrasts, and cohort counts. |
-| `policy_dml_episode_scores.csv` | One score row per policy and episode. |
-| `policy_dml_decision_scores.csv` | Rewards, Q values, recursive scores, probabilities, ratios, and model IDs. |
-| `policy_dml_model_audit.json` | Compact fold and model ownership metadata. |
-| `policy_dml_run_metadata.json` | Settings, policy interpretation, seeds, and saved-behaviour source. |
-| `policy_dml_support_diagnostics.csv` | Support, weights, clipping, agreement, and effective sample sizes. |
-| `policy_dml_clipping_sensitivity.csv` | Optional results for configured clipping alternatives. |
-| `confidence_intervals/policy_dml_bootstrap_replicate_estimates.csv` | Policy values, paired differences, and draw counts. |
-| `confidence_intervals/policy_dml_policy_value_confidence_intervals.csv` | Percentile intervals for policy values. |
-| `confidence_intervals/policy_dml_policy_difference_confidence_intervals.csv` | Percentile intervals for paired contrasts. |
+| `policy_values.csv` | Point estimates and percentile intervals for each policy value. |
+| `policy_differences.csv` | Point estimates and percentile intervals for contrasts with current practice. |
+| `diagnostics.csv` | Support, weights, clipping, agreement, and effective sample sizes. |
+| `run_settings.json` | Estimator settings, selected continuation parameters and preprocessing, seeds, horizon, and saved-behaviour source. |
+| `clipping_sensitivity.csv` | Optional results for configured clipping alternatives. |
+
+Episode scores, decision scores, individual bootstrap draws, and per-model
+audit records are used during estimation but are not saved. They duplicated
+the result tables or produced very large files without being pipeline inputs.
 
 ## Running and testing
 

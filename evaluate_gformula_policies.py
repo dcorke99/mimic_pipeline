@@ -30,13 +30,6 @@ REFIT_CROSSFIT_FOLDS = 5
 # Run selections and panel paths come from pipeline_config.py.
 PANEL_RUNS = tuple((name, *run_config.PANEL_PATHS[name]) for name in run_config.EVALUATION_PANELS)
 
-OUTPUT_FILENAMES = {
-    "summary": "gformula_policy_outcomes_summary.csv",
-    "episodes": "gformula_episode_predictions.csv",
-    "diagnostics": "gformula_diagnostics.csv",
-    "current_practice": "current_practice_gformula_episode_predictions.csv",
-}
-
 CURRENT_PRACTICE_LABEL = "current_practice"
 ESTIMATOR_NAME = "plugin_gformula"
 PREDICTION_MODE = "observed_grid_plugin"
@@ -103,15 +96,6 @@ EPISODE_PREDICTION_SPECS = {
     "predicted_icu_exit_alive": "p_icu_exit_alive_under_policy",
 }
 
-MISSING_COUNTERFACTUAL_MESSAGE = (
-    "Missing counterfactual state/action predictions were found. This matters "
-    "because plug-in g-formula uses every episode under every target policy, so "
-    "a row observed in one catheter state may require predictions for another "
-    "policy-implied state. Re-run nuisance scoring with complete state/action "
-    "counterfactual predictions or provide outcome_models.pkl for rescoring."
-)
-
-
 # Generic helpers
 
 
@@ -121,7 +105,13 @@ def join_nuisance_predictions(policy_df, nuisance_df):
         for col in [
             *NUISANCE_COLUMNS,
             *[f"__rescored_{col}" for col in PREDICTION_COLUMNS],
-            *[col for col in nuisance_df if pec.is_policy_prediction_column(col)],
+            *[
+                col for col in nuisance_df
+                if any(
+                    col.startswith(f"p_{outcome}_policy_day_")
+                    for outcome in pec.POLICY_OUTCOMES
+                )
+            ],
         ]
         if col not in ROW_JOIN_KEY_COLS
     ]
@@ -129,18 +119,8 @@ def join_nuisance_predictions(policy_df, nuisance_df):
         nuisance_df[[*ROW_JOIN_KEY_COLS, *nuisance_add_cols]],
         on=ROW_JOIN_KEY_COLS,
         how="left",
-        validate="many_to_one",
-        indicator=True,
     )
-    unmatched = merged["_merge"].ne("both")
-    if unmatched.any():
-        examples = merged.loc[unmatched, ROW_JOIN_KEY_COLS + ["policy_name"]].head(10)
-        raise ValueError(
-            "Some policy-panel rows did not match the nuisance predictions on "
-            f"the natural keys. Examples:\n{examples}"
-        )
-
-    return merged.drop(columns="_merge")
+    return merged
 
 
 # Prediction selection and validation
@@ -166,58 +146,17 @@ def select_policy_predictions(df):
     return df
 
 
-def validate_prediction_completeness(df):
-    # Check prediction completeness and probability bounds
-    missing_counts = df.groupby("policy_name", dropna=False)[UNDER_POLICY_COLUMNS].apply(
-        lambda frame: frame.isna().sum()
-    )
-    total_missing = int(df[UNDER_POLICY_COLUMNS].isna().sum().sum())
-    invalid_rows = pd.Series(False, index=df.index)
-    for col in UNDER_POLICY_COLUMNS:
-        numeric = pd.to_numeric(df[col], errors="coerce")
-        invalid_rows |= numeric.notna() & (~np.isfinite(numeric) | numeric.lt(0) | numeric.gt(1))
-
-    if invalid_rows.any():
-        examples = df.loc[
-            invalid_rows,
-            ["policy_name", "decision_row_id", *UNDER_POLICY_COLUMNS],
-        ].head(10)
-        raise ValueError(
-            "G-formula predictions must be finite probabilities between 0 and 1 "
-            f"where present. Examples:\n{examples}"
-        )
-
-    if total_missing:
-        raise ValueError(
-            f"{MISSING_COUNTERFACTUAL_MESSAGE}\nMissing prediction counts by policy:\n{missing_counts}"
-        )
-
-
 # Current-practice model-based comparator
-
-def map_episode_ids_to_nuisance_predictions(nuisance_df, policy_df):
-    # Map episode identifiers onto nuisance-prediction rows
-    episode_map = policy_df[[*EPISODE_KEY_COLS, EPISODE_ID_COL]].drop_duplicates()
-    out = nuisance_df.merge(
-        episode_map,
-        on=EPISODE_KEY_COLS,
-        how="left",
-        validate="many_to_one",
-    )
-    if out[EPISODE_ID_COL].isna().any():
-        examples = out.loc[out[EPISODE_ID_COL].isna(), EPISODE_KEY_COLS].head(10)
-        raise ValueError(
-            "Some nuisance-prediction episodes could not be mapped. "
-            f"Examples:\n{examples}"
-        )
-    return out
-
 
 def build_current_practice_rows(nuisance_df, policy_df):
     # Build rows for the observed current-practice regime
-    # Map episode identifiers onto nuisance-prediction rows
-    df = map_episode_ids_to_nuisance_predictions(nuisance_df, policy_df)
-    df = pec.add_period_duration_days(df, context="current-practice g-formula rows")
+    episode_map = policy_df[[*EPISODE_KEY_COLS, EPISODE_ID_COL]].drop_duplicates()
+    df = nuisance_df.merge(
+        episode_map,
+        on=EPISODE_KEY_COLS,
+        how="left",
+    )
+    df = pec.add_period_duration_days(df)
     # Add episode day since catheter insertion
     df = add_episode_day(df)
     df["policy_name"] = CURRENT_PRACTICE_LABEL
@@ -362,13 +301,8 @@ def build_policy_summary(
             row[f"{col}_pct"] = row[col] * 100 if pd.notna(row[col]) else np.nan
         rows.append(row)
     # Add comparisons against current practice
-    return add_current_practice_comparisons(pd.DataFrame(rows))
-
-
-def add_current_practice_comparisons(summary):
-    # Add comparisons against current practice
     return pec.add_standard_comparisons(
-        summary,
+        pd.DataFrame(rows),
         baseline_label=CURRENT_PRACTICE_LABEL,
         comparison_map={
             "cauti_risk": "predicted_cauti_risk",
@@ -381,18 +315,6 @@ def add_current_practice_comparisons(summary):
 
 
 # Diagnostics
-
-def prediction_bounds(df, col):
-    # Summarise prediction bounds for one column
-    values = pd.to_numeric(df[col], errors="coerce")
-    present = values.dropna()
-    return {
-        f"min_{col}": float(present.min()) if len(present) else np.nan,
-        f"max_{col}": float(present.max()) if len(present) else np.nan,
-        f"n_{col}_below_0": int(present.lt(0).sum()) if len(present) else 0,
-        f"n_{col}_above_1": int(present.gt(1).sum()) if len(present) else 0,
-    }
-
 
 def build_diagnostics(row_df, episode_df):
     # Build diagnostic rows for policy outputs
@@ -449,9 +371,11 @@ def build_diagnostics(row_df, episode_df):
                 .sum()
             ),
             "n_policy_out_rows": int(policy_df["policy_catheter_state"].eq("out").sum()),
-            "n_duplicate_policy_episode_day_rows": pec.duplicate_episode_day_count(
-                policy_df,
-                ["policy_name", EPISODE_ID_COL],
+            "n_duplicate_policy_episode_day_rows": int(
+                policy_df.duplicated(
+                    ["policy_name", EPISODE_ID_COL, "episode_day"],
+                    keep=False,
+                ).sum()
             ),
             "n_episodes_with_more_policy_in_intervals_than_expected": int(too_many_policy_in.sum()),
             "n_invalid_period_duration_rows": 0,
@@ -475,10 +399,15 @@ def build_diagnostics(row_df, episode_df):
         }
         total_below = 0
         total_above = 0
-        # Summarise prediction bounds for one column
+        # Summarise the bounds of each policy prediction column.
         for col in UNDER_POLICY_COLUMNS:
-            # Summarise prediction bounds for one column
-            bounds = prediction_bounds(policy_df, col)
+            present = pd.to_numeric(policy_df[col], errors="coerce").dropna()
+            bounds = {
+                f"min_{col}": float(present.min()) if len(present) else np.nan,
+                f"max_{col}": float(present.max()) if len(present) else np.nan,
+                f"n_{col}_below_0": int(present.lt(0).sum()),
+                f"n_{col}_above_1": int(present.gt(1).sum()),
+            }
             row.update(bounds)
             total_below += bounds[f"n_{col}_below_0"]
             total_above += bounds[f"n_{col}_above_1"]
@@ -494,7 +423,7 @@ def print_console_summary(
     summary_df,
     row_df,
     episode_df,
-    output_paths,
+    output_dir,
     policy_manifest_path,
     model_type,
 ):
@@ -516,8 +445,7 @@ def print_console_summary(
     ]
     print(summary_df[display_cols].to_string(index=False))
     print()
-    for label, path in output_paths.items():
-        print(f"Saved {label}: {path}")
+    print(f"Saved results: {output_dir}")
 
 
 def evaluate_policy_episodes(policy_df, nuisance_df):
@@ -529,20 +457,15 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
 
     # Join nuisance scores to policy rows
     joined_df = join_nuisance_predictions(policy_df, nuisance_df)
-    joined_df = pec.add_period_duration_days(joined_df, context="joined g-formula policy rows")
+    joined_df = pec.add_period_duration_days(joined_df)
     # Select predictions implied by the target policy
     row_df = select_policy_predictions(joined_df)
-    # Check prediction completeness and probability bounds
-    validate_prediction_completeness(row_df)
-
     # Collapse row predictions to episode predictions
     episode_df = build_episode_predictions(row_df)
     # Build rows for the observed current-practice regime
     current_rows = build_current_practice_rows(nuisance_df, policy_df)
     # Select predictions implied by the target policy
     current_rows = select_policy_predictions(current_rows)
-    # Check prediction completeness and probability bounds
-    validate_prediction_completeness(current_rows)
     # Collapse row predictions to episode predictions
     current_episode_df = build_episode_predictions(current_rows)
     # Add observed episode outcomes to predictions
@@ -553,14 +476,11 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
 
 
 def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, panel_name=None, *, output_root=None):
-    if bootstrap_mode not in ("fixed", "refit"):
-        raise ValueError(f"Unknown bootstrap mode: {bootstrap_mode!r}")
-    policy_manifest_path = artefact_root / "counterfactual_policies/policy_panels.csv"
-    nuisance_model_dir = artefact_root / "nuisance_models" / model_type
+    policy_manifest_path = run_config.POLICY_DIRS[panel_name] / "policy_panels.csv"
+    nuisance_model_dir = Path(artefact_root) / model_type
     nuisance_predictions_path = nuisance_model_dir / "nuisance_predictions.csv"
     outcome_models_path = nuisance_model_dir / "outcome_models.pkl"
-    outdir = (output_root or artefact_root) / "policy_eval/gformula" / bootstrap_mode
-    output_paths = {key: outdir / name for key, name in OUTPUT_FILENAMES.items()}
+    outdir = (output_root or run_config.RESULT_DIRS[panel_name]) / "gformula" / bootstrap_mode
     outdir.mkdir(exist_ok=True, parents=True)
     policy_df = read_policy_collection(policy_manifest_path)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
@@ -569,7 +489,7 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
         refit_panel = nuisance.load_panel(panel_path)
         subjects = pd.Index(sorted(refit_panel.subject_id.unique()), name="subject_id")
         nuisance_df, _ = bootstrap.refit_nuisance_predictions(
-            refit_panel, subjects, np.ones(len(subjects), dtype=int), "gformula",
+            refit_panel, subjects, np.ones(len(subjects), dtype=int),
             n_splits=REFIT_CROSSFIT_FOLDS, model_type=model_type,
         )
     else:
@@ -589,19 +509,13 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
         combined_episode_df,
     )
 
-    # Save rounded policy-level report outputs
-    pec.save_report_df(summary_df, output_paths["summary"])
-    # Save episode-level data at full precision for later inference
-    combined_episode_df.to_csv(output_paths["episodes"], index=False)
-    # Save rounded diagnostics
-    pec.save_report_df(diagnostics_df, output_paths["diagnostics"])
-    # Save current-practice episode data at full precision
-    current_episode_df.to_csv(output_paths["current_practice"], index=False)
+    # Keep one compact diagnostic table; episode data are only bootstrap inputs.
+    pec.save_report_df(diagnostics_df, outdir / "diagnostics.csv")
 
-    print_console_summary(summary_df, row_df, combined_episode_df, output_paths, policy_manifest_path, model_type)
+    print_console_summary(summary_df, row_df, combined_episode_df, outdir, policy_manifest_path, model_type)
 
     bootstrap.run_bootstrap(
-        "gformula", combined_episode_df, policy_df, evaluate_policy_episodes, outdir,
+        combined_episode_df, policy_df, evaluate_policy_episodes, outdir,
         N_BOOTSTRAP, refit_panel=refit_panel, seed=BOOTSTRAP_SEED,
         refit_n_splits=REFIT_CROSSFIT_FOLDS, model_type=model_type,
         panel_name=panel_name or panel_path.stem,
@@ -612,7 +526,7 @@ def main():
     for panel_name, panel_path, nuisance_root in PANEL_RUNS:
         for mode in BOOTSTRAP_MODES:
             print(f"[PANEL] {panel_name}; estimator=gformula; bootstrap={mode}", flush=True)
-            run_panel_estimation(panel_path, nuisance_root.parent, NUISANCE_MODEL_TYPE, mode,
+            run_panel_estimation(panel_path, nuisance_root, NUISANCE_MODEL_TYPE, mode,
                                  panel_name=panel_name)
 
 

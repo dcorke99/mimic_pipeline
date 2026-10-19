@@ -18,21 +18,6 @@ def paired_differences(values, entries):
     return np.asarray(values) - np.asarray(values)[..., indices]
 
 
-def bootstrap_replicate_table(entries, values, diagnostics):
-    columns = [
-        f"{row.policy_name}__{row.outcome}__{estimate_type}"
-        for row in entries.itertuples(index=False)
-        for estimate_type in ("policy_value", "difference_vs_current_practice")
-    ]
-    estimates = np.stack([values, paired_differences(values, entries)], axis=2)
-    table = pd.concat([
-        diagnostics.reset_index(drop=True),
-        pd.DataFrame(estimates.reshape(len(values), len(columns)), columns=columns),
-    ], axis=1)
-    table["catheter_exposure_measure"] = pec.EXPOSURE_MEASURE
-    return table
-
-
 def interval_table(entries, point, bootstrap, n_patients):
     table = entries.copy()
     table["point_estimate"] = point

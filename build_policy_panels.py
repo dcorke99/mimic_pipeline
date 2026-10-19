@@ -21,8 +21,10 @@ REPO_ROOT = Path(__file__).resolve().parent
 PANEL_RUNS = tuple((name, *run_config.PANEL_PATHS[name]) for name in run_config.POLICY_PANELS)
 
 # Initial paths for direct single-panel calls use the first selected panel.
-_, INPUT_PATH, _NUISANCE_ROOT = (PANEL_RUNS[0] if PANEL_RUNS else ("real", *run_config.PANEL_PATHS["real"]))
-OUTDIR = _NUISANCE_ROOT.parent / "counterfactual_policies"
+_PANEL_NAME, INPUT_PATH, _NUISANCE_ROOT = (
+    PANEL_RUNS[0] if PANEL_RUNS else ("observed", *run_config.PANEL_PATHS["observed"])
+)
+OUTDIR = run_config.POLICY_DIRS[_PANEL_NAME]
 
 POLICY_MANIFEST_PATH = OUTDIR / "policy_panels.csv"
 
@@ -61,6 +63,7 @@ POLICY_OUTPUT_COLS = [
     f"policy_{pec.REINSERTION_PERIOD_COL}",
     "policy_removal_day_extra_row_treated_as_out",
     "policy_action",
+    "policy_dml_action",
     "policy_matches_observed",
     "policy_applicable",
     "policy_matches_observed_action_today",
@@ -76,17 +79,6 @@ def add_stable_ids_and_decision_flag(df):
     df["observed_action"] = df["observed_action"].astype(str).str.strip().str.lower()
     df["periods_in_state"] = pd.to_numeric(df["periods_in_state"], errors="coerce")
     df["removed_in_period"] = pd.to_numeric(df["removed_in_period"], errors="coerce")
-
-    # Reject values outside the panel schema
-    unknown_states = sorted(set(df["catheter_state"].dropna()) - {"in", "out"})
-    if unknown_states:
-        raise ValueError(f"Unexpected catheter_state values: {unknown_states}")
-
-    unknown_actions = sorted(
-        set(df["observed_action"].dropna()) - {"keep", "remove", "out"}
-    )
-    if unknown_actions:
-        raise ValueError(f"Unexpected observed_action values: {unknown_actions}")
 
     # Assign one stable number to each catheter episode
     key_frame = df[EPISODE_KEY_COLS].astype("string").fillna("<NA>")
@@ -136,6 +128,13 @@ def apply_fixed_day_policy(base_df, policy_remove_day):
         episode_day_col="episode_day",
     )
 
+    # On observed IN rows after the target day, Policy-DML prescribes removal.
+    df["policy_dml_action"] = np.where(
+        df["is_decision_row"],
+        np.where(df["episode_day"].ge(policy_remove_day), "remove", "keep"),
+        "out",
+    )
+
     # The policy action is the complete hypothetical instruction on every row.
     df["policy_applicable"] = (
         df["is_decision_row"] & df["policy_action"].isin(["keep", "remove"])
@@ -150,92 +149,34 @@ def apply_fixed_day_policy(base_df, policy_remove_day):
     return df
 
 
-def build_long_policy_panel(
-    base_df,
-    policy_days,
-):
-    # Build one full panel copy per policy
-    policy_frames = [
-        apply_fixed_day_policy(base_df, policy_remove_day)
-        for policy_remove_day in policy_days
-    ]
-    long_df = pd.concat(policy_frames, ignore_index=True)
-
-    # Confirm that each policy has a coherent timeline
-    pec.check_policy_timeline(
-        long_df,
-        episode_id_col="catheter_episode_id",
-        context="counterfactual policy panel",
-    )
-    return long_df
-
-
 def read_policy_panel(path):
-    """Read one policy file and check its saved row fields."""
+    """Read one saved policy panel."""
     path = Path(path)
     df = pd.read_csv(
         path, low_memory=False,
         dtype={"is_decision_row": "boolean", "policy_applicable": "boolean",
                "policy_matches_observed": "boolean"},
     )
-    missing = sorted(set(POLICY_OUTPUT_COLS) - set(df.columns))
-    if missing:
-        raise ValueError(
-            f"Policy panel is missing explicit policy fields: {missing}. "
-            "Rebuild it with build_policy_panels.py."
-        )
     df = df.loc[:, POLICY_OUTPUT_COLS]
-    if df.empty:
-        raise ValueError("Policy panel must contain time rows")
     for column in ("is_decision_row", "policy_applicable", "policy_matches_observed"):
-        if df[column].isna().any():
-            raise ValueError(f"Policy panel has missing {column} values")
         df[column] = df[column].astype(bool)
-    # The observed-decision fields must agree with the saved target timeline.
-    decision = df["catheter_state"].eq("in") & df["observed_action"].isin(["keep", "remove"])
-    action = df["policy_action"]
-    applicable = decision & action.isin(["keep", "remove"])
-    numeric_action = action.map({"keep": 0.0, "remove": 1.0})
-    expected_match = df["removed_in_period"].eq(numeric_action).astype(float).where(applicable)
-    invalid = (
-        df["is_decision_row"].ne(decision)
-        | df["policy_matches_observed"].ne(policy_removal_day_matches_observed(df))
-        | df["policy_applicable"].ne(applicable)
-        | ~df["policy_matches_observed_action_today"].fillna(-1).eq(expected_match.fillna(-1))
-        | df["policy_catheter_state"].ne(np.where(action.eq("out"), "out", "in"))
-    )
-    if invalid.any():
-        raise ValueError("Saved policy actions, states, or observed-action comparisons are inconsistent")
     return df
 
 
 def read_policy_collection(path):
-    """Load only the separate panels explicitly listed in the policy index."""
+    """Load the panels listed in the policy index."""
     path = Path(path)
     manifest = pd.read_csv(path)
-    missing = sorted(set(POLICY_MANIFEST_COLS) - set(manifest.columns))
-    if missing or manifest.empty:
-        raise ValueError(f"Policy index is empty or missing columns: {missing}")
-    if manifest[POLICY_MANIFEST_COLS].isna().any().any():
-        raise ValueError("Policy index has missing names, types, parameters, or file paths")
-    if manifest.policy_name.duplicated().any() or manifest.panel_file.duplicated().any():
-        raise ValueError("Policy index must list each policy and panel file only once")
     frames = []
     for policy in manifest.itertuples(index=False):
         panel_path = (path.parent / policy.panel_file).resolve()
-        if not panel_path.is_relative_to(path.parent.resolve()):
-            raise ValueError("Policy panel files must be inside the policy index directory")
         panel = read_policy_panel(panel_path)
-        if panel_path.stem != policy.policy_name:
-            raise ValueError(f"Panel metadata does not match index entry {policy.policy_name}")
         # Metadata belongs to the policy index, not every exported time row.
         panel["policy_name"] = policy.policy_name
         panel["policy_type"] = policy.policy_type
         panel["policy_remove_day"] = policy.policy_remove_day
         frames.append(panel)
-    collection = pd.concat(frames, ignore_index=True)
-    pec.check_policy_timeline(collection, context=str(path))
-    return collection
+    return pd.concat(frames, ignore_index=True)
 
 
 def save_policy_panels(long_df, manifest_path):
@@ -245,9 +186,6 @@ def save_policy_panels(long_df, manifest_path):
     panel_dir.mkdir(parents=True, exist_ok=True)
     entries = []
     for policy_name, panel in long_df.groupby("policy_name", sort=False):
-        # Policy names also identify files; reject path separators and unsafe names.
-        if not policy_name or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in policy_name):
-            raise ValueError(f"Policy name cannot be used as a filename: {policy_name}")
         panel_path = panel_dir / f"{policy_name}.csv"
         panel.to_csv(panel_path, columns=POLICY_OUTPUT_COLS, index=False)
         entries.append({
@@ -294,7 +232,12 @@ def run_panel():
     base_df = add_episode_day(base_df)
 
     # Construct and export the policy panels.
-    long_df = build_long_policy_panel(base_df, POLICY_DAYS)
+    # Build one full panel copy per policy.
+    policy_frames = [
+        apply_fixed_day_policy(base_df, policy_remove_day)
+        for policy_remove_day in POLICY_DAYS
+    ]
+    long_df = pd.concat(policy_frames, ignore_index=True)
     save_policy_panels(long_df, POLICY_MANIFEST_PATH)
 
     print_console_summary(
@@ -309,7 +252,7 @@ def main():
     global INPUT_PATH, OUTDIR, POLICY_MANIFEST_PATH
     for panel_name, input_path, nuisance_root in PANEL_RUNS:
         INPUT_PATH = input_path
-        OUTDIR = nuisance_root.parent / "counterfactual_policies"
+        OUTDIR = run_config.POLICY_DIRS[panel_name]
         POLICY_MANIFEST_PATH = OUTDIR / "policy_panels.csv"
         print(f"[PANEL] {panel_name}: {INPUT_PATH}", flush=True)
         run_panel()

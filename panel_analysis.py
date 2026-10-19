@@ -10,7 +10,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from policy_eval_common import add_episode_day
 import policy_eval_common as pec
 
 # Run choices come from pipeline_config.py; descriptive settings stay here.
@@ -20,10 +19,10 @@ from pipeline_config import NUISANCE_MODEL_TYPE
 
 REPO_ROOT = Path(__file__).resolve().parent
 DATA_FILE, _NUISANCE_ROOT = run_config.PANEL_PATHS[run_config.ANALYSIS_PANEL]
-RESULTS_DIR = _NUISANCE_ROOT.parent / "panel_analysis"
+RESULTS_DIR = REPO_ROOT / "artefacts/panel_analysis"
 COVARIATE_DICT_FILE = REPO_ROOT / "data/covariate_dictionary.csv"
 NUISANCE_DIR = _NUISANCE_ROOT / NUISANCE_MODEL_TYPE
-OUTCOME_FEATURES_FILE = NUISANCE_DIR / "outcome_top_model_features.csv"
+OUTCOME_FEATURES_FILE = NUISANCE_DIR / "feature_importance.csv"
 PROPENSITY_MODEL_FILE = NUISANCE_DIR / "propensity_model.pkl"
 
 DP = 3
@@ -54,35 +53,6 @@ CAUTI_BINARY_FEATURE = "sex_M"
 CAUTI_CONTINUOUS_FEATURE = "Anion gap [mean]"
 REINSERTION_FEATURE = "Bladder Scan Estimate [mean]"
 
-
-# Detect columns like itemid_<ID>__mean/min/max and return the matching columns plus metadata
-def detect_covariate_cols(columns, keep_stats):
-    # Detect covariate columns
-    pat = re.compile(r"^itemid_(\d+)__(mean|min|max)$", flags=re.IGNORECASE)
-    cov_cols = []
-    meta = []
-    for c in columns:
-        m = pat.match(str(c))
-        if not m:
-            continue
-        itemid = int(m.group(1))
-        stat = m.group(2).lower()
-        if stat in keep_stats:
-            cov_cols.append(c)
-            meta.append({"col": c, "itemid": itemid, "stat": stat})
-    return cov_cols, pd.DataFrame(meta)
-
-
-# Coerce a set of columns to numeric, handling TRUE/FALSE strings
-def coerce_numeric(df, cols):
-    for col in cols:
-        if df[col].dtype == object:
-            df[col] = df[col].replace({
-                "TRUE": 1, "FALSE": 0,
-                "True": 1, "False": 0,
-                "true": 1, "false": 0,
-            })
-        df[col] = pd.to_numeric(df[col], errors="coerce")
 
 def load_nuisance_top_features():
     # Outcome rankings are exported; propensity rankings come from saved folds.
@@ -515,26 +485,6 @@ def top_covariate_screen(
     return out
 
 
-# Resolve a list of feature names into actual dataframe columns
-def resolve_feature_cols(
-    feature_names,
-    feature_lookup,
-    available_cols,
-):
-    # Map labelled names back to panel columns
-    # Resolve feature columns
-    cols = []
-    seen = set()
-
-    for name in feature_names:
-        raw = feature_lookup.get(name, name)
-        if raw in available_cols and raw not in seen:
-            cols.append(raw)
-            seen.add(raw)
-
-    return cols
-
-
 # Return describe-style summary rows for selected covariates/features
 def describe_selected_covariates(
     df,
@@ -603,102 +553,6 @@ def plot_event_rates(cauti_period, reinsertion_period, outdir):
     plt.close(fig)
 
 
-def build_duplicate_interval_reports(df):
-    """Distinguish multiple intervals within a day from identical interval rows."""
-    df = df.copy()
-    # Assign one stable number to each catheter episode
-    episode_key_cols = ["subject_id", "hadm_id", "stay_id", "inserted", "removed"]
-    df["catheter_episode_id"] = pd.factorize(
-        df[episode_key_cols].astype(str).agg("|".join, axis=1),
-        sort=True,
-    )[0] + 1
-
-    # Add episode day since catheter insertion
-    df = add_episode_day(df)
-
-    # Count rows within each episode-day
-    day_key = ["catheter_episode_id", "episode_day"]
-
-    counts = (
-        df.groupby(day_key, dropna=False)
-        .size()
-        .reset_index(name="n_rows_for_episode_day")
-        .sort_values("n_rows_for_episode_day", ascending=False)
-    )
-
-    # Retain episode-days with multiple rows
-    duplicate_days = counts[counts["n_rows_for_episode_day"] > 1].copy()
-
-    # Recover the full rows behind those counts
-    duplicate_rows = df.merge(
-        duplicate_days[day_key],
-        on=day_key,
-        how="inner",
-    ).sort_values(
-        ["catheter_episode_id", "episode_day", "period_start", "period_end"]
-    )
-
-    # Define exact duplicate interval fields
-    exact_key = [
-        "catheter_episode_id",
-        "episode_day",
-        "period_start",
-        "period_end",
-        "catheter_state",
-        "observed_action",
-        "removed_in_period",
-        "periods_in_state",
-    ]
-
-    # Count identical interval rows
-    exact_counts = (
-        df.groupby(exact_key, dropna=False)
-        .size()
-        .reset_index(name="n_exact_duplicate_rows")
-        .sort_values("n_exact_duplicate_rows", ascending=False)
-    )
-
-    # Retain groups with exact duplicates
-    exact_duplicates = exact_counts[exact_counts["n_exact_duplicate_rows"] > 1].copy()
-
-    # Recover the full exact duplicate rows
-    exact_duplicate_rows = df.merge(
-        exact_duplicates[exact_key],
-        on=exact_key,
-        how="inner",
-    ).sort_values(exact_key)
-
-    # Summarise the time range of each duplicate episode-day
-    if not duplicate_rows.empty:
-        interval_summary = (
-            duplicate_rows.groupby(day_key, dropna=False)
-            .agg(
-                subject_id=("subject_id", "first"),
-                hadm_id=("hadm_id", "first"),
-                stay_id=("stay_id", "first"),
-                inserted=("inserted", "first"),
-                first_period_start=("period_start", "min"),
-                last_period_end=("period_end", "max"),
-                n_unique_period_starts=("period_start", "nunique"),
-                n_unique_period_ends=("period_end", "nunique"),
-            )
-            .reset_index()
-            .merge(duplicate_days, on=day_key, how="left")
-            .sort_values("n_rows_for_episode_day", ascending=False)
-        )
-    else:
-        interval_summary = duplicate_days
-
-    return {
-        "11_episode_day_row_counts.csv": counts,
-        "12_multiple_interval_episode_days.csv": duplicate_days,
-        "13_multiple_interval_episode_day_rows.csv": duplicate_rows,
-        "14_exact_duplicate_interval_summary.csv": exact_duplicates,
-        "15_exact_duplicate_interval_rows.csv": exact_duplicate_rows,
-        "16_multiple_interval_episode_day_trace.csv": interval_summary,
-    }
-
-
 # Run the merged panel diagnostics and supervisor-facing descriptive/inferential analysis
 def main(include_age_split=None):
     if include_age_split is None:
@@ -709,18 +563,19 @@ def main(include_age_split=None):
     df = pd.read_csv(DATA_FILE, low_memory=False)
     df.columns = df.columns.str.strip()
     df = df.copy()
-    # Use the same source panel for the interval audit and descriptive analysis.
-    interval_reports = build_duplicate_interval_reports(df)
-    for filename, report in interval_reports.items():
-        save_csv(report, RESULTS_DIR / filename, round_dp=DP)
     df[ID_COL] = df[ID_COL].astype(str).str.strip()
     df[STATE_COL] = df[STATE_COL].astype(str).str.strip().str.lower()
     df[END_REASON_COL] = (
         df[END_REASON_COL].astype("string").str.strip().str.lower()
     )
 
-    # Detect the itemid covariates used in the analysis and load their saved labels
-    cov_cols, _ = detect_covariate_cols(df.columns.tolist(), KEEP_STATS)
+    # Detect the retained mean/min/max itemid covariates.
+    covariate_pattern = re.compile(r"^itemid_(\d+)__(mean|min|max)$", flags=re.IGNORECASE)
+    cov_cols = []
+    for column in df.columns:
+        match = covariate_pattern.match(str(column))
+        if match and match.group(2).lower() in KEEP_STATS:
+            cov_cols.append(column)
     cov_meta = pd.read_csv(COVARIATE_DICT_FILE)
     labels = dict(zip(cov_meta["itemid"].astype(int), cov_meta["label"]))
     feature_lookup = {}
@@ -736,18 +591,26 @@ def main(include_age_split=None):
     df["period_start"] = pd.to_datetime(df["period_start"], errors="raise")
     df["period_end"] = pd.to_datetime(df["period_end"], errors="raise")
     df[INTERVAL_COL] = (df["period_end"] - df["period_start"]).dt.total_seconds() / 3600
-    if df[INTERVAL_COL].isna().any() or df[INTERVAL_COL].le(0).any():
-        raise ValueError("Every panel interval must have a positive duration")
     df[DECISION_ROW_COL] = (df[STATE_COL].eq("in") & df["observed_action"].isin(["keep", "remove"])).astype(int)
     df[LAST_PERIOD_COL] = df[TIME_COL].eq(df.groupby(EPISODE_KEYS)[TIME_COL].transform("max")).astype(int)
 
-    # Coerce the core numeric inputs
+    # Coerce the core numeric inputs, including any TRUE/FALSE strings.
     numeric_cols = [
         TIME_COL, PERIODS_COL, INTERVAL_COL, ACTION_COL, DECISION_ROW_COL, Y_CAUTI, Y_REINS,
         LAST_PERIOD_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
         "at_risk_cauti", "at_risk_reinsertion",
     ] + cov_cols
-    coerce_numeric(df, numeric_cols)
+    for column in numeric_cols:
+        if df[column].dtype == object:
+            df[column] = df[column].replace({
+                "TRUE": 1,
+                "FALSE": 0,
+                "True": 1,
+                "False": 0,
+                "true": 1,
+                "false": 0,
+            })
+        df[column] = pd.to_numeric(df[column], errors="coerce")
 
     # Create a few derived panel features
     covariate_count = df[cov_cols].notna().sum(axis=1).astype("int32")
@@ -835,10 +698,14 @@ def main(include_age_split=None):
             analysis_set = "reinsertion_fit_rows"
         else:
             analysis_set = "in_rows" if model_name.startswith("in_") else "out_rows"
+        # Map the saved display names back to unique columns in this panel.
+        selected_features = []
+        for name in get_nuisance_feature_names(nuisance_features, model_name):
+            column = feature_lookup.get(name, name)
+            if column in df.columns and column not in selected_features:
+                selected_features.append(column)
         table = describe_selected_covariates(
-            analysis_sets[analysis_set],
-            resolve_feature_cols(get_nuisance_feature_names(nuisance_features, model_name),
-                                 feature_lookup, set(df.columns)),
+            analysis_sets[analysis_set], selected_features,
             analysis_set, model_name, "native_model_importance", DP,
         )
         tables.append(table)
@@ -847,7 +714,7 @@ def main(include_age_split=None):
     influential["description"] = influential["col"].map(feature_descriptions).fillna(influential["col"])
     save_csv(influential, RESULTS_DIR / "07_nuisance_influential_covariate_descriptives.csv")
 
-    # Build and save the episode-level table
+    # Build the episode-level data used by the hypothesis tests.
     episode_df = build_episode_level_table(
         df=df,
         removal_feature=removal_feature,
@@ -856,7 +723,6 @@ def main(include_age_split=None):
         reinsertion_feature=reinsertion_feature,
         include_age_split=include_age_split,
     )
-    save_csv(episode_df, RESULTS_DIR / "08_episode_level_analysis_table.csv", round_dp=DP)
 
     # Run the episode-level hypothesis tests
     episode_tests = pd.DataFrame([
@@ -917,7 +783,7 @@ def main(include_age_split=None):
     for col in ["p_value", "p_value_adj_bh"]:
         episode_tests_export[col] = episode_tests[col].map(lambda x: f"{x:.3e}" if pd.notna(x) else "")
     episode_tests_export = episode_tests_export.set_index("test_name").T.reset_index().rename(columns={"index": "metric"})
-    episode_tests_export.to_csv(RESULTS_DIR / "09_episode_hypothesis_tests.csv", index=False)
+    episode_tests_export.to_csv(RESULTS_DIR / "08_episode_hypothesis_tests.csv", index=False)
 
     # Rank the top univariable raw covariate signals
     top_signals = pd.concat(
@@ -933,7 +799,7 @@ def main(include_age_split=None):
     )
     save_csv(
         top_signals,
-        RESULTS_DIR / "10_top_univariable_covariate_signals.csv",
+        RESULTS_DIR / "09_top_univariable_covariate_signals.csv",
         round_dp=DP,
         sci_cols=["mannwhitney_p", "mannwhitney_p_adj_bh"],
     )
@@ -941,8 +807,6 @@ def main(include_age_split=None):
     # Save the summary figures
     plot_event_rates(cauti_period, reinsertion_period, RESULTS_DIR)
 
-    print(f"Episode-days with multiple intervals: {len(interval_reports['12_multiple_interval_episode_days.csv']):,}")
-    print(f"Exact duplicate interval groups: {len(interval_reports['14_exact_duplicate_interval_summary.csv']):,}")
     print(f"Outputs saved to: {RESULTS_DIR}")
     print(f"Number of covariates analysed: {len(cov_cols)}")
     print(f"Late removal threshold: period >= {LATE_REMOVAL_PERIOD_THRESHOLD}")

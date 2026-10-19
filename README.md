@@ -40,14 +40,14 @@ in the validation cohort.
 
 ## Pipeline stages
 
-1. `create_data_panel.py` builds `data/modelling_panel.csv`.
+1. `create_observed_panel.py` builds `data/modelling_panel.csv`.
 2. `create_semi_synthetic_panel.py` creates the measured-confounding,
    omitted-confounder, and randomised-action panels and their known truth.
 3. `fit_nuisance_models.py` fits patient-grouped cross-fitted behaviour and
    outcome models for the selected panels and learners.
 4. `panel_analysis.py` creates optional descriptive summaries.
-5. `build_policy_panels.py` builds preserved-grid inputs for the g-formula
-   comparator.
+5. `build_policy_panels.py` builds preserved-grid policy inputs for both
+   evaluators.
 6. `evaluate_gformula_policies.py` evaluates the selected fixed-day policies.
 7. `evaluate_policy_dml_policies.py` evaluates current practice and fixed-day
    policies with the recursive Policy-DML estimator.
@@ -56,21 +56,24 @@ Select stages, panels, learners, policies, and bootstrap modes in
 `pipeline_config.py`. See [RUN_CONFIGURATION.md](RUN_CONFIGURATION.md) for the
 available settings.
 
-Policy-DML reads the modelling panel directly and creates fixed-day policies
-from `POLICY_DAYS`. In fixed bootstrap mode it reuses the saved out-of-fold
+Policy-DML reads the modelling panel and the saved fixed-day policy panels.
+The policy panels must be built for the selected evaluation datasets before
+running either evaluator. In fixed bootstrap mode Policy-DML reuses the saved out-of-fold
 behaviour probabilities. In refit mode it refits the behaviour and continuation
 models within each patient bootstrap sample. Both evaluators print bootstrap
 progress every five replicates. Policy-DML also reports its point-estimate work
 size and progress through the outer folds, inner folds, and policies.
-Its configured horizons are 30 days for real data and 14 days for the
-semi-synthetic validation panels. To resume only the validation panels:
+Its configured horizons are 30 days for observed data and 14 days for the
+semi-synthetic validation panels. To resume only the validation panels, select
+those three entries in `EVALUATION_PANELS`, select the required mode in
+`BOOTSTRAP_MODES`, and run:
 
 ```powershell
-python evaluate_policy_dml_policies.py --panel semi_synthetic_with_confounding confounder_omitted randomised_action --bootstrap-mode fixed
+python evaluate_policy_dml_policies.py
 ```
 
 The simulator exports matching CAUTI reference values in
-`known_truth_policy_values_policy_dml.csv`, with panel and horizon columns.
+`artefacts/validation/known_truth_policy_dml.csv`, with panel and horizon columns.
 
 The shared modelling panels, nuisance-model functions, and
 `policy_inference.py` bootstrap reporting helpers form the interface for the
@@ -78,16 +81,16 @@ future LTMLE evaluator.
 
 ## Outputs
 
-Nuisance outputs are written below each panel's `nuisance_models/<learner>/`
-directory. They include out-of-fold predictions, fold assignments, fitted
-models, performance metrics, and constant-feature records.
+Final estimates are under
+`artefacts/results/<panel>/<estimator>/<bootstrap>/`. Start with
+`policy_values.csv` and `policy_differences.csv`. Diagnostics and run settings
+sit beside them.
 
-Policy-DML outputs are written below
-`policy_eval/policy_dml/{fixed,refit}/`. They include policy summaries,
-episode and decision scores, compact model ownership metadata, support
-diagnostics, run metadata, bootstrap draws, and percentile confidence
-intervals. See [POLICY_DML_IMPLEMENTATION.md](POLICY_DML_IMPLEMENTATION.md) for
-the estimator-to-code mapping.
+Fitted nuisance models are under
+`artefacts/nuisance_models/<panel>/<learner>/`, shared policy panels are
+under `artefacts/policy_panels/<panel>/`, and simulated panels and known truth
+are under `artefacts/validation/`. See [ARTEFACTS.md](ARTEFACTS.md) for the full
+map.
 
 ## Tests
 

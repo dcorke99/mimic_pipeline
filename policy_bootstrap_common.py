@@ -7,7 +7,7 @@ import pandas as pd
 
 import fit_nuisance_models as nuisance
 import policy_eval_common as pec
-from policy_inference import bootstrap_replicate_table, interval_table, paired_differences
+from policy_inference import interval_table, paired_differences
 
 DEFAULT_SEED = 20260923
 CURRENT_PRACTICE = "current_practice"
@@ -18,10 +18,8 @@ VALUE_COLUMNS = dict(zip(OUTCOMES, (
 )))
 
 
-def refit_nuisance_predictions(panel, subjects, counts, estimator="gformula", n_splits=5, model_type=None):
+def refit_nuisance_predictions(panel, subjects, counts, n_splits=5, model_type=None):
     """Refit outcome models on a patient bootstrap sample and score source rows."""
-    if estimator != "gformula":
-        raise ValueError("Only the g-formula comparator uses this refit helper")
     panel = nuisance.prepare_outcome_targets(panel.copy().reset_index(drop=True))
     panel["_source_row"] = panel.index
     multiplicity = counts[subjects.get_indexer(panel.subject_id)]
@@ -123,11 +121,9 @@ def build_patient_statistics(episodes, policies, subjects):
     return PatientStatistics(pd.DataFrame(entries), np.stack(statistics, axis=1), episode_counts)
 
 
-def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstrap,
+def run_bootstrap(episodes, policy_rows, evaluate, outdir, n_bootstrap,
                   refit_panel=None, seed=DEFAULT_SEED, refit_n_splits=5,
                   model_type=None, panel_name=None):
-    if estimator != "gformula":
-        raise ValueError("Only g-formula is supported")
     baseline = episodes.loc[episodes.policy_name.eq(CURRENT_PRACTICE)]
     subjects = pd.Index(sorted(baseline.subject_id.unique()), name="subject_id")
     policies = pd.concat([
@@ -139,28 +135,18 @@ def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstra
     values = np.empty((n_bootstrap, len(design.entries)))
     rng = np.random.default_rng(seed)
     mode = "refit" if refit_panel is not None else "fixed"
-    output = outdir / "confidence_intervals"
-    output.mkdir(parents=True, exist_ok=True)
-    rows = []
+    outdir.mkdir(parents=True, exist_ok=True)
     for replicate in range(n_bootstrap):
         counts = np.bincount(rng.integers(len(subjects), size=len(subjects)), minlength=len(subjects))
         draw_design = design
-        diagnostic = {
-            "bootstrap_replicate": replicate + 1,
-            "n_patient_draws": int(counts.sum()),
-            "n_unique_patients_resampled": int(np.count_nonzero(counts)),
-            "n_episodes_resampled": int(counts @ design.episode_counts),
-        }
         if refit_panel is not None:
-            scored, fallback_folds = refit_nuisance_predictions(
+            scored, _ = refit_nuisance_predictions(
                 refit_panel, subjects, counts, n_splits=refit_n_splits, model_type=model_type,
             )
             sampled_policies = policy_rows.loc[policy_rows.subject_id.isin(scored.subject_id)]
             sample_episodes = evaluate(sampled_policies, scored)[0]
             draw_design = build_patient_statistics(sample_episodes, policies, subjects)
-            diagnostic["n_fallback_folds"] = fallback_folds
         values[replicate] = draw_design.estimate(counts)
-        rows.append(diagnostic)
         completed = replicate + 1
         if completed % 5 == 0 or completed == n_bootstrap:
             print(
@@ -170,11 +156,8 @@ def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstra
             )
 
     if n_bootstrap:
-        bootstrap_replicate_table(design.entries, values, pd.DataFrame(rows)).to_csv(
-            output / "gformula_bootstrap_replicate_estimates.csv", index=False, float_format="%.4f",
-        )
         interval_table(design.entries, point, values, len(subjects)).to_csv(
-            output / "gformula_policy_value_confidence_intervals.csv", index=False, float_format="%.4f",
+            outdir / "policy_values.csv", index=False, float_format="%.4f",
         )
         differences = interval_table(
             design.entries, paired_differences(point, design.entries),
@@ -182,6 +165,6 @@ def run_bootstrap(estimator, episodes, policy_rows, evaluate, outdir, n_bootstra
         )
         differences["comparator"] = CURRENT_PRACTICE
         differences.to_csv(
-            output / "gformula_policy_difference_confidence_intervals.csv",
+            outdir / "policy_differences.csv",
             index=False, float_format="%.4f",
         )
