@@ -132,7 +132,7 @@ class ArithmeticTests(unittest.TestCase):
 class ContinuationRegressorTests(unittest.TestCase):
     def test_xgboost_fits_signed_targets_with_missing_predictors(self):
         settings = dict(evaluator.SETTINGS, continuation_learner="xgboost")
-        with patch.dict(evaluator.LEARNER_CONFIGURATIONS["xgboost"], n_jobs=1):
+        with patch.dict(evaluator.LEARNER_CONFIGURATIONS["xgboost"], device="cpu", n_jobs=1):
             model = evaluator.make_regressor(settings)
         features = pd.DataFrame({"age": np.arange(80, dtype=float), "missing_feature": np.nan})
         features.loc[0, "age"] = np.nan
@@ -245,6 +245,9 @@ class FittingTests(unittest.TestCase):
         self.assertTrue(later_in.any())
         self.assertTrue(policy.loc[later_in, "policy_action"].eq("out").all())
         self.assertTrue(policy.loc[later_in, "policy_dml_action"].eq("remove").all())
+        np.testing.assert_array_equal(
+            policy["policy_removed_in_period"], policy.policy_action.eq("remove").astype(int),
+        )
         for day in (1, 2):
             expected = self.decisions.elapsed_hours.ge((day - 1) * 24)
             actual = self.decisions[f"policy_dml_action_{day}"].eq("remove")
@@ -324,7 +327,7 @@ class FittingTests(unittest.TestCase):
 
     def test_xgboost_continuation_runs_nested_recursion(self):
         settings = dict(self.settings, continuation_learner="xgboost")
-        with patch.dict(evaluator.LEARNER_CONFIGURATIONS["xgboost"], n_estimators=3, n_jobs=1):
+        with patch.dict(evaluator.LEARNER_CONFIGURATIONS["xgboost"], device="cpu", n_estimators=3, n_jobs=1):
             rows, audit, _ = evaluator.crossfit_policy_scores(
                 self.decisions, self.policies, settings=settings,
             )

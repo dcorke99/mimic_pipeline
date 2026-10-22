@@ -140,10 +140,18 @@ class BaselinePanelTests(unittest.TestCase):
         pd.testing.assert_frame_equal(
             previous.groupby("stay_id")[events].sum(), current.groupby("stay_id")[events].sum(),
         )
-        demographics = ["subject_id", "hadm_id", "age", "sex_M", "sex_missing", "ethnicity_White"]
+        demographics = ["subject_id", "hadm_id", "age", "sex_M", "ethnicity_White"]
         pd.testing.assert_frame_equal(
             previous.groupby("stay_id")[demographics].first(), current.groupby("stay_id")[demographics].first(),
         )
+
+    def test_missing_sex_stays_missing_without_a_separate_flag(self):
+        episodes = self.episodes.copy()
+        episodes.loc[episodes.stay_id.eq(1), "gender"] = None
+        panel = self.build(episodes)
+        self.assertTrue(panel.loc[panel.stay_id.eq(1), "sex_M"].isna().all())
+        self.assertTrue(panel.loc[panel.stay_id.ne(1), "sex_M"].eq(0).all())
+        self.assertNotIn("sex_missing", panel.columns)
 
     def test_off_grid_removal_does_not_split_or_restart_the_insertion_clock(self):
         rows = self.build().query("stay_id == 1")
@@ -154,7 +162,7 @@ class BaselinePanelTests(unittest.TestCase):
         self.assertEqual(actual, [(0, 24, "in", 0), (24, 48, "in", 1),
                                   (48, 72, "out", 0), (72, 96, "out", 0), (96, 110, "out", 0)])
         self.assertEqual(rows.episode_index.tolist(), [0, 1, 2, 3, 4])
-        self.assertEqual(rows.episode_day.tolist(), [1, 2, 3, 4, 5])
+        self.assertNotIn("episode_day", rows.columns)
         self.assertEqual(rows.is_decision_row.tolist(), [True, True, False, False, False])
         self.assertEqual(rows.periods_in_state.tolist(), [1, 2, 1, 2, 3])
         self.assertEqual(rows.catheter_in_hours.tolist(), [24, 14, 0, 0, 0])
@@ -178,7 +186,7 @@ class BaselinePanelTests(unittest.TestCase):
     def test_boundary_removal_belongs_to_previous_period_and_stops_decisions(self):
         rows = self.build().query("stay_id == 2")
         removal = rows.loc[rows.removed_in_period.eq(1)].iloc[0]
-        self.assertEqual(removal.episode_day, 2)
+        self.assertEqual(removal.episode_index, 1)
         self.assertEqual(removal.period_end, T0 + pd.Timedelta(hours=48))
         self.assertEqual(removal.catheter_out_hours, 0)
         self.assertTrue(rows.loc[rows.episode_index.gt(removal.episode_index), "is_decision_row"].eq(False).all())

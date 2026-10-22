@@ -4,6 +4,11 @@ This repository builds a longitudinal catheter panel, fits cross-fitted nuisance
 models, and evaluates catheter-removal policies. Recursive Policy-DML is the
 primary causal evaluator. G-formula remains as a comparator.
 
+The g-formula current-practice expected CAUTI risk integrates held-out model
+hazards through the structural attribution window, independently of realised
+infection. See [GFORMULA_IMPLEMENTATION.md](GFORMULA_IMPLEMENTATION.md) for
+prediction, saved-model reuse, and bootstrap details.
+
 Install the packages in `requirements.txt`, edit `pipeline_config.py`, and run:
 
 ```powershell
@@ -24,7 +29,7 @@ period boundary belong to the preceding period.
 A removal period can contain both catheter-in and catheter-out time. The
 `catheter_in_hours` and `catheter_out_hours` columns retain that split. CAUTI
 follow-up continues for 48 elapsed hours after removal and ends after the first
-CAUTI. Reinsertion fitting uses `reinsertion_remove_period` and
+CAUTI. Reinsertion fitting uses `removed_in_period` and
 `reinsertion_periods_out`, which are also available to counterfactual policies.
 
 Chart features use the interval
@@ -37,6 +42,14 @@ simulated reinsertion only if simulated removal precedes it. Otherwise the
 episode ends at its explicitly recorded `simulation_end_time`, with reason
 `simulation_horizon` and no invented clinical event. All source episodes remain
 in the validation cohort.
+
+`sex_M` is one for male, zero for female, and missing when sex is unknown.
+Panel analysis reports the number of patients with missing sex in its cohort
+overview; the panels do not store a separate `sex_missing` flag.
+
+The base and modelling panels store the zero-based period number in
+`episode_index`. Policy calculations derive the one-based `episode_day` from
+the period start and insertion timestamps when needed.
 
 ## Pipeline stages
 

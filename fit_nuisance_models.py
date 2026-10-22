@@ -376,6 +376,11 @@ def fit_crossfit_fold_model(
     if model_type == "superlearner":
         if groups is None or len(groups) != len(features) or pd.isna(groups).any():
             raise ValueError("Super Learner requires aligned nonmissing patient groups")
+    progress_label = f"[{model_type.upper()}]"
+    print(
+        f"{progress_label} Starting outer_fold={fold + 1}; task={model_name}",
+        flush=True,
+    )
     events = int(target.sum())
     non_events = int(len(target) - events)
     retained_feature_cols, constant_features = split_constant_features(features)
@@ -396,6 +401,7 @@ def fit_crossfit_fold_model(
     elif model_type == "superlearner" and len(pd.unique(np.asarray(groups))) < 2:
         fallback_reason = "insufficient_inner_patient_groups"
     if fallback_reason is not None:
+        print(f"{progress_label} Using fallback; reason={fallback_reason}", flush=True)
         # Beta(1, 1) / Laplace smoothing avoids exact zero or one while using
         # only this fold's training rows. Held-out outcomes are never used
         fallback_probability = float(
@@ -1188,6 +1194,7 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
     joblib.dump(payload, OUTDIR / "outcome_models.pkl")
     # Export unmasked candidate hazards separately from factual risk-set zeros.
     df = pec.add_policy_predictions(df, payload, predictor=predict_crossfit_fold)
+    df = pec.add_current_practice_cauti_predictions(df, payload, predictor=predict_crossfit_fold)
 
     return df, in_summary, out_summary, in_models, out_models
 

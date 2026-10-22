@@ -127,7 +127,10 @@ def join_nuisance_predictions(policy_df, nuisance_df):
 
 
 def select_policy_predictions(df):
-    pec.select_policy_outcomes(df, "p", POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS)
+    pec.select_policy_outcomes(
+        df, "p", POST_REMOVAL_CAUTI_ATTRIBUTION_PERIODS,
+        current_practice_expected_risk=True,
+    )
 
     missing_any = df[UNDER_POLICY_COLUMNS].isna().any(axis=1)
     invalid_any = pd.Series(False, index=df.index)
@@ -139,6 +142,9 @@ def select_policy_predictions(df):
         df["__used_rescored_prediction"],
         "patient_held_out_model_with_policy_features",
         "nuisance_predictions",
+    )
+    df.loc[df.policy_name.eq(CURRENT_PRACTICE_LABEL), "prediction_source"] = (
+        "patient_held_out_model_with_factual_features"
     )
     df["prediction_status"] = "complete"
     df.loc[missing_any, "prediction_status"] = "missing_prediction"
@@ -495,7 +501,9 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
     else:
         nuisance_df = pd.read_csv(nuisance_predictions_path, low_memory=False)
         nuisance_df.columns = nuisance_df.columns.str.strip()
-        nuisance_df = fill_missing_counterfactual_predictions(nuisance_df, outcome_models_path)
+        nuisance_df = fill_missing_counterfactual_predictions(
+            nuisance_df, outcome_models_path, current_practice_expected_risk=True,
+        )
     nuisance_df["subject_id"] = nuisance_df.subject_id.astype(str)
     combined_episode_df, row_df, current_rows, current_episode_df = evaluate_policy_episodes(
         policy_df, nuisance_df,

@@ -18,10 +18,12 @@ are defined in this evaluator. Settings and policy definitions use dictionaries.
 | `V(pi) = mean_e psi_(e,1)` | `episode_scores` selects the first score and `policy_summary` averages episodes. |
 | `Delta = V(pi) - V(current)` | Summary and bootstrap contrasts use current practice as the paired comparator. |
 
-The default continuation learner is Extra Trees with 100 trees using all
-available processors; Ridge, Random Forest and XGBoost are available. Select
-`"xgboost"` in `POLICY_DML_CONTINUATION_LEARNER` to use squared-error regression
-with CPU histogram trees. Each learner's parameters are in the evaluator's
+The continuation learners are Ridge, Random Forest, Extra Trees and XGBoost.
+Tree learners use 100 trees and all available processors. Select `"xgboost"`
+in `POLICY_DML_CONTINUATION_LEARNER` to use squared-error regression with
+histogram trees. XGBoost trains on its configured device (currently CUDA), then
+switches the fitted model to CPU prediction for the pandas inputs, as in the
+nuisance fitting script. Each learner's parameters are in the evaluator's
 `LEARNER_CONFIGURATIONS` dictionary, following the nuisance fitting script's
 layout. `LEARNER_PREPROCESSING` controls imputation and standardisation. XGBoost
 uses native missing-value handling; Ridge uses median imputation and

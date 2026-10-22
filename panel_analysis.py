@@ -160,6 +160,7 @@ def build_overview_tables(df):
         "subset": "overall",
         "rows": int(len(df)),
         "unique_subject_id": int(df[ID_COL].nunique()),
+        "patients_with_missing_sex": int(df.drop_duplicates(ID_COL)["sex_M"].isna().sum()),
         "unique_hadm_id": int(df["hadm_id"].nunique()),
         "unique_stay_id": int(df["stay_id"].nunique()),
         "unique_episodes": int(df[EPISODE_KEYS].drop_duplicates().shape[0]),

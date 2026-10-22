@@ -39,24 +39,24 @@ RESULT_DIRS = {
 # Pipeline stages to execute, in order. Comment out stages to skip them.
 # Running a Python stage directly still uses the choices below.
 PIPELINE_STAGES = [
-    "create_observed_panel.py",
-    "create_semi_synthetic_panel.py",
+    # "create_observed_panel.py",
+    # "create_semi_synthetic_panel.py",
     "fit_nuisance_models.py",
-    "panel_analysis.py",
-    "build_policy_panels.py",
-    "evaluate_gformula_policies.py",
-    "evaluate_policy_dml_policies.py",
+    # "panel_analysis.py",
+    # "build_policy_panels.py",
+    # "evaluate_gformula_policies.py",
+    # "evaluate_policy_dml_policies.py",
 ]
 
 # Learners to fit, in order. An empty list skips nuisance fitting.
 MODEL_TYPES = [
-    # "logistic_regression",
-    # "random_forest",
-    # "extra_trees",
+    "logistic_regression",
+    "random_forest",
+    "extra_trees",
     "xgboost",
-    # "lightgbm",
-    # "catboost",
-    # "superlearner",
+    "lightgbm",
+    "catboost",
+    "superlearner",
 ]
 
 # Super Learner membership is independent of MODEL_TYPES.

@@ -354,10 +354,8 @@ def generate_sequential_trajectory(
                            ("catheter_out_hours", out_hours)):
         if column in panel:
             panel[column] = values
-    if "episode_day" in panel:
-        panel["episode_day"] = add_episode_day(panel)["episode_day"]
     panel = rebuild_observed_action(panel)
-    panel = pec.add_reinsertion_context(panel)
+    panel = pec.add_reinsertion_periods(panel)
 
     decision_rows = panel[STATE_COL].eq("in") & panel[OBSERVED_ACTION_COL].isin(
         ["keep", "remove"]

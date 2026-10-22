@@ -131,7 +131,7 @@ class RestructuredPanelDownstreamTests(unittest.TestCase):
         removal = panel.catheter_state.eq("in") & panel.reinsertion_in_period.eq(1)
         self.assertEqual(int(removal.sum()), 2)
         self.assertTrue(panel.loc[removal, nuisance.Y_NO_EVENT_IN].eq(0).all())
-        self.assertTrue(panel.loc[removal, pec.REINSERTION_CONTEXT_COL].eq(1).all())
+        self.assertTrue(panel.loc[removal, "removed_in_period"].eq(1).all())
         self.assertTrue(panel.loc[removal, pec.REINSERTION_PERIOD_COL].eq(0).all())
         analysed = analysis.build_risk_sets(panel)
         self.assertEqual(int(analysed.loc[analysed.reinsertion_fit_row.eq(1), "reinsertion_in_period"].sum()), 4)
@@ -143,17 +143,28 @@ class RestructuredPanelDownstreamTests(unittest.TestCase):
         def predict(model, features):
             self.assertNotIn("catheter_out_hours", features)
             self.assertNotIn("periods_in_state", features)
-            return np.where(features[pec.REINSERTION_CONTEXT_COL].eq(1), 0.4,
+            return np.where(features["removed_in_period"].eq(1), 0.4,
                             0.1 + features[pec.REINSERTION_PERIOD_COL] * 0.05)
 
         scores = pec.predict_reinsertion_columns({}, panel, columns, predictor=predict)
         for column, values in scores.items():
             panel[column] = values
-        first = panel.loc[panel.subject_id.eq("1") & panel.episode_day.eq(1)].iloc[0]
-        second = panel.loc[panel.subject_id.eq("1") & panel.episode_day.eq(2)].iloc[0]
+        first = panel.loc[panel.subject_id.eq("1") & panel.episode_index.eq(0)].iloc[0]
+        second = panel.loc[panel.subject_id.eq("1") & panel.episode_index.eq(1)].iloc[0]
         self.assertEqual(first.at_risk_reinsertion, 0)
         self.assertEqual(first[f"{pec.REINSERTION_POLICY_PREFIX}1"], 0.4)
         self.assertAlmostEqual(second[f"{pec.REINSERTION_POLICY_PREFIX}1"], 0.15)
+
+    def test_panel_overview_counts_patients_with_missing_sex(self):
+        panel = example_panel()
+        panel.loc[panel.subject_id.eq("1"), "sex_M"] = np.nan
+        panel = analysis.build_risk_sets(panel)
+        panel[analysis.LATE_REMOVAL_COL] = (
+            panel.removed_in_period.eq(1)
+            & panel[analysis.DECISION_PERIOD_COL].ge(analysis.LATE_REMOVAL_PERIOD_THRESHOLD)
+        ).astype(int)
+        cohort, _, _, _ = analysis.build_overview_tables(panel)
+        self.assertEqual(cohort.loc[0, "patients_with_missing_sex"], 1)
 
     def test_actual_exposure_uses_catheter_hours(self):
         panel = example_panel()
@@ -178,7 +189,7 @@ class RestructuredPanelDownstreamTests(unittest.TestCase):
     def test_model_fitting_reads_saved_reinsertion_features(self):
         panel = example_panel()
         panel[pec.REINSERTION_PERIOD_COL] = 7
-        with patch.object(pec, "add_reinsertion_context", side_effect=AssertionError("Must read saved features")):
+        with patch.object(pec, "add_reinsertion_periods", side_effect=AssertionError("Must read saved features")):
             prepared = nuisance.prepare_outcome_targets(panel.copy())
             seen = []
 

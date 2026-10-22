@@ -81,6 +81,9 @@ def refit_nuisance_predictions(panel, subjects, counts, n_splits=5, model_type=N
                 scored.loc[held.index, column] = values
                 scored.loc[held.index, f"__rescored_{column}"] = held.catheter_state.ne(state)
     scored = pec.add_policy_predictions(scored, models, predictor=nuisance.predict_crossfit_fold)
+    scored = pec.add_current_practice_cauti_predictions(
+        scored, models, predictor=nuisance.predict_crossfit_fold,
+    )
     return scored.reset_index(drop=True), fallback_folds
 
 

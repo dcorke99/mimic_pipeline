@@ -46,9 +46,11 @@ The DML evaluator defines its technical settings near the top of
 - `LEARNER_PREPROCESSING`: imputation, standardisation and native missing-value
   handling for each learner.
 
-The default run uses Extra Trees with 100 trees, all processors and 100 bootstrap
-draws. XGBoost uses squared-error loss and CPU histogram trees, with native
-missing-value handling. Ridge uses median imputation and standardisation; the
+The tree learners use 100 trees and all processors; the run uses 100 bootstrap
+draws. XGBoost uses squared-error loss and histogram trees with native
+missing-value handling. Its configured device controls training (currently
+CUDA); after fitting, the evaluator switches each model to CPU prediction to
+match the pandas inputs. Ridge uses median imputation and standardisation; the
 forests use median imputation.
 
 The g-formula comparator still covers complete episodes. Match horizons before

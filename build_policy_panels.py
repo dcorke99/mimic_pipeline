@@ -59,7 +59,7 @@ POLICY_OUTPUT_COLS = [
     "policy_catheter_state",
     "policy_periods_in",
     "policy_periods_out",
-    f"policy_{pec.REINSERTION_CONTEXT_COL}",
+    "policy_removed_in_period",
     f"policy_{pec.REINSERTION_PERIOD_COL}",
     "policy_removal_day_extra_row_treated_as_out",
     "policy_action",

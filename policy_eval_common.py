@@ -7,11 +7,50 @@ import pandas as pd
 import pipeline_config as run_config
 
 
-REINSERTION_CONTEXT_COL = "reinsertion_remove_period"
 REINSERTION_PERIOD_COL = "reinsertion_periods_out"
 REINSERTION_POLICY_PREFIX = "p_reinsertion_policy_day_"
 EXPOSURE_MEASURE = "nominal_catheter_in_decision_period_days"
 POLICY_OUTCOMES = ("cauti", "reinsertion", "death", "icu_exit_alive", "no_event")
+CURRENT_PRACTICE_CAUTI_COL = "p_cauti_current_practice_unmasked"
+
+
+def current_practice_cauti_window(df):
+    """Structural attribution on the preserved episode grid, before event masking.
+
+    As in the known truth, include periods starting strictly before removal plus
+    48 hours. The input grid already ends at the episode endpoint (including
+    death, reinsertion, ICU exit or a fixed simulation endpoint).
+    """
+    return pd.to_datetime(df["period_start"], format="mixed").lt(
+        pd.to_datetime(df["removed"], format="mixed") + pd.Timedelta(hours=48)
+    )
+
+
+def add_current_practice_cauti_predictions(df, payload, *, predictor=None):
+    """Score factual pre-decision features with each patient's held-out model.
+
+    Factual CAUTI scores can be masked zeros after infection. Never reuse them
+    as underlying hazards, and never change the factual training risk set.
+    """
+    predictor = predict_fold_model if predictor is None else predictor
+    df = df.copy()
+    df[CURRENT_PRACTICE_CAUTI_COL] = np.nan
+    eligible = current_practice_cauti_window(df)
+    if df.groupby("subject_id")[CROSSFIT_FOLD_COL].nunique(dropna=False).gt(1).any():
+        raise ValueError("Current-practice CAUTI predictions require one fold per patient")
+    for state in ("in", "out"):
+        model = payload[f"{state}_models"]["cauti"]
+        for fold_model in model["fold_models"]:
+            rows = (eligible & df["catheter_state"].eq(state)
+                    & pd.to_numeric(df[CROSSFIT_FOLD_COL], errors="coerce").eq(fold_model["fold"]))
+            if rows.any():
+                df.loc[rows, CURRENT_PRACTICE_CAUTI_COL] = predictor(
+                    fold_model, df.loc[rows, model["features"]].copy(),
+                )
+    values = df.loc[eligible, CURRENT_PRACTICE_CAUTI_COL]
+    if (values.isna() | ~np.isfinite(values) | values.lt(0) | values.gt(1)).any():
+        raise ValueError("Missing or invalid held-out current-practice CAUTI hazards")
+    return df
 
 
 def policy_prediction_columns(days=None):
@@ -36,7 +75,6 @@ def policy_feature_overrides(df, removal_day):
         "catheter_state": pd.Series(np.where(in_state, "in", "out"), index=df.index),
         "removed_in_period": remove.astype(int),
         "periods_in_state": day.where(in_state, periods_out),
-        REINSERTION_CONTEXT_COL: remove.astype(int),
         REINSERTION_PERIOD_COL: periods_out.where(~in_state, 0),
     }
 
@@ -72,7 +110,7 @@ def add_policy_predictions(df, payload, *, predictor=None, days=None):
     return pd.concat([df.drop(columns=scores.columns, errors="ignore"), scores], axis=1)
 
 
-def select_policy_outcomes(df, prefix, attribution_periods=2):
+def select_policy_outcomes(df, prefix, attribution_periods=2, *, current_practice_expected_risk=False):
     """Select raw policy hazards, then apply policy eligibility to contributions."""
     current = df.policy_name.eq("current_practice")
     suffix = df.policy_action.map({"keep": "keep", "remove": "remove", "out": "out"})
@@ -90,14 +128,22 @@ def select_policy_outcomes(df, prefix, attribution_periods=2):
             df.loc[rows, target] = df.loc[rows, f"p_{outcome}_policy_day_{int(day)}"]
     in_state = df.policy_catheter_state.eq("in")
     window = in_state | pd.to_numeric(df.policy_periods_out).between(0, attribution_periods)
-    window.loc[current] = df.loc[current, "at_risk_cauti"].eq(1)
+    if current.any():
+        if current_practice_expected_risk:
+            if CURRENT_PRACTICE_CAUTI_COL not in df:
+                raise ValueError("Rescore unmasked current-practice CAUTI hazards with held-out models first")
+            window.loc[current] = current_practice_cauti_window(df.loc[current])
+            # Factual state-action scores can be zeroed after infection.
+            df.loc[current, f"{prefix}_cauti_under_policy"] = df.loc[current, CURRENT_PRACTICE_CAUTI_COL]
+        else:
+            window.loc[current] = df.loc[current, "at_risk_cauti"].eq(1)
     df["policy_at_risk_cauti"] = window.astype(int)
     df["policy_cauti_hazard"] = df[f"{prefix}_cauti_under_policy"]
     df.loc[~window, f"{prefix}_cauti_under_policy"] = 0.0
     df.loc[current & df.at_risk_reinsertion.eq(0), f"{prefix}_recatheterisation_under_policy"] = 0.0
     df["policy_periods_in_state"] = df.policy_periods_in.where(in_state, df.policy_periods_out.clip(lower=1))
     df["__used_rescored_prediction"] = ~current
-    for column in (REINSERTION_CONTEXT_COL, REINSERTION_PERIOD_COL):
+    for column in ("removed_in_period", REINSERTION_PERIOD_COL):
         if current.any():
             df.loc[current, f"policy_{column}"] = df.loc[current, column]
 
@@ -106,11 +152,10 @@ def reinsertion_policy_columns():
     return [f"{REINSERTION_POLICY_PREFIX}{day}" for day in run_config.POLICY_DAYS]
 
 
-def add_reinsertion_context(df):
+def add_reinsertion_periods(df):
     """Pre-period timing; realised post-action exposure is never a predictor."""
     out = df.copy()
     in_rows = out["catheter_state"].eq("in")
-    out[REINSERTION_CONTEXT_COL] = (in_rows & out["removed_in_period"].eq(1)).astype(int)
     # Zero denotes the REMOVE period. Subsequent periods use the one-based
     # elapsed 24-hour bin from known removal, consistently across start states.
     elapsed = pd.to_datetime(out["period_start"], format="mixed") - pd.to_datetime(out["removed"], format="mixed")
@@ -120,7 +165,7 @@ def add_reinsertion_context(df):
 
 def reinsertion_feature_columns(out_feature_cols):
     return [col for col in out_feature_cols if col != "periods_in_state"] + [
-        REINSERTION_CONTEXT_COL, REINSERTION_PERIOD_COL,
+        "removed_in_period", REINSERTION_PERIOD_COL,
     ]
 
 
@@ -128,16 +173,16 @@ def predict_reinsertion_columns(fold_model, df, feature_cols, predictor=None):
     """Score REMOVE, factual OUT, and each day-policy context with one model."""
     predictor = predict_fold_model if predictor is None else predictor
     base = df.reindex(columns=feature_cols).copy()
-    base[REINSERTION_CONTEXT_COL] = 0
+    base["removed_in_period"] = 0
     base[REINSERTION_PERIOD_COL] = df[REINSERTION_PERIOD_COL].clip(lower=1)
     scores = {"p_reinsertion_if_out": predictor(fold_model, base)}
-    base[REINSERTION_CONTEXT_COL] = 1
+    base["removed_in_period"] = 1
     base[REINSERTION_PERIOD_COL] = 0
     scores["p_reinsertion_if_remove"] = predictor(fold_model, base)
     day = add_episode_day(df)["episode_day"]
     for removal_day in run_config.POLICY_DAYS:
         inputs = base.copy()
-        inputs[REINSERTION_CONTEXT_COL] = day.eq(removal_day).astype(int)
+        inputs["removed_in_period"] = day.eq(removal_day).astype(int)
         inputs[REINSERTION_PERIOD_COL] = (
             day - removal_day
         ).clip(lower=0).astype(int)
@@ -264,7 +309,7 @@ def add_fixed_day_target_policy_timeline(
     out.loc[later_row_on_remove_day, periods_out_col] = 0.0
     out.loc[after_remove, periods_out_col] = day.loc[after_remove] - remove_day.loc[after_remove]
     out["policy_removal_day_extra_row_treated_as_out"] = later_row_on_remove_day.astype(int)
-    out[f"policy_{REINSERTION_CONTEXT_COL}"] = day.eq(remove_day).astype(int)
+    out["policy_removed_in_period"] = out[action_col].eq("remove").astype(int)
     out[f"policy_{REINSERTION_PERIOD_COL}"] = (
         day - remove_day
     ).clip(lower=0).astype(int)
@@ -384,6 +429,8 @@ def rescore_state_action_predictions(
 def fill_missing_counterfactual_predictions(
     df,
     outcome_models_path,
+    *,
+    current_practice_expected_risk=False,
 ):
     # Standardise prediction columns and track rescored values
     for column in [*PREDICTION_COLUMNS, *reinsertion_policy_columns()]:
@@ -421,11 +468,15 @@ def fill_missing_counterfactual_predictions(
     for column in reinsertion_policy_columns():
         needed_specs.append(("out", "reinsertion", column, None))
     policy_complete = df.reindex(columns=policy_prediction_columns()).notna().all().all()
-    if not df[[*PREDICTION_COLUMNS, *reinsertion_policy_columns()]].isna().any().any() and policy_complete:
+    if (not current_practice_expected_risk
+            and not df[[*PREDICTION_COLUMNS, *reinsertion_policy_columns()]].isna().any().any()
+            and policy_complete):
         return df
 
     # Load saved outcome model artefacts
     payload = joblib.load(outcome_models_path)
+    if current_practice_expected_risk:
+        df = add_current_practice_cauti_predictions(df, payload)
 
     for state, outcome, col, action_remove in needed_specs:
         missing_mask = df[col].isna()

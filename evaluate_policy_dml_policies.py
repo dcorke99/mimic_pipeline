@@ -475,6 +475,9 @@ def fit_continuation(train, heldout, target, features, outcome, policy, stage, s
     else:
         model = clone(factory())
     model.fit(x, np.asarray(target)[at_risk])
+    # Match CPU prediction inputs after fitting on the configured training device.
+    if factory is None and settings["continuation_learner"] == "xgboost":
+        model.named_steps["xgboost"].set_params(device="cpu")
     return model, model_id
 
 

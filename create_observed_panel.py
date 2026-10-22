@@ -534,12 +534,11 @@ def build_base_panel(catheterised):
 
     # Number periods within episodes
     panel["episode_index"] = panel.groupby(["stay_id", "inserted"]).cumcount()
-    panel["episode_day"] = panel["episode_index"] + 1
     panel["is_decision_row"] = panel["catheter_state"].eq("in")
     # OUT time is measured from actual removal, not from the first OUT row.
     out_period = (panel["period_start"] - panel["removed"]) // PERIOD_DURATION + 1
     panel["periods_in_state"] = np.where(
-        panel["is_decision_row"], panel["episode_day"], out_period
+        panel["is_decision_row"], panel["episode_index"] + 1, out_period
     ).astype(int)
     panel = panel.drop(columns=["state_index"])
 
@@ -627,8 +626,7 @@ def build_base_panel(catheterised):
     validate_cauti_risk_set(panel, episode_keys)
 
     # Encode demographic categories
-    panel["sex_M"] = (panel["gender"] == "M").astype(int)
-    panel["sex_missing"] = panel["gender"].isna().astype(int)
+    panel["sex_M"] = panel["gender"].map({"M": 1, "F": 0})
     eth_dummies = pd.get_dummies(
         panel["ethnicity_group"], prefix="ethnicity", dtype=int
     )
@@ -653,7 +651,7 @@ def build_base_panel(catheterised):
     ])
 
     # Place columns consistently
-    panel = pec.add_reinsertion_context(panel)
+    panel = pec.add_reinsertion_periods(panel)
     ethnicity_cols = sorted([c for c in panel.columns if c.startswith("ethnicity_")])
     ordered_cols = [
         "subject_id",
@@ -665,7 +663,6 @@ def build_base_panel(catheterised):
         "episode_end_time",
         "catheter_state",
         "episode_index",
-        "episode_day",
         "is_decision_row",
         "period_start",
         "period_end",
@@ -673,7 +670,6 @@ def build_base_panel(catheterised):
         "catheter_in_hours",
         "catheter_out_hours",
         "periods_in_state",
-        pec.REINSERTION_CONTEXT_COL,
         pec.REINSERTION_PERIOD_COL,
         "removed_in_period",
         "reinsertion_in_period",
@@ -685,7 +681,6 @@ def build_base_panel(catheterised):
         "at_risk_reinsertion",
         "age",
         "sex_M",
-        "sex_missing",
         *ethnicity_cols,
         "cov_start",
         "cov_end",
@@ -1312,7 +1307,7 @@ def build_modelling_panel():
 
     # Load the base panel
     df = pd.read_csv(base_panel_file, low_memory=False)
-    df = pec.add_reinsertion_context(df)
+    df = pec.add_reinsertion_periods(df)
 
     # Parse panel timestamps
     for col in [

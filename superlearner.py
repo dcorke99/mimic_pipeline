@@ -22,6 +22,7 @@ class GroupedSuperLearner(ClassifierMixin, BaseEstimator):
 
     @staticmethod
     def _fit_library(estimators, features, target, stage="full_refit"):
+        print(f"[SUPERLEARNER] Starting {stage}; learners={len(estimators)}", flush=True)
         retained = np.array([
             col for col in range(features.shape[1])
             if np.unique(features[~np.isnan(features[:, col]), col]).size > 1
@@ -34,7 +35,6 @@ class GroupedSuperLearner(ClassifierMixin, BaseEstimator):
         fitted = []
         for name, template in estimators:
             model = clone(template)
-            print(f"[SUPERLEARNER] Starting {name}; {stage}", flush=True)
             model.fit(features[:, retained], target)
             if "xgboost" in model.named_steps:
                 model.named_steps["xgboost"].set_params(device="cpu")
