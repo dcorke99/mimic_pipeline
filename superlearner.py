@@ -21,8 +21,7 @@ class GroupedSuperLearner(ClassifierMixin, BaseEstimator):
         self.n_splits = n_splits
 
     @staticmethod
-    def _fit_library(estimators, features, target, stage="full_refit"):
-        print(f"[SUPERLEARNER] Starting {stage}; learners={len(estimators)}", flush=True)
+    def _fit_library(estimators, features, target):
         retained = np.array([
             col for col in range(features.shape[1])
             if np.unique(features[~np.isnan(features[:, col]), col]).size > 1
@@ -84,7 +83,6 @@ class GroupedSuperLearner(ClassifierMixin, BaseEstimator):
         ):
             library = self._fit_library(
                 self.estimators, features[training], target[training],
-                stage=f"inner_fold={fold + 1}/{self.n_inner_splits_}",
             )
             out_of_fold[validation] = self._library_predictions(library, features[validation])
             self.inner_fold_assignments_[validation] = fold

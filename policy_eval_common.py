@@ -64,7 +64,7 @@ def policy_feature_overrides(df, removal_day):
             - pd.to_datetime(df.inserted, format="mixed")) // pd.Timedelta(days=1) + 1).astype(int)
     # On legacy split-day rows only the first interval receives REMOVE, as in
     # the policy builder. The insertion-anchored panel has one row per day.
-    keys = ["subject_id", "hadm_id", "stay_id", "inserted", "removed"]
+    keys = ["subject_id", "stay_id", "inserted", "removed"]
     first = df.loc[day.eq(removal_day)].sort_values(["period_start", "period_end"]).groupby(
         keys, dropna=False, sort=False,
     ).head(1).index
@@ -426,10 +426,39 @@ def rescore_state_action_predictions(
     return df
 
 
+def load_model_features(df, payload, panel_path):
+    """Load model inputs from the source panel, preserving score row order."""
+    features = set()
+    for state in ("in", "out"):
+        for model in payload[f"{state}_models"].values():
+            features.update(model["features"])
+    keys = ["subject_id", "stay_id", "inserted", "episode_index"]
+    feature_columns = sorted(features - set(keys))
+    source = pd.read_csv(panel_path, usecols=[*keys, *feature_columns],
+                         dtype={"subject_id": str}, low_memory=False)
+
+    def row_index(frame):
+        identity = frame[keys].copy()
+        identity["subject_id"] = identity.subject_id.astype(str).str.strip()
+        identity["inserted"] = pd.to_datetime(identity.inserted, format="mixed", errors="raise")
+        return pd.MultiIndex.from_frame(identity)
+
+    source_index, score_index = row_index(source), row_index(df)
+    if source_index.has_duplicates or score_index.has_duplicates:
+        raise ValueError("Duplicate row identifiers when restoring nuisance model features")
+    positions = source_index.get_indexer(score_index)
+    if (positions < 0).any():
+        raise ValueError("Nuisance prediction rows do not match the source panel")
+    inputs = source.iloc[positions][feature_columns].set_axis(df.index)
+    context_and_scores = df.loc[:, [column for column in df if column not in feature_columns]]
+    return pd.concat([context_and_scores, inputs], axis=1)
+
+
 def fill_missing_counterfactual_predictions(
     df,
     outcome_models_path,
     *,
+    panel_path,
     current_practice_expected_risk=False,
 ):
     # Standardise prediction columns and track rescored values
@@ -475,6 +504,7 @@ def fill_missing_counterfactual_predictions(
 
     # Load saved outcome model artefacts
     payload = joblib.load(outcome_models_path)
+    df = load_model_features(df, payload, panel_path)
     if current_practice_expected_risk:
         df = add_current_practice_cauti_predictions(df, payload)
 

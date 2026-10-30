@@ -70,6 +70,49 @@ def saved_scores(panel):
 
 
 class GformulaCurrentPracticeTests(unittest.TestCase):
+    def test_compact_scores_load_features_by_identity_and_preserve_predictions(self):
+        panel, policy_rows = example()
+        models = payload()
+        for state in ("in", "out"):
+            for model in models[f"{state}_models"].values():
+                model["features"].append(synthetic.HEART_RATE_MEAN_COL)
+        before = saved_scores(panel).sample(frac=1, random_state=12).reset_index(drop=True)
+        compact = nuisance.compact_nuisance_predictions(before)
+        self.assertNotIn("age", compact)
+        self.assertFalse(any(column.startswith(("itemid_", "sex_", "ethnicity_")) for column in compact))
+        self.assertIn("_crossfit_fold", compact)
+        self.assertIn("episode_index", compact)
+        self.assertIn("cauti_in_period", compact)
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "panel.csv"
+            model_path = Path(directory) / "outcome_models.pkl"
+            panel.to_csv(source, index=False)
+            joblib.dump(models, model_path)
+            restored = pec.fill_missing_counterfactual_predictions(
+                compact, model_path, panel_path=source, current_practice_expected_risk=True,
+            )
+            expected = pec.add_current_practice_cauti_predictions(before, models)
+            for column in pec.PREDICTION_COLUMNS:
+                expected[f"__rescored_{column}"] = False
+        for column in ("age", synthetic.HEART_RATE_MEAN_COL, "_crossfit_fold"):
+            pd.testing.assert_series_equal(restored[column], expected[column])
+        actual_episodes = gformula.evaluate_policy_episodes(policy_rows, restored)[0]
+        expected_episodes = gformula.evaluate_policy_episodes(policy_rows, expected)[0]
+        pd.testing.assert_frame_equal(actual_episodes, expected_episodes)
+
+    def test_load_features_rejects_missing_or_duplicate_source_rows(self):
+        panel, _ = example()
+        compact = nuisance.compact_nuisance_predictions(saved_scores(panel))
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "panel.csv"
+            for invalid, message in (
+                (panel.iloc[1:], "do not match"),
+                (pd.concat([panel, panel.iloc[[0]]]), "Duplicate row identifiers"),
+            ):
+                invalid.to_csv(source, index=False)
+                with self.assertRaisesRegex(ValueError, message):
+                    pec.load_model_features(compact, payload(), source)
+
     def test_held_out_scoring_keeps_factual_features_and_replaces_masked_zeros(self):
         panel, _ = example()
         before = saved_scores(panel)
@@ -133,20 +176,23 @@ class GformulaCurrentPracticeTests(unittest.TestCase):
                               "periods_in_state": 1})
         self.assertEqual(pec.current_practice_cauti_window(panel).tolist(), [True, True, True, False, False])
 
-    def test_complete_legacy_saved_predictions_still_rescore_current_practice(self):
+    def test_complete_compact_predictions_still_rescore_current_practice(self):
         panel, _ = example()
         before = saved_scores(panel)
         self.assertFalse(before[pec.policy_prediction_columns()].isna().any().any())
         with TemporaryDirectory() as directory:
             path = Path(directory) / "outcome_models.pkl"
+            source = Path(directory) / "panel.csv"
+            panel.to_csv(source, index=False)
             joblib.dump(payload(), path)
+            compact = nuisance.compact_nuisance_predictions(before)
             actual = pec.fill_missing_counterfactual_predictions(
-                before.copy(), path, current_practice_expected_risk=True,
+                compact, path, panel_path=source, current_practice_expected_risk=True,
             )
         expected = pec.add_current_practice_cauti_predictions(before, payload())
         pd.testing.assert_series_equal(actual[pec.CURRENT_PRACTICE_CAUTI_COL],
                                        expected[pec.CURRENT_PRACTICE_CAUTI_COL])
-        pd.testing.assert_frame_equal(actual[before.columns], before)
+        pd.testing.assert_frame_equal(actual[compact.columns], compact)
 
     def test_missing_fold_or_patient_in_multiple_folds_fails(self):
         panel, _ = example()
@@ -156,6 +202,39 @@ class GformulaCurrentPracticeTests(unittest.TestCase):
         panel["_crossfit_fold"] = 99
         with self.assertRaisesRegex(ValueError, "Missing or invalid held-out"):
             pec.add_current_practice_cauti_predictions(panel, payload())
+
+    def test_multiple_saved_learners_write_separate_results(self):
+        panel, policy_rows = example()
+        with TemporaryDirectory() as directory, redirect_stdout(StringIO()):
+            root = Path(directory)
+            policy_dir = root / "policies"
+            policies.save_policy_panels(policy_rows, policy_dir / "panels")
+            panel_path = root / "panel.csv"
+            panel.to_csv(panel_path, index=False)
+            risks = []
+            for learner, increase in (("catboost", 0.), ("superlearner", .1)):
+                model_dir = root / "models" / learner
+                model_dir.mkdir(parents=True)
+                scores = nuisance.compact_nuisance_predictions(saved_scores(panel))
+                scores.to_csv(model_dir / "nuisance_predictions.csv", index=False)
+                models = payload()
+                for state in ("in", "out"):
+                    for fold in models[f"{state}_models"]["cauti"]["fold_models"]:
+                        fold["fallback_probability"] += increase
+                joblib.dump(models, model_dir / "outcome_models.pkl")
+                with patch.dict(gformula.run_config.POLICY_DIRS, {"test": policy_dir}), \
+                     patch.object(gformula, "N_BOOTSTRAP", 2):
+                    gformula.run_panel_estimation(
+                        panel_path, root / "models", learner, "fixed",
+                        panel_name="test", output_root=root / "results",
+                    )
+                outdir = root / "results/gformula" / learner / "fixed"
+                self.assertTrue((outdir / "diagnostics.csv").is_file())
+                values = pd.read_csv(outdir / "policy_values.csv")
+                risks.append(values.loc[values.policy_name.eq("current_practice") & values.outcome.eq("cauti"),
+                                        "point_estimate"].iloc[0])
+            self.assertGreater(risks[1], risks[0])
+            self.assertTrue((root / "results/gformula/catboost/fixed/policy_values.csv").is_file())
 
     def test_refit_bootstrap_preserves_training_risk_and_patient_resampling(self):
         panel, policy_rows = example()

@@ -1,7 +1,8 @@
 # Fit propensity and outcome nuisance models for policy evaluation
 from pathlib import Path
 import re
-
+from time import perf_counter
+import os
 import joblib
 from lightgbm import LGBMClassifier
 import numpy as np
@@ -27,6 +28,7 @@ from pipeline_config import MODEL_TYPES, SUPERLEARNER_BASE_MODELS
 
 # Configuration
 
+N_CPUS = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
 SEED = 42
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -81,14 +83,14 @@ LEARNER_CONFIGURATIONS = {
         "n_estimators": 200,
         "max_depth": None,
         "min_samples_leaf": 5,
-        "n_jobs": 1,
+        "n_jobs": N_CPUS,
         "random_state": SEED,
     },
     "extra_trees": {
         "n_estimators": 200,
         "max_depth": None,
         "min_samples_leaf": 5,
-        "n_jobs": 1,
+        "n_jobs": N_CPUS,
         "random_state": SEED,
     },
     "catboost": {
@@ -114,7 +116,7 @@ LEARNER_CONFIGURATIONS = {
         "tree_method": "hist",
         "device": "cuda",
         "random_state": SEED,
-        "n_jobs": 1,
+        "n_jobs": N_CPUS,
     },
     "lightgbm": {
         "objective": "binary",
@@ -129,7 +131,7 @@ LEARNER_CONFIGURATIONS = {
         "force_col_wise": True,
         "verbosity": -1,
         "random_state": SEED,
-        "n_jobs": 1,
+        "n_jobs": N_CPUS,
     },
 }
 
@@ -209,6 +211,23 @@ ALL_SCORE_COLS = [
 ]
 
 # Support functions
+
+
+def compact_nuisance_predictions(df):
+    """Export row identity, trajectory/outcome context and scores, without covariates."""
+    context = [
+        "subject_id", "stay_id", "inserted", "removed", "reinsertion_time",
+        "episode_end_time", "episode_end_reason", "simulation_end_time",
+        "episode_index", "catheter_state", "period_start", "period_end",
+        "interval_hours", "catheter_in_hours", "catheter_out_hours",
+        "periods_in_state", "reinsertion_periods_out", "observed_action",
+        "is_decision_row", "removed_in_period", "reinsertion_in_period",
+        "cauti_in_period", "death_in_period", "icu_exit_alive_in_period",
+        "at_risk_cauti", "at_risk_reinsertion", CROSSFIT_FOLD_COL,
+    ]
+    columns = [column for column in context if column in df]
+    columns.extend(column for column in df if column.startswith("p_"))
+    return df.loc[:, columns]
 
 
 def save_nuisance_report(df, path):
@@ -376,11 +395,6 @@ def fit_crossfit_fold_model(
     if model_type == "superlearner":
         if groups is None or len(groups) != len(features) or pd.isna(groups).any():
             raise ValueError("Super Learner requires aligned nonmissing patient groups")
-    progress_label = f"[{model_type.upper()}]"
-    print(
-        f"{progress_label} Starting outer_fold={fold + 1}; task={model_name}",
-        flush=True,
-    )
     events = int(target.sum())
     non_events = int(len(target) - events)
     retained_feature_cols, constant_features = split_constant_features(features)
@@ -401,7 +415,6 @@ def fit_crossfit_fold_model(
     elif model_type == "superlearner" and len(pd.unique(np.asarray(groups))) < 2:
         fallback_reason = "insufficient_inner_patient_groups"
     if fallback_reason is not None:
-        print(f"{progress_label} Using fallback; reason={fallback_reason}", flush=True)
         # Beta(1, 1) / Laplace smoothing avoids exact zero or one while using
         # only this fold's training rows. Held-out outcomes are never used
         fallback_probability = float(
@@ -1200,6 +1213,7 @@ def fit_outcome_scores(df, in_feature_cols, out_feature_cols, panel_name=None):
 
 
 def run_nuisance_model(model_type, panel_name=None):
+    started = perf_counter()
     configure_model_run(model_type)
     print(
         f"[MODEL] Starting {MODEL_OUTPUT_NAME} ({MODEL_TYPE})",
@@ -1254,22 +1268,23 @@ def run_nuisance_model(model_type, panel_name=None):
         OUTDIR / "fold_performance_metrics.csv",
     )
 
-    # Save the modelling panel with nuisance scores inserted before age.
-    excluded_cols = {Y_NO_EVENT_IN, Y_NO_EVENT_OUT}
-    output_cols = [
-        col for col in df.columns
-        if col not in excluded_cols and col not in ALL_SCORE_COLS
-    ]
-    insert_at = output_cols.index("age")
-    output_cols[insert_at:insert_at] = ALL_SCORE_COLS
-    df.to_csv(
+    # Covariates remain in the source panel rather than every learner's scores.
+    compact_nuisance_predictions(df).to_csv(
         NUISANCE_PREDICTIONS_FILE,
-        columns=output_cols,
         index=False,
         float_format="%.6f",
     )
+    elapsed_seconds = perf_counter() - started
+    pd.DataFrame([{
+        "panel": panel_name or INFILE.stem,
+        "model_type": MODEL_TYPE,
+        "elapsed_seconds": elapsed_seconds,
+        "elapsed_minutes": elapsed_seconds / 60,
+    }]).to_csv(OUTDIR / "fit_timing.csv", index=False)
     print(
-        f"[MODEL] Completed {MODEL_OUTPUT_NAME} ({MODEL_TYPE})",
+        f"[MODEL] Completed {MODEL_OUTPUT_NAME} ({MODEL_TYPE}); "
+        f"panel={panel_name or INFILE.stem}; "
+        f"elapsed_seconds={elapsed_seconds:.2f}; elapsed_minutes={elapsed_seconds / 60:.2f}",
         flush=True,
     )
 

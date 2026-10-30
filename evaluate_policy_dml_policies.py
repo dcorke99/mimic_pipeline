@@ -6,13 +6,17 @@ OUT rows supply linked outcomes to the last IN decision. Recursive scores
 remain unbounded.
 """
 
+import hashlib
 import json
 from pathlib import Path
 from time import monotonic
-
+import os
 import numpy as np
 import pandas as pd
+import joblib
+from catboost import CatBoostRegressor
 from sklearn.base import clone
+from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
@@ -23,9 +27,11 @@ from xgboost import XGBRegressor
 import build_policy_panels as policy_inputs
 import fit_nuisance_models as nuisance
 import pipeline_config as run_config
-from pipeline_config import BOOTSTRAP_MODES, NUISANCE_MODEL_TYPE
+from pipeline_config import BOOTSTRAP_MODES, EVALUATION_MODEL_TYPES, POLICY_DML_CONTINUATION_LEARNERS
 import policy_eval_common as pec
 import policy_inference as inference
+
+N_CPUS = int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1))
 
 FOLD = "_crossfit_fold"
 EPISODE = "catheter_episode_id"
@@ -47,7 +53,7 @@ SETTINGS = {
     "n_folds": 5,
     "inner_folds": 2,
     "seed": SEED,
-    "continuation_learner": run_config.POLICY_DML_CONTINUATION_LEARNER,
+    "continuation_learner": next(iter(POLICY_DML_CONTINUATION_LEARNERS), "xgboost"),
     "propensity_clip": None,
     "horizon_hours": None,
 }
@@ -61,14 +67,14 @@ LEARNER_CONFIGURATIONS = {
         "n_estimators": 100,
         "max_depth": None,
         "min_samples_leaf": 5,
-        "n_jobs": -1,
+        "n_jobs": N_CPUS,
         "random_state": SEED,
     },
     "extra_trees": {
         "n_estimators": 100,
         "max_depth": None,
         "min_samples_leaf": 5,
-        "n_jobs": -1,
+        "n_jobs": N_CPUS,
         "random_state": SEED,
     },
     "xgboost": {
@@ -81,7 +87,20 @@ LEARNER_CONFIGURATIONS = {
         "tree_method": "hist",
         "device": "cuda",
         "random_state": SEED,
-        "n_jobs": -1,
+        "n_jobs": N_CPUS,
+    },
+    "catboost": {
+        "loss_function": "RMSE",
+        "iterations": 100,
+        "depth": 6,
+        "learning_rate": 0.05,
+        "nan_mode": "Min",
+        "allow_const_label": True,
+        "task_type": "GPU",
+        "thread_count": N_CPUS,
+        "random_seed": SEED,
+        "verbose": False,
+        "allow_writing_files": False,
     },
 }
 
@@ -105,6 +124,12 @@ LEARNER_PREPROCESSING = {
         "native_missing_handling": False,
     },
     "xgboost": {
+        "preprocessing_type": "native_missing_values",
+        "imputation_used": False,
+        "scaling_used": False,
+        "native_missing_handling": True,
+    },
+    "catboost": {
         "preprocessing_type": "native_missing_values",
         "imputation_used": False,
         "scaling_used": False,
@@ -366,6 +391,7 @@ def make_regressor(settings):
         "random_forest": RandomForestRegressor,
         "extra_trees": ExtraTreesRegressor,
         "xgboost": XGBRegressor,
+        "catboost": CatBoostRegressor,
     }
     learner_configuration = LEARNER_CONFIGURATIONS[model_type]
     estimator = estimator_types[model_type](**learner_configuration)
@@ -381,7 +407,7 @@ def make_regressor(settings):
 
 def record_fit(audit, train, predict, *, component, outer_fold, inner_fold=None,
                policy="all", outcome="all", period="all", action_counts=None):
-    """Record a model fit and periodically print progress."""
+    """Record model membership and fitting time independently of progress output."""
     if set(train.subject_id) & set(predict.subject_id):
         raise ValueError("Patient leakage in model training/prediction membership")
     if train.empty:
@@ -391,14 +417,25 @@ def record_fit(audit, train, predict, *, component, outer_fold, inner_fold=None,
                              "inner_fold": inner_fold, "policy": policy, "outcome": outcome,
                              "decision_period": period, "training_folds": sorted(train[FOLD].unique().tolist()),
                              "held_out_fold": int(outer_fold), "training_rows": len(train),
-                             "held_out_rows": len(predict), "action_counts": action_counts})
-    now = monotonic()
-    if audit["progress"] and now - audit["last_message"] >= 30:
-        print(f"[POLICY-DML FIT] {audit['context']}; models={len(audit['records'])}; "
-              f"elapsed_minutes={(now - audit['started']) / 60:.1f}; outer_fold={outer_fold}; "
-              f"inner_fold={inner_fold}; policy={policy}; outcome={outcome}; period={period}", flush=True)
-        audit["last_message"] = now
+                             "held_out_rows": len(predict), "action_counts": action_counts,
+                             "fit_seconds": 0.0, "fit_performed": False})
     return model_id
+
+
+def summarise_fit_timing(records, phase, *, bootstrap_replicate=None, clipping_epsilon=None):
+    """Aggregate wall-clock fitting time without retaining the per-model audit."""
+    frame = pd.DataFrame(records)
+    if frame.empty:
+        return []
+    summary = frame.groupby("component", sort=False).agg(
+        fit_seconds=("fit_seconds", "sum"),
+        n_fits=("fit_performed", "sum"),
+        n_records=("model_id", "size"),
+    ).reset_index()
+    summary["phase"] = phase
+    summary["bootstrap_replicate"] = bootstrap_replicate
+    summary["clipping_epsilon"] = clipping_epsilon
+    return summary.to_dict("records")
 
 
 def _next_scores(frame, values):
@@ -470,11 +507,19 @@ def fit_continuation(train, heldout, target, features, outcome, policy, stage, s
             raise ValueError("No CAUTI-risk training trajectories at this stage")
         return None, model_id
     x = eligible[[*features, "removed_in_period"]]
-    if factory is None:
+    if (factory is None and settings["continuation_learner"] == "catboost"
+            and x.nunique(dropna=False).le(1).all()):
+        # CatBoost cannot split an entirely constant feature matrix. With no
+        # predictive variation, the training mean minimises squared error.
+        model = DummyRegressor(strategy="mean")
+        audit["records"][-1]["fallback_reason"] = "constant_continuation_features"
+    elif factory is None:
         model = make_regressor(settings)
     else:
         model = clone(factory())
+    fit_started = monotonic()
     model.fit(x, np.asarray(target)[at_risk])
+    audit["records"][-1].update(fit_seconds=monotonic() - fit_started, fit_performed=True)
     # Match CPU prediction inputs after fitting on the configured training device.
     if factory is None and settings["continuation_learner"] == "xgboost":
         model.named_steps["xgboost"].set_params(device="cpu")
@@ -497,10 +542,59 @@ def predict_actions(model, frame, features, outcome):
     return tuple(answers)
 
 
+def behaviour_predictions(train, held, features, learner, outer, inner, audit, cache=None):
+    """Reuse predictions only for identical behaviour fits and ordered inputs.
+
+    Cache probabilities, not potentially multi-GB fitted ensembles. Outcomes
+    and continuation settings are deliberately absent: they do not enter g.
+    Training actions, patient/fold ownership, multiplicities, feature values,
+    prediction order and nuisance-model configuration all enter the key.
+    """
+    key = None
+    if cache is not None:
+        def fingerprint(frame, columns):
+            values = frame.loc[:, columns]
+            digest = hashlib.sha256(
+                pd.util.hash_pandas_object(values, index=False).to_numpy().tobytes()
+            ).hexdigest()
+            return (tuple(columns), tuple(map(str, values.dtypes)), len(values), digest)
+
+        identity = ["subject_id", FOLD, ROW]
+        configuration = joblib.hash((
+            nuisance.LEARNER_CONFIGURATIONS, nuisance.LEARNER_PREPROCESSING,
+            nuisance.SUPERLEARNER_BASE_MODELS, nuisance.SUPERLEARNER_INNER_FOLDS,
+            nuisance.FALLBACK_PRIOR_EVENTS, nuisance.FALLBACK_PRIOR_NON_EVENTS,
+        ))
+        key = (learner, configuration, int(outer), inner,
+               fingerprint(train, [*identity, *features, "removed_in_period"]),
+               fingerprint(held, [*identity, *features]))
+    reused = cache is not None and key in cache
+    model_id = record_fit(
+        audit, train, held, component="cached_behaviour" if reused else "behaviour",
+        outer_fold=outer, inner_fold=inner,
+    )
+    if reused:
+        g_train, g_held = cache[key]
+        return None if g_train is None else g_train.copy(), g_held.copy(), model_id
+
+    fit_started = monotonic()
+    model = nuisance.fit_crossfit_fold_model(
+        train[features], train.removed_in_period, "policy_dml_behaviour", outer,
+        model_type=learner, groups=train.subject_id,
+    )
+    audit["records"][-1].update(fit_seconds=monotonic() - fit_started, fit_performed=True)
+    g_held = nuisance.predict_crossfit_fold(model, held[features])
+    g_train = nuisance.predict_crossfit_fold(model, train[features]) if inner is not None else None
+    if cache is not None:
+        cache[key] = (None if g_train is None else g_train.copy(), g_held.copy())
+    return g_train, g_held, model_id
+
+
 # Fit nested patient folds and calculate each held-out decision score.
 def crossfit_policy_scores(decisions, policies, *, settings=None, behaviour_learner="logistic_regression",
                           saved_behaviour=None, patient_counts=None, regressor_factory=None,
-                          progress=False, progress_detail=False, progress_context="panel"):
+                          progress=False,
+                          behaviour_cache=None):
     """Outer OOF score, with nested OOF targets isolated from the outer fold.
 
     saved_behaviour is a validated decision-row keyed table including g and
@@ -550,37 +644,18 @@ def crossfit_policy_scores(decisions, policies, *, settings=None, behaviour_lear
                                  f"inner fold {inner_fold}. Choose an explicit evaluation horizon or a model "
                                  "that pools information across periods; no continuation models have been fitted.")
         inner_assignments[outer] = inner
-    # One record per fit, with a timer for progress messages.
-    started = monotonic()
-    audit = {"records": [], "progress": progress, "context": progress_context,
-             "started": started, "last_message": started}
+    audit = {"records": []}
     results = []
     for outer_number, outer in enumerate(outer_folds, start=1):
         if progress:
-            print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; phase=targets", flush=True)
+            print(f"  Outer fold {outer_number}/{len(outer_folds)}: behaviour model", flush=True)
         train = df.loc[df[FOLD].ne(outer)].copy().reset_index(drop=True)
         held = df.loc[df[FOLD].eq(outer)].copy().reset_index(drop=True)
         expanded = train.loc[train.index.repeat(train.subject_id.map(patient_counts))].reset_index(drop=True)
         if saved_behaviour is None:
-            behaviour_id = record_fit(
-                audit,
-                expanded,
-                held,
-                component="behaviour",
-                outer_fold=outer,
-                inner_fold=None,
-            )
-            fitted_behaviour = nuisance.fit_crossfit_fold_model(
-                expanded[behaviour_features],
-                expanded.removed_in_period,
-                "policy_dml_behaviour",
-                outer,
-                model_type=behaviour_learner,
-                groups=expanded.subject_id,
-            )
-            g_held = nuisance.predict_crossfit_fold(
-                fitted_behaviour,
-                held[behaviour_features],
+            _, g_held, behaviour_id = behaviour_predictions(
+                expanded, held, behaviour_features, behaviour_learner, outer, None,
+                audit, behaviour_cache,
             )
         else:
             g_held = held.p_remove_obs.to_numpy()
@@ -588,53 +663,35 @@ def crossfit_policy_scores(decisions, policies, *, settings=None, behaviour_lear
         # Inner assignment uses source patient identity, before multiplicity.
         inner = inner_assignments[outer]
         inner_targets = {p['name']: np.full((len(train), len(OUTCOMES)), np.nan) for p in policies}
-        for inner_fold in np.unique(inner):
-            if progress_detail:
-                print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; "
-                      f"inner={int(inner_fold) + 1}/{len(np.unique(inner))}; phase=auxiliary", flush=True)
+        inner_folds = np.unique(inner)
+        for inner_number, inner_fold in enumerate(inner_folds, start=1):
+            if progress:
+                print(f"    Inner fold {inner_number}/{len(inner_folds)}: behaviour model", flush=True)
             training = train.loc[inner != inner_fold].copy().reset_index(drop=True)
             inner_held = train.loc[inner == inner_fold].copy().reset_index(drop=True)
             training = training.loc[training.index.repeat(training.subject_id.map(patient_counts))].reset_index(drop=True)
             # Duplicate rows need a unique internal trajectory identity while
             # retaining original patient ownership in model training.
             training = expand_training_trajectories(training)
-            record_fit(
-                audit,
-                training,
-                inner_held,
-                component="behaviour",
-                outer_fold=outer,
-                inner_fold=int(inner_fold),
+            g_training, g_inner, _ = behaviour_predictions(
+                training, inner_held, behaviour_features, behaviour_learner, outer,
+                int(inner_fold), audit, behaviour_cache,
             )
-            g_model = nuisance.fit_crossfit_fold_model(
-                training[behaviour_features],
-                training.removed_in_period,
-                "policy_dml_behaviour",
-                outer,
-                model_type=behaviour_learner,
-                groups=training.subject_id,
-            )
-            g_inner = nuisance.predict_crossfit_fold(
-                g_model,
-                inner_held[behaviour_features],
-            )
-            g_training = nuisance.predict_crossfit_fold(g_model, training[behaviour_features])
-            for policy in policies:
+            for policy_number, policy in enumerate(policies, start=1):
+                if progress:
+                    print(f"      Policy {policy_number}/{len(policies)}: {policy['name']} (continuation targets)", flush=True)
                 inner_targets[policy['name']][inner == inner_fold] = fit_backward_sequence(
                     training, inner_held, g_training, g_inner, policy, features, settings, audit,
                     outer, int(inner_fold), regressor_factory)
-                if progress_detail:
-                    print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; "
-                          f"inner={int(inner_fold) + 1}/{len(np.unique(inner))}; policy={policy['name']}; completed", flush=True)
-        for policy in policies:
-            if progress_detail:
-                print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; "
-                      f"policy={policy['name']}; phase=outer_scores", flush=True)
+        for policy_number, policy in enumerate(policies, start=1):
+            if progress:
+                print(f"    Policy {policy_number}/{len(policies)}: {policy['name']} (continuation and scoring)", flush=True)
             pi = policy_probabilities(policy, held, g_held)
             quantities = ratio_quantities(held.removed_in_period, pi, g_held, settings['propensity_clip'])
             scores = np.zeros((len(held), len(OUTCOMES)))
             training_next = np.column_stack([_next_scores(train, inner_targets[policy['name']][:, k]) for k in range(len(OUTCOMES))])
-            for stage in sorted(held.decision_period.unique(), reverse=True):
+            stages = sorted(held.decision_period.unique(), reverse=True)
+            for stage in stages:
                 tr = train.decision_period.eq(stage)
                 ho = np.flatnonzero(held.decision_period.eq(stage))
                 repeat = np.repeat(np.flatnonzero(tr), train.loc[tr, "subject_id"].map(patient_counts))
@@ -648,7 +705,7 @@ def crossfit_policy_scores(decisions, policies, *, settings=None, behaviour_lear
                     score, qbar, qobs = recursive_step(held[f"reward_{outcome}"].to_numpy()[ho], nxt, q0, q1,
                                                       held.removed_in_period.to_numpy()[ho], pi[ho], quantities["ratio"][ho])
                     scores[ho, k] = score
-                    part = held.iloc[ho][["subject_id", "hadm_id", "stay_id", "inserted", "removed", EPISODE, ROW, FOLD,
+                    part = held.iloc[ho][["subject_id", "stay_id", "inserted", "removed", EPISODE, ROW, FOLD,
                                          "decision_period", "period_start", "period_end", "next_decision_row_id", "removed_in_period", "n_linked_out_rows"]].copy()
                     part["policy_name"], part["policy_type"], part["policy_remove_day"] = policy['name'], policy['kind'], policy['remove_day']
                     part["outcome"] = outcome
@@ -662,7 +719,7 @@ def crossfit_policy_scores(decisions, policies, *, settings=None, behaviour_lear
                     part["clipping_epsilon"] = settings['propensity_clip']
                     results.append(part)
         if progress:
-            print(f"[POLICY-DML FIT] {progress_context}; outer={outer_number}/{len(outer_folds)}; completed", flush=True)
+            print(f"  Outer fold {outer_number}/{len(outer_folds)} complete", flush=True)
     rows = pd.concat(results, ignore_index=True).sort_values(["policy_name", "outcome", EPISODE, "decision_period"]).reset_index(drop=True)
     groups = ["policy_name", "outcome", EPISODE]
     rows["cumulative_ratio"] = rows.groupby(groups).ratio.cumprod()
@@ -689,7 +746,7 @@ def expand_training_trajectories(frame):
 # Summarise episode values, support and bootstrap uncertainty.
 def episode_scores(rows):
     keys = ["policy_name", "policy_type", "policy_remove_day", "subject_id", EPISODE, FOLD]
-    keys += [c for c in ("hadm_id", "stay_id", "inserted", "removed") if c in rows]
+    keys += [c for c in ("stay_id", "inserted", "removed") if c in rows]
     first = rows.loc[rows.decision_period.eq(1)]
     if first.duplicated(["policy_name", EPISODE, "outcome"]).any():
         raise ValueError("More than one first score per episode")
@@ -745,7 +802,8 @@ def load_saved_behaviour(decisions, model_dir):
     directory = Path(model_dir)
     score_path = directory / "nuisance_predictions.csv"
     # Match the saved identifier types to the prepared decision rows.
-    scores = pd.read_csv(score_path, low_memory=False)
+    scores = pd.read_csv(score_path, usecols=[*KEYS, FOLD, "p_remove_obs"],
+                         dtype={"subject_id": str}, low_memory=False)
     scores["subject_id"] = scores.subject_id.astype(str)
     scores["inserted"] = pd.to_datetime(scores.inserted, format="mixed")
     output = decisions[[ROW, *KEYS]].merge(
@@ -788,7 +846,9 @@ def patient_statistics(episodes):
     return subjects, pd.DataFrame(entries), np.stack(sums, axis=1)
 
 
-def run_bootstrap(episodes, decisions, policies, output, *, mode, settings, learner, n_bootstrap, seed, regressor_factory=None):
+def run_bootstrap(episodes, decisions, policies, output, *, mode, settings, learner, n_bootstrap, seed,
+                  regressor_factory=None, behaviour_cache=None, timing_records=None):
+    print(f"Bootstrap ({mode}): {n_bootstrap} draws", flush=True)
     subjects, entries, statistics = patient_statistics(episodes)
     # Average episode scores after applying each patient's bootstrap count.
     totals = np.einsum("i,ijk->jk", np.ones(len(subjects)), statistics)
@@ -803,17 +863,24 @@ def run_bootstrap(episodes, decisions, policies, output, *, mode, settings, lear
             totals = np.einsum("i,ijk->jk", counts, statistics)
             values[replicate] = totals[:, 0] / totals[:, 1]
         else:
+            print(f"Bootstrap draw {replicate + 1}/{n_bootstrap}", flush=True)
             # Entire patient ownership, including duplicate copies, stays fixed.
-            scored, _, _ = crossfit_policy_scores(decisions, policies, settings=settings,
+            draw_cache = (None if behaviour_cache is None else
+                          behaviour_cache.setdefault(("bootstrap", seed, replicate), {}))
+            scored, fit_records, _ = crossfit_policy_scores(decisions, policies, settings=settings,
                 behaviour_learner=learner, patient_counts=multiplicity, regressor_factory=regressor_factory,
-                progress=True, progress_context=f"bootstrap={replicate + 1}")
+                progress=True, behaviour_cache=draw_cache)
+            if timing_records is not None:
+                timing_records.extend(summarise_fit_timing(
+                    fit_records, "bootstrap", bootstrap_replicate=replicate + 1,
+                    clipping_epsilon=settings['propensity_clip']))
             sampled = episode_scores(scored)
             sampled_subjects, _, sampled_stats = patient_statistics(sampled)
             sampled_counts = multiplicity.reindex(sampled_subjects).to_numpy()
             totals = np.einsum("i,ijk->jk", sampled_counts, sampled_stats)
             values[replicate] = totals[:, 0] / totals[:, 1]
-        if (replicate + 1) % 5 == 0 or replicate + 1 == n_bootstrap:
-            print(f"[BOOTSTRAP] estimator=policy_dml; bootstrap={mode}; completed={replicate + 1}/{n_bootstrap}", flush=True)
+        if mode == "refit" or (replicate + 1) % 10 == 0 or replicate + 1 == n_bootstrap:
+            print(f"Bootstrap draws complete: {replicate + 1}/{n_bootstrap}", flush=True)
     if n_bootstrap:
         interval = inference.interval_table(entries, point, values, len(subjects))
         interval["bootstrap_mode"] = mode
@@ -827,23 +894,29 @@ def run_bootstrap(episodes, decisions, policies, output, *, mode, settings, lear
 
 # Read the configured inputs and run estimation for each selected panel.
 def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, panel_name=None, *,
-                         settings=None, n_bootstrap=None, regressor_factory=None):
+                         settings=None, n_bootstrap=None, regressor_factory=None, behaviour_cache=None):
     if settings is None:
         settings = dict(SETTINGS)
         settings["horizon_hours"] = run_config.POLICY_DML_HORIZON_HOURS.get(panel_name, SETTINGS["horizon_hours"])
     n_bootstrap = N_BOOTSTRAP if n_bootstrap is None else n_bootstrap
-    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; bootstrap={bootstrap_mode}; phase=load_panel", flush=True)
+    panel_label = panel_name or Path(panel_path).stem
+    behaviour_cache = {} if behaviour_cache is None else behaviour_cache
+    point_cache = behaviour_cache.setdefault("point", {})
+    print(f"\nPolicy DML: {panel_label}; behaviour={model_type}; "
+          f"continuation={settings['continuation_learner']}; bootstrap={bootstrap_mode}", flush=True)
+    print("Loading panel", flush=True)
     panel = nuisance.load_panel(panel_path)
-    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; phase=prepare_decisions", flush=True)
+    print("Preparing decisions", flush=True)
     decisions, _ = prepare_decisions(panel, settings)
-    policies = configured_policies(run_config.POLICY_DAYS)
-    # Attach each policy's instruction to the observed decision rows.
-    policy_dir = run_config.POLICY_DIRS[panel_name]
-    manifest = pd.read_csv(policy_dir / "policy_panels.csv")
-    for day in run_config.POLICY_DAYS:
-        policy = manifest.loc[manifest.policy_remove_day.eq(day)].iloc[0]
+    # Discover the existing policy panels, using the same list as g-formula.
+    policies = configured_policies([])
+    policy_dir = run_config.POLICY_DIRS[panel_name] / "panels"
+    for policy in policy_inputs.discover_policy_panels(policy_dir):
+        day = policy["remove_day"]
+        policies.append({key: policy[key] for key in ("name", "kind", "remove_day")})
+        # Attach each saved policy's instruction to the decision rows.
         actions = pd.read_csv(
-            policy_dir / policy.panel_file,
+            policy["path"],
             usecols=[ROW, "policy_dml_action"],
         ).rename(columns={"policy_dml_action": f"policy_dml_action_{day}"})
         decisions = decisions.merge(actions, on=ROW, how="left", validate="one_to_one")
@@ -860,20 +933,26 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
     approximate_fits = outer_folds * (settings['inner_folds'] + 1) * len(policies) * len(OUTCOMES) * stages
     learner_configuration = LEARNER_CONFIGURATIONS[settings["continuation_learner"]]
     learner_preprocessing = LEARNER_PREPROCESSING[settings["continuation_learner"]]
-    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; phase=point_estimate; "
+    print(f"Point estimate: "
           f"patients={decisions.subject_id.nunique()}; decisions={len(decisions)}; stages={stages}; "
           f"outer_folds={outer_folds}; inner_folds={settings['inner_folds']}; policies={len(policies)}; "
-          f"continuation={settings['continuation_learner']}; trees={learner_configuration.get('n_estimators', 'n/a')}; "
-          f"jobs={learner_configuration.get('n_jobs', 'n/a')}; approximate_fits={approximate_fits}", flush=True)
-    rows, _, folded = crossfit_policy_scores(decisions, policies, settings=settings, behaviour_learner=model_type,
+          f"continuation={settings['continuation_learner']}; "
+          f"trees={learner_configuration.get('n_estimators', learner_configuration.get('iterations', 'n/a'))}; "
+          f"jobs={learner_configuration.get('n_jobs', learner_configuration.get('thread_count', 'n/a'))}; "
+          f"approximate_fits={approximate_fits}", flush=True)
+    rows, fit_records, folded = crossfit_policy_scores(decisions, policies, settings=settings, behaviour_learner=model_type,
                                             saved_behaviour=saved, regressor_factory=regressor_factory,
-                                            progress=True, progress_detail=True,
-                                            progress_context=panel_name or Path(panel_path).stem)
-    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}; phase=point_estimate; completed", flush=True)
+                                            progress=True,
+                                            behaviour_cache=point_cache)
+    timing_records = summarise_fit_timing(
+        fit_records, "point_estimate", clipping_epsilon=settings['propensity_clip'])
+    print("Point estimate complete", flush=True)
     episodes = episode_scores(rows)
     summary = policy_summary(episodes, decisions)
-    output = run_config.RESULT_DIRS[panel_name] / "policy_dml" / bootstrap_mode
+    output = (run_config.RESULT_DIRS[panel_name] / "policy_dml" / model_type
+              / settings["continuation_learner"] / bootstrap_mode)
     output.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(timing_records).to_csv(output / "fit_timing.csv", index=False)
     support_diagnostics(rows).to_csv(output / "diagnostics.csv", index=False)
     metadata = {"estimator": "CoR Appendix B.2 recursive Policy-DML", "settings": settings,
                 "continuation_configuration": learner_configuration,
@@ -886,30 +965,47 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
                 "censoring": "structural endpoints only; nonterminal censoring rejected",
                 "exposure": pec.EXPOSURE_MEASURE, "scores_clipped": False,
                 "fixed_day_off_path_extension": "remove on first available IN decision on/after the target day",
-                "continuation_targets": "nested patient OOF recursive scores; auxiliary nuisance fits exclude outer and inner held-out patients"}
+                "continuation_targets": "nested patient OOF recursive scores; auxiliary nuisance fits exclude outer and inner held-out patients",
+                "behaviour_prediction_reuse": "in-memory; identical inputs and model configuration; separate bootstrap draw caches"}
     (output / "run_settings.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     run_bootstrap(episodes, folded.drop(columns="p_remove_obs", errors="ignore"), policies, output,
                   mode=bootstrap_mode, settings=settings, learner=model_type, n_bootstrap=n_bootstrap,
-                  seed=BOOTSTRAP_SEED, regressor_factory=regressor_factory)
+                  seed=BOOTSTRAP_SEED, regressor_factory=regressor_factory, behaviour_cache=behaviour_cache,
+                  timing_records=timing_records)
+    pd.DataFrame(timing_records).to_csv(output / "fit_timing.csv", index=False)
     sensitivity = []
-    for clip in CLIPPING_SENSITIVITY:
-        alternative, _, _ = crossfit_policy_scores(decisions, policies, settings=dict(settings, propensity_clip=clip),
-                                                  behaviour_learner=model_type, saved_behaviour=saved, regressor_factory=regressor_factory)
+    for clip_number, clip in enumerate(CLIPPING_SENSITIVITY, start=1):
+        print(f"Clipping sensitivity {clip_number}/{len(CLIPPING_SENSITIVITY)}: epsilon={clip}", flush=True)
+        alternative, fit_records, _ = crossfit_policy_scores(decisions, policies, settings=dict(settings, propensity_clip=clip),
+                                                  behaviour_learner=model_type, saved_behaviour=saved, regressor_factory=regressor_factory,
+                                                  behaviour_cache=point_cache, progress=True)
+        timing_records.extend(summarise_fit_timing(
+            fit_records, "clipping_sensitivity", clipping_epsilon=clip))
+        pd.DataFrame(timing_records).to_csv(output / "fit_timing.csv", index=False)
         result = policy_summary(episode_scores(alternative), decisions)
         result["clipping_epsilon"] = clip
         sensitivity.append(result)
     if sensitivity:
         pd.concat(sensitivity, ignore_index=True).to_csv(output / "clipping_sensitivity.csv", index=False)
-    print(f"[POLICY-DML] {panel_name or Path(panel_path).stem}: {len(episodes) // len(policies)} episodes; saved {output}", flush=True)
+    print(f"Policy DML complete: {len(episodes) // len(policies)} episodes; saved {output}", flush=True)
     return summary, episodes, rows
 
 
 def main():
     for name, panel, nuisance_root in PANEL_RUNS:
-        panel_settings = dict(SETTINGS, horizon_hours=run_config.POLICY_DML_HORIZON_HOURS[name])
-        for mode in BOOTSTRAP_MODES:
-            run_panel_estimation(panel, nuisance_root, NUISANCE_MODEL_TYPE, mode, name,
-                                 settings=panel_settings, n_bootstrap=N_BOOTSTRAP)
+        for model_type in EVALUATION_MODEL_TYPES:
+            # Share only behaviour probabilities across this panel/learner's
+            # continuation choices, bootstrap modes and clipping sensitivity.
+            behaviour_cache = {}
+            for continuation in POLICY_DML_CONTINUATION_LEARNERS:
+                for mode in BOOTSTRAP_MODES:
+                    panel_settings = dict(
+                        SETTINGS, horizon_hours=run_config.POLICY_DML_HORIZON_HOURS[name],
+                        continuation_learner=continuation,
+                    )
+                    run_panel_estimation(panel, nuisance_root, model_type, mode, name,
+                                         settings=panel_settings, n_bootstrap=N_BOOTSTRAP,
+                                         behaviour_cache=behaviour_cache)
 
 
 if __name__ == "__main__":

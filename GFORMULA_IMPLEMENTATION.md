@@ -1,5 +1,10 @@
 # G-formula current-practice comparator
 
+`EVALUATION_MODEL_TYPES` in `pipeline_config.py` selects nuisance learners.
+G-formula evaluates each selection separately for every selected panel and
+bootstrap mode, using that learner's own saved or refitted nuisance models.
+Results go to `artefacts/results/<panel>/gformula/<learner>/<bootstrap>/`.
+
 `evaluate_gformula_policies.py` estimates episode-level expected first-CAUTI
 risk as `1 - product(1 - hazard)` along the factual treatment trajectory on
 the preserved episode grid. This comparator uses the observed actions, including
@@ -26,6 +31,13 @@ Existing saved nuisance models can be reused if they were fitted on the correcte
 first-event training risk sets and their saved features and fold assignments
 still match the panel. Models trained before that correction require refitting.
 The evaluator cannot recover underlying hazards from masked probabilities alone.
+
+Nuisance prediction exports omit model covariates. Before rescoring in fixed
+mode, the evaluator always loads features required by the saved models
+from the original panel, matching `subject_id`, `stay_id`, `inserted` and
+`episode_index`. It preserves prediction row order and saved fold assignments,
+and rejects duplicate identifiers or unmatched rows. Only the required model
+inputs and matching identifiers are read from the source panel.
 
 New nuisance fits export the separate unmasked column. Refit point estimates and
 every refitted bootstrap draw generate it from their newly fitted held-out

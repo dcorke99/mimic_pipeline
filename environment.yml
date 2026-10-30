@@ -1,0 +1,31 @@
+name: PhDResearch
+
+dependencies:
+  - python=3.14.8
+  - pip
+  - pip:
+      - catboost
+      - cloudpickle
+      - contourpy
+      - cycler
+      - fonttools
+      - graphviz
+      - joblib
+      - kiwisolver
+      - lightgbm
+      - matplotlib
+      - narwhals
+      - numpy
+      - packaging
+      - pandas
+      - pillow
+      - plotly
+      - pyparsing
+      - python-dateutil
+      - scikit-learn
+      - scipy
+      - six
+      - threadpoolctl
+      - tzdata
+      - xgboost
+prefix: C:\Users\DavidUni\miniconda3\envs\PhDResearch

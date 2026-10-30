@@ -137,6 +137,10 @@ class SuperLearnerTests(unittest.TestCase):
                 for filename in ("nuisance_predictions.csv", "propensity_model.pkl", "outcome_models.pkl",
                                  "performance_metrics.csv", "superlearner_weights_by_fold.csv"):
                     self.assertTrue((output / filename).is_file(), filename)
+                scores = pd.read_csv(output / "nuisance_predictions.csv")
+                self.assertNotIn("age", scores)
+                self.assertFalse(any(column.startswith(("itemid_", "sex_", "ethnicity_")) for column in scores))
+                self.assertTrue({"subject_id", "episode_index", "_crossfit_fold", "p_remove_obs", "p_cauti_if_keep"}.issubset(scores))
 
 
 nuisance_group_folds = nuisance.add_grouped_crossfit_folds

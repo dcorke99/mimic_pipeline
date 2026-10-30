@@ -34,7 +34,7 @@ OUTCOME_COL = "cauti_in_period"
 CAUTI_RISK_COL = "at_risk_cauti"
 REINSERTION_RISK_COL = "at_risk_reinsertion"
 
-EPISODE_IDENTITY_COLS = ["subject_id", "hadm_id", "stay_id", "inserted"]
+EPISODE_IDENTITY_COLS = ["subject_id", "stay_id", "inserted"]
 TERMINAL_EVENT_COLS = [
     "reinsertion_in_period",
     "death_in_period",
@@ -452,7 +452,6 @@ def build_truth_table(
 ):
     preferred_identifiers = [
         "subject_id",
-        "hadm_id",
         "stay_id",
         "inserted",
         "removed",

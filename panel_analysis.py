@@ -161,7 +161,6 @@ def build_overview_tables(df):
         "rows": int(len(df)),
         "unique_subject_id": int(df[ID_COL].nunique()),
         "patients_with_missing_sex": int(df.drop_duplicates(ID_COL)["sex_M"].isna().sum()),
-        "unique_hadm_id": int(df["hadm_id"].nunique()),
         "unique_stay_id": int(df["stay_id"].nunique()),
         "unique_episodes": int(df[EPISODE_KEYS].drop_duplicates().shape[0]),
     }])
@@ -249,7 +248,6 @@ def build_episode_level_table(
     # Pull one summary value per episode
     episode_age = d.groupby(EPISODE_KEYS, dropna=False)["age"].first().rename("age")
     episode_subject = d.groupby(EPISODE_KEYS, dropna=False)[ID_COL].first().rename(ID_COL)
-    episode_hadm = d.groupby(EPISODE_KEYS, dropna=False)["hadm_id"].first().rename("hadm_id")
 
     catheter_in_periods = (
         in_rows.groupby(EPISODE_KEYS, dropna=False)[PERIODS_COL]
@@ -308,7 +306,6 @@ def build_episode_level_table(
     out = pd.concat(
         [
             episode_subject,
-            episode_hadm,
             episode_age,
             catheter_days,
             catheter_in_periods,
@@ -326,7 +323,7 @@ def build_episode_level_table(
     if include_age_split:
         age = pd.to_numeric(out["age"], errors="coerce")
         out["age_episode_median"] = float(age.median())
-        out["age_ge_episode_median"] = age.ge(age.median()).astype(float).where(age.notna())
+        out["age_ge_median"] = age.ge(age.median()).astype(float).where(age.notna())
 
     numeric_cols = [
         "age",
@@ -492,7 +489,6 @@ def describe_selected_covariates(
     value_cols,
     analysis_set_name,
     model_name,
-    feature_source,
     dp=3,
 ):
     # Build descriptive stats for the selected model features
@@ -505,7 +501,6 @@ def describe_selected_covariates(
 
         rows.append({
             "model": model_name,
-            "feature_source": feature_source,
             "analysis_set": analysis_set_name,
             "col": col,
             "N": n,
@@ -598,7 +593,7 @@ def main(include_age_split=None):
     # Coerce the core numeric inputs, including any TRUE/FALSE strings.
     numeric_cols = [
         TIME_COL, PERIODS_COL, INTERVAL_COL, ACTION_COL, DECISION_ROW_COL, Y_CAUTI, Y_REINS,
-        LAST_PERIOD_COL, "age", "hadm_id", "stay_id", CAUTI_BINARY_FEATURE,
+        LAST_PERIOD_COL, "age", "stay_id", CAUTI_BINARY_FEATURE,
         "at_risk_cauti", "at_risk_reinsertion",
     ] + cov_cols
     for column in numeric_cols:
@@ -707,7 +702,7 @@ def main(include_age_split=None):
                 selected_features.append(column)
         table = describe_selected_covariates(
             analysis_sets[analysis_set], selected_features,
-            analysis_set, model_name, "native_model_importance", DP,
+            analysis_set.removesuffix("_rows"), model_name, DP,
         )
         tables.append(table)
     influential = pd.concat(tables, ignore_index=True)
@@ -766,7 +761,7 @@ def main(include_age_split=None):
     if include_age_split:
         age_tests = pd.DataFrame([
             binary_group_test(
-                episode_df, "age_ge_episode_median", outcome,
+                episode_df, "age_ge_median", outcome,
                 f"Age >= episode median by {label} episode",
             )
             for outcome, label in (

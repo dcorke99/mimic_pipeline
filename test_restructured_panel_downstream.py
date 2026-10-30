@@ -85,7 +85,7 @@ class RestructuredPanelDownstreamTests(unittest.TestCase):
     def test_synthetic_first_event_uses_time_order_and_elapsed_48_hour_window(self):
         starts = pd.date_range("2024-01-01", periods=7, freq="12h")
         panel = pd.DataFrame({
-            "subject_id": 1, "hadm_id": 1, "stay_id": 1, "inserted": starts[0],
+            "subject_id": 1, "stay_id": 1, "inserted": starts[0],
             "period_start": starts, "removed": starts[1],
             "catheter_state": ["in", *(["out"] * 6)],
         }).iloc[::-1].reset_index(drop=True)

@@ -20,7 +20,7 @@ T0 = pd.Timestamp("2024-01-01 06:00:00")
 def episode(stay_id, removal=38, terminal=110, reason="icu_exit_alive", cauti=None):
     stamp = lambda hours: T0 + pd.Timedelta(hours=hours)
     return {
-        "subject_id": stay_id, "hadm_id": stay_id, "stay_id": stay_id,
+        "subject_id": stay_id, "stay_id": stay_id,
         "inserted": T0, "removed": stamp(removal),
         "reinsertion_time": stamp(terminal) if reason == "reinsertion" else pd.NaT,
         "death_time": stamp(terminal) if reason == "death" else pd.NaT,
@@ -140,7 +140,7 @@ class BaselinePanelTests(unittest.TestCase):
         pd.testing.assert_frame_equal(
             previous.groupby("stay_id")[events].sum(), current.groupby("stay_id")[events].sum(),
         )
-        demographics = ["subject_id", "hadm_id", "age", "sex_M", "ethnicity_White"]
+        demographics = ["subject_id", "age", "sex_M", "ethnicity_White"]
         pd.testing.assert_frame_equal(
             previous.groupby("stay_id")[demographics].first(), current.groupby("stay_id")[demographics].first(),
         )
@@ -249,6 +249,10 @@ class BaselinePanelTests(unittest.TestCase):
             with patch.object(cdp, "load_item_labels", return_value={123: "synthetic"}):
                 cdp.build_modelling_panel()
             modelling = pd.read_csv(Path(temporary) / "modelling_panel.csv")
+            episodes = pd.read_csv(Path(temporary) / "catheter_episodes.csv")
+            self.assertNotIn("hadm_id", base.columns)
+            self.assertNotIn("hadm_id", modelling.columns)
+            self.assertNotIn("hadm_id", episodes.columns)
             self.assertEqual(len(modelling), len(base))
             self.assertTrue((set(base.columns) - {"cov_start", "cov_end", "row_id"}).issubset(modelling.columns))
             self.assertEqual(modelling.loc[modelling.removed_in_period.eq(1), "observed_action"].unique().tolist(), ["remove"])

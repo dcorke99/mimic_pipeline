@@ -9,7 +9,8 @@ panel names are used throughout: `observed`, `semi_synthetic_with_confounding`,
 Final policy estimates are here:
 
 ```text
-artefacts/results/<panel>/<estimator>/<bootstrap>/
+artefacts/results/<panel>/gformula/<nuisance>/<bootstrap>/
+artefacts/results/<panel>/policy_dml/<nuisance>/<continuation>/<bootstrap>/
 ```
 
 Each g-formula or Policy-DML result directory contains:
@@ -19,6 +20,12 @@ Each g-formula or Policy-DML result directory contains:
 | `policy_values.csv` | Main policy estimates and confidence intervals. |
 | `policy_differences.csv` | Main contrasts with current practice and confidence intervals. |
 | `diagnostics.csv` | Checks needed to interpret the estimates. |
+
+`EVALUATION_MODEL_TYPES` selects nuisance learners, and
+`POLICY_DML_CONTINUATION_LEARNERS` selects continuation learners. Policy-DML
+evaluates every selected pair. Separate directories prevent runs from replacing
+another learner's results. Older results directly under
+`<estimator>/<bootstrap>/` remain unchanged; new runs use the paths above.
 
 Policy-DML also writes `run_settings.json`. It writes
 `clipping_sensitivity.csv` only when clipping sensitivity values are selected
@@ -37,14 +44,23 @@ The fitted model files and `nuisance_predictions.csv` are computational inputs
 to the evaluators. The remaining CSV files report performance, calibration,
 fold performance, and feature importance. Super Learner adds its weights file.
 
+`nuisance_predictions.csv` exports contain row identifiers, trajectory and
+outcome fields, fold assignments, and probability columns. Itemid features,
+age, sex and ethnicity covariates remain in the original modelling panel.
+Fixed-mode g-formula always loads model inputs from that source panel
+using patient, stay, insertion time and episode index to match rows. DML reads
+only identifiers, folds and removal probabilities from the prediction CSV.
+
 ## Policy panels
 
 ```text
 artefacts/policy_panels/<panel>/
 ```
 
-`policy_panels.csv` is the index read by both evaluators. The `panels`
-subdirectory contains one preserved-grid panel for each fixed removal day.
+The `panels` subdirectory contains one preserved-grid panel for each fixed
+removal day, named `remove_on_day_<day>.csv`. Both evaluators discover all
+existing CSV panels there directly; no `policy_panels.csv` index is created
+or read. Files left from earlier builds are also evaluated.
 `policy_action` describes the g-formula policy trajectory. `policy_dml_action`
 also specifies what to do on observed decision rows after the target day: remove
 the catheter if it is still in. Current practice uses the fitted behaviour

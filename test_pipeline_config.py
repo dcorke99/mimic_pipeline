@@ -24,10 +24,10 @@ class PipelineConfigTests(unittest.TestCase):
             "Path", "REPO_ROOT",
             "PANEL_PATHS", "POLICY_DIRS", "RESULT_DIRS", "PIPELINE_STAGES", "MODEL_TYPES",
             "SUPERLEARNER_BASE_MODELS", "NUISANCE_PANELS", "POLICY_PANELS",
-            "EVALUATION_PANELS", "NUISANCE_MODEL_TYPE", "BOOTSTRAP_MODES",
+            "EVALUATION_PANELS", "EVALUATION_MODEL_TYPES", "NUISANCE_MODEL_TYPE", "BOOTSTRAP_MODES",
             "POLICY_DAYS", "ANALYSIS_PANEL", "ANALYSIS_INCLUDE_AGE_SPLIT",
-            "POLICY_DML_HORIZON_HOURS", "POLICY_DML_CONTINUATION_LEARNER",
-            "POLICY_DML_N_BOOTSTRAP", "POLICY_DML_CLIPPING_SENSITIVITY",
+            "POLICY_DML_HORIZON_HOURS", "POLICY_DML_CONTINUATION_LEARNERS",
+            "POLICY_DML_N_BOOTSTRAP", "POLICY_DML_CLIPPING_SENSITIVITY", "GFORMULA_N_BOOTSTRAP",
         })
 
     def test_choices_reach_current_stage_modules(self):
@@ -38,10 +38,12 @@ class PipelineConfigTests(unittest.TestCase):
             "POLICY_PANELS": ["observed", "randomised_action"],
             "EVALUATION_PANELS": ["semi_synthetic_with_confounding"],
             "NUISANCE_MODEL_TYPE": "catboost", "BOOTSTRAP_MODES": ["refit"],
+            "EVALUATION_MODEL_TYPES": ["catboost", "superlearner"],
             "POLICY_DAYS": [2, 4], "ANALYSIS_PANEL": "randomised_action",
             "ANALYSIS_INCLUDE_AGE_SPLIT": False,
-            "POLICY_DML_CONTINUATION_LEARNER": "ridge",
+            "POLICY_DML_CONTINUATION_LEARNERS": ["ridge", "extra_trees"],
             "POLICY_DML_N_BOOTSTRAP": 7,
+            "GFORMULA_N_BOOTSTRAP": 11,
             "POLICY_DML_CLIPPING_SENSITIVITY": (.01,),
         }
         with patch.multiple(config, **overrides):
@@ -55,9 +57,10 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertEqual([run[0] for run in policies["PANEL_RUNS"]], ["observed", "randomised_action"])
             for filename in ("evaluate_gformula_policies.py", "evaluate_policy_dml_policies.py"):
                 evaluation = self.load_stage(filename)
-                self.assertEqual(evaluation["NUISANCE_MODEL_TYPE"], "catboost")
+                self.assertEqual(evaluation["EVALUATION_MODEL_TYPES"], ["catboost", "superlearner"])
                 self.assertEqual(evaluation["BOOTSTRAP_MODES"], ["refit"])
                 self.assertEqual(evaluation["PANEL_RUNS"][0][0], "semi_synthetic_with_confounding")
+                self.assertEqual(evaluation["N_BOOTSTRAP"], 11 if filename == "evaluate_gformula_policies.py" else 7)
             self.assertEqual(evaluation["SETTINGS"]["continuation_learner"], "ridge")
             self.assertEqual(evaluation["N_BOOTSTRAP"], 7)
             self.assertEqual(evaluation["CLIPPING_SENSITIVITY"], (.01,))
@@ -93,7 +96,8 @@ class PipelineConfigTests(unittest.TestCase):
         panels = ["semi_synthetic_with_confounding", "confounder_omitted", "randomised_action"]
         horizons = {name: 336 for name in panels}
         with patch.multiple(config, EVALUATION_PANELS=panels, BOOTSTRAP_MODES=["refit"],
-                            POLICY_DML_HORIZON_HOURS=horizons, POLICY_DML_CONTINUATION_LEARNER="ridge",
+                            EVALUATION_MODEL_TYPES=["catboost"],
+                            POLICY_DML_HORIZON_HOURS=horizons, POLICY_DML_CONTINUATION_LEARNERS=["ridge"],
                             POLICY_DML_N_BOOTSTRAP=7):
             evaluator = self.load_stage("evaluate_policy_dml_policies.py")
         execute = Mock()
@@ -104,6 +108,53 @@ class PipelineConfigTests(unittest.TestCase):
         self.assertTrue(all(call.args[3] == "refit" for call in execute.call_args_list))
         self.assertTrue(all(call.kwargs["settings"]["continuation_learner"] == "ridge" for call in execute.call_args_list))
         self.assertTrue(all(call.kwargs["n_bootstrap"] == 7 for call in execute.call_args_list))
+
+    def test_evaluators_run_every_selected_model_and_bootstrap_combination(self):
+        panels = ["observed", "confounder_omitted"]
+        models = ["catboost", "superlearner"]
+        continuations = ["ridge", "extra_trees"]
+        modes = ["fixed", "refit"]
+        with patch.multiple(config, EVALUATION_PANELS=panels, EVALUATION_MODEL_TYPES=models,
+                            POLICY_DML_CONTINUATION_LEARNERS=continuations, BOOTSTRAP_MODES=modes):
+            gformula = self.load_stage("evaluate_gformula_policies.py")
+            dml = self.load_stage("evaluate_policy_dml_policies.py")
+        for evaluator, expected in (
+            (gformula, [(panel, model, None, mode) for panel in panels for model in models for mode in modes]),
+            (dml, [(panel, model, continuation, mode) for panel in panels for model in models
+                   for continuation in continuations for mode in modes]),
+        ):
+            execute = Mock()
+            with patch.dict(evaluator["main"].__globals__, run_panel_estimation=execute), redirect_stdout(StringIO()):
+                evaluator["main"]()
+            actual = [(call.kwargs.get("panel_name", call.args[4] if len(call.args) > 4 else None),
+                       call.args[2], call.kwargs.get("settings", {}).get("continuation_learner"), call.args[3])
+                      for call in execute.call_args_list]
+            self.assertEqual(actual, expected)
+            if evaluator is dml:
+                self.assertEqual(len({id(call.kwargs["settings"]) for call in execute.call_args_list}), len(expected))
+                caches = {}
+                for call in execute.call_args_list:
+                    owner = (call.args[4], call.args[2])
+                    cache = call.kwargs["behaviour_cache"]
+                    if owner in caches:
+                        self.assertIs(cache, caches[owner])
+                    else:
+                        caches[owner] = cache
+                self.assertEqual(len({id(cache) for cache in caches.values()}), len(panels) * len(models))
+
+    def test_empty_model_selections_skip_evaluation(self):
+        for models, continuations, filenames in (
+            ([], ["ridge"], ("evaluate_gformula_policies.py", "evaluate_policy_dml_policies.py")),
+            (["catboost"], [], ("evaluate_policy_dml_policies.py",)),
+        ):
+            with patch.multiple(config, EVALUATION_PANELS=["observed"], EVALUATION_MODEL_TYPES=models,
+                                POLICY_DML_CONTINUATION_LEARNERS=continuations):
+                for filename in filenames:
+                    evaluator = self.load_stage(filename)
+                    execute = Mock()
+                    with patch.dict(evaluator["main"].__globals__, run_panel_estimation=execute):
+                        evaluator["main"]()
+                    execute.assert_not_called()
 
     def test_runner_stops_after_failed_stage(self):
         stages = ["create_observed_panel.py", "fit_nuisance_models.py", "panel_analysis.py"]

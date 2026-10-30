@@ -19,7 +19,6 @@ class TerminalPanelTests(unittest.TestCase):
     ):
         return {
             "subject_id": stay_id,
-            "hadm_id": stay_id,
             "stay_id": stay_id,
             "inserted": inserted,
             "removed": removed,

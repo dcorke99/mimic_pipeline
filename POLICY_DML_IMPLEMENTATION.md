@@ -6,6 +6,12 @@ fixed-day policy panels, and nuisance predictions. Decision preparation,
 continuation fitting, recursive scoring, diagnostics and bootstrap reporting
 are defined in this evaluator. Settings and policy definitions use dictionaries.
 
+Like g-formula, DML discovers every existing CSV in the selected panel's
+`panels` directory, derives the removal day from its `remove_on_day_<day>.csv`
+filename, and adds current practice as the comparator. No separate policy index
+is created or read. `POLICY_DAYS` controls policy construction; evaluation uses
+the files present, including panels left from earlier builds.
+
 ## Estimator mapping
 
 | Quantity | Code |
@@ -18,9 +24,9 @@ are defined in this evaluator. Settings and policy definitions use dictionaries.
 | `V(pi) = mean_e psi_(e,1)` | `episode_scores` selects the first score and `policy_summary` averages episodes. |
 | `Delta = V(pi) - V(current)` | Summary and bootstrap contrasts use current practice as the paired comparator. |
 
-The continuation learners are Ridge, Random Forest, Extra Trees and XGBoost.
+The continuation learners are Ridge, Random Forest, Extra Trees, XGBoost and CatBoost.
 Tree learners use 100 trees and all available processors. Select `"xgboost"`
-in `POLICY_DML_CONTINUATION_LEARNER` to use squared-error regression with
+in `POLICY_DML_CONTINUATION_LEARNERS` to use squared-error regression with
 histogram trees. XGBoost trains on its configured device (currently CUDA), then
 switches the fitted model to CPU prediction for the pandas inputs, as in the
 nuisance fitting script. Each learner's parameters are in the evaluator's
@@ -29,6 +35,35 @@ layout. `LEARNER_PREPROCESSING` controls imputation and standardisation. XGBoost
 uses native missing-value handling; Ridge uses median imputation and
 standardisation; the forests use median imputation. Scores are not clipped
 to `[0, 1]`.
+
+Select `"catboost"` in `POLICY_DML_CONTINUATION_LEARNERS` for
+`CatBoostRegressor` with RMSE loss, native missing-value handling, and 100
+iterations. Its `task_type` defaults to `"GPU"` and can be changed to `"CPU"`
+in `LEARNER_CONFIGURATIONS`. It accepts constant and signed recursive targets;
+entirely constant predictor matrices use a training-mean fallback because
+CatBoost requires a usable split feature. Constant targets are enabled through
+`allow_const_label=True`. CatBoost does not write training files or clip its
+predictions to `[0, 1]`.
+
+`EVALUATION_MODEL_TYPES` selects the behaviour learners independently of the
+continuation learners. The evaluator runs every selected behaviour/continuation
+pair for each panel and bootstrap mode. Each run gets separate settings and
+bootstrap estimates; the selected models are not combined into an ensemble.
+
+Within one evaluator invocation, behaviour predictions are cached in memory
+for each panel and behaviour learner and reused across continuation learners,
+bootstrap modes, and clipping sensitivity. The cache stores probability arrays,
+not fitted ensembles. Reuse requires identical ordered training and prediction
+inputs, training actions, patient/fold ownership, bootstrap multiplicities, and
+nuisance-model configuration. Audit records mark hits as `cached_behaviour`,
+and progress reports print `POLICY-DML BEHAVIOUR ... reused`.
+
+The first continuation learner still fits the auxiliary behaviour models for
+each inner split: saved outer-fold predictions cannot replace these fits.
+Subsequent continuation learners reuse their probabilities. Continuation models
+and recursive targets are always recalculated for the selected continuation
+learner. Cache entries are discarded when the evaluator exits or advances to
+another panel/behaviour learner; they are not a persistent restart facility.
 
 ## Cross-fitting and nuisance models
 
@@ -65,7 +100,7 @@ semi-synthetic CAUTI reference values by panel in
 `known_truth_policy_dml.csv`, including the horizon. Before fitting, the
 evaluator checks that every required period has training trajectories in each
 outer and inner split, so unsupported tails fail before expensive model fits.
-Run choices (panels, bootstrap modes, horizons, continuation learner and
+Run choices (panels, bootstrap modes, horizons, nuisance and continuation learners and
 bootstrap count) are read from `pipeline_config.py`. Technical fitting settings
 are in the evaluator's `SETTINGS`, `LEARNER_CONFIGURATIONS` and
 `LEARNER_PREPROCESSING` dictionaries.
@@ -86,14 +121,24 @@ same patient draw. `policy_inference.py` contains the estimator-independent
 paired-difference and percentile-interval reporting used here and available to
 the future LTMLE evaluator.
 
+Refitted bootstrap behaviour predictions have a separate cache namespace for
+each seed and replicate. They can be shared with the corresponding draw of
+another continuation learner when its actual inputs and multiplicities match.
+They are never substituted with full-sample or another replicate's predictions.
+
 Before fitting, the evaluator reports the patient, decision, stage, fold,
 policy, learner, processor, and approximate model-fit counts. Point-estimate
-progress is reported by outer fold, inner fold, and policy. Bootstrap progress
-is printed every five replicates and at completion.
+progress follows the nested loops: outer-fold behaviour, inner-fold behaviour
+and auxiliary continuation policies, then outer continuation/scoring policies.
+Plain print statements sit directly in the outer-fold, inner-fold and policy
+loops. Period and outcome loops do not print. Each refit bootstrap draw prints
+its number before repeating those loops; fixed bootstrap prints every ten
+draws and at completion. Clipping sensitivity prints each alternative before
+fitting. There is no progress helper, timer or separate per-model logging.
 
 ## Outputs
 
-Files below `artefacts/results/<panel>/policy_dml/<fixed or refit>/` are:
+Files below `artefacts/results/<panel>/policy_dml/<behaviour>/<continuation>/<fixed or refit>/` are:
 
 | File | Content |
 | --- | --- |
@@ -102,6 +147,17 @@ Files below `artefacts/results/<panel>/policy_dml/<fixed or refit>/` are:
 | `diagnostics.csv` | Support, weights, clipping, agreement, and effective sample sizes. |
 | `run_settings.json` | Estimator settings, selected continuation parameters and preprocessing, seeds, horizon, and saved-behaviour source. |
 | `clipping_sensitivity.csv` | Optional results for configured clipping alternatives. |
+| `fit_timing.csv` | Wall-clock fitting seconds and fit counts by component and phase, including each refit bootstrap replicate and clipping alternative. |
+
+Timing components distinguish `behaviour` nuisance models,
+`auxiliary_continuation` models used to construct nested targets, and outer
+`continuation` models. `cached_behaviour` and `reused_behaviour` records have
+zero fitting time and zero fits; earlier saved-model training is not counted.
+`n_records` also includes skipped continuation fits with empty risk sets.
+Timings cover model fitting (including preprocessing within the fit), excluding
+prediction, scoring, input loading, and output writing. Fixed bootstrap draws
+perform no modelling and add no timing rows. The timing file is saved after
+point estimation, bootstrap completion, and each clipping alternative.
 
 Episode scores, decision scores, individual bootstrap draws, and per-model
 audit records are used during estimation but are not saved. They duplicated

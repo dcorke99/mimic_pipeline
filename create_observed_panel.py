@@ -504,7 +504,6 @@ def build_base_panel(catheterised):
         ):
             rows.append({
                 "subject_id": episode.subject_id,
-                "hadm_id": episode.hadm_id,
                 "stay_id": episode.stay_id,
                 "inserted": episode.inserted,
                 "removed": episode.removed,
@@ -655,7 +654,6 @@ def build_base_panel(catheterised):
     ethnicity_cols = sorted([c for c in panel.columns if c.startswith("ethnicity_")])
     ordered_cols = [
         "subject_id",
-        "hadm_id",
         "stay_id",
         "inserted",
         "removed",
@@ -705,7 +703,6 @@ def create_episode_cohort_and_base_panel():
     episode_export = episodes[
         [
             "subject_id",
-            "hadm_id",
             "stay_id",
             "inserted",
             "removed",

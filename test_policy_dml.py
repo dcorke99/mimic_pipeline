@@ -57,7 +57,7 @@ def save_behaviour(panel, directory, folds=3):
         p = nuisance.predict_crossfit_fold(model, frame.loc[held, features])
         frame.loc[held, "p_remove_obs"] = p
         frame.loc[held, "p_keep_obs"] = 1 - p
-    frame.to_csv(directory / "nuisance_predictions.csv", index=False)
+    nuisance.compact_nuisance_predictions(frame).to_csv(directory / "nuisance_predictions.csv", index=False)
     return frame
 
 
@@ -130,6 +130,36 @@ class ArithmeticTests(unittest.TestCase):
 
 
 class ContinuationRegressorTests(unittest.TestCase):
+    def test_catboost_constant_feature_stage_uses_unclipped_training_mean(self):
+        train = pd.DataFrame({"subject_id": ["a", "b"], evaluator.FOLD: [1, 1],
+                              "age": [50., 50.], "removed_in_period": [0, 0]})
+        held = pd.DataFrame({"subject_id": ["c"], evaluator.FOLD: [0],
+                             "age": [50.], "removed_in_period": [0]})
+        audit = {"records": [], "progress": False}
+        model, _ = evaluator.fit_continuation(
+            train, held, np.array([-2., 6.]), ["age"], "death", {"name": "current_practice"},
+            1, dict(evaluator.SETTINGS, continuation_learner="catboost"), audit, 0, None, None,
+        )
+        np.testing.assert_allclose(model.predict(held[["age", "removed_in_period"]]), 2.)
+        self.assertEqual(audit["records"][-1]["fallback_reason"], "constant_continuation_features")
+
+    def test_catboost_fits_signed_and_constant_targets_with_missing_predictors(self):
+        settings = dict(evaluator.SETTINGS, continuation_learner="catboost")
+        features = pd.DataFrame({"age": np.arange(80, dtype=float), "missing_feature": np.nan})
+        features.loc[0, "age"] = np.nan
+        target = np.where(np.arange(80) < 40, -2.0, 3.0)
+        with patch.dict(evaluator.LEARNER_CONFIGURATIONS["catboost"], task_type="CPU", thread_count=1):
+            model = evaluator.make_regressor(settings)
+            model.fit(features, target)
+            predictions = model.predict(features)
+            self.assertTrue(np.isfinite(predictions).all())
+            self.assertLess(predictions[1:40].mean(), -1.)
+            self.assertGreater(predictions[40:].mean(), 2.)
+            self.assertEqual(list(model.named_steps), ["catboost"])
+            constant = evaluator.make_regressor(settings)
+            constant.fit(features, np.zeros(len(features)))
+            np.testing.assert_allclose(constant.predict(features), 0.)
+
     def test_xgboost_fits_signed_targets_with_missing_predictors(self):
         settings = dict(evaluator.SETTINGS, continuation_learner="xgboost")
         with patch.dict(evaluator.LEARNER_CONFIGURATIONS["xgboost"], device="cpu", n_jobs=1):
@@ -213,6 +243,51 @@ class PanelTests(unittest.TestCase):
             evaluator.validate_folds(folded)
 
 
+class BehaviourCacheTests(unittest.TestCase):
+    def test_changed_inputs_or_configuration_require_new_fits(self):
+        train = pd.DataFrame({"subject_id": ["a", "b"], evaluator.FOLD: [1, 2],
+                              evaluator.ROW: [1, 2], "age": [40., 50.], "removed_in_period": [0, 1]})
+        held = pd.DataFrame({"subject_id": ["c", "c"], evaluator.FOLD: [0, 0],
+                             evaluator.ROW: [3, 4], "age": [60., 61.], "removed_in_period": [0, 1]})
+        audit = {"records": [], "progress": False, "started": 0., "last_message": 0.}
+        cache = {}
+
+        def predict(training=train, prediction=held, learner="logistic_regression", outer=0, inner=0):
+            return evaluator.behaviour_predictions(training, prediction, ["age"], learner,
+                                                   outer, inner, audit, cache)
+
+        fallback = {"fallback": True, "fallback_probability": .4}
+        with patch.object(nuisance, "fit_crossfit_fold_model", return_value=fallback) as fit:
+            a, b, _ = predict()
+            a[:] = 0
+            b[:] = 0
+            a, b, _ = predict(train.copy(), held.copy())
+            self.assertEqual(fit.call_count, 1)
+            self.assertTrue(audit["records"][0]["fit_performed"])
+            self.assertGreaterEqual(audit["records"][0]["fit_seconds"], 0)
+            self.assertFalse(audit["records"][1]["fit_performed"])
+            self.assertEqual(audit["records"][1]["fit_seconds"], 0)
+            np.testing.assert_array_equal(a, [.4, .4])
+            np.testing.assert_array_equal(b, [.4, .4])
+            for column, value in (("age", 42.), ("removed_in_period", 1),
+                                  ("subject_id", "another_patient"), (evaluator.FOLD, 3)):
+                changed = train.copy()
+                changed.loc[0, column] = value
+                predict(training=changed)
+            predict(training=pd.concat([train, train.iloc[[0]]], ignore_index=True))
+            predict(prediction=held.iloc[::-1])
+            predict(learner="superlearner")
+            predict(inner=1)
+            with patch.dict(nuisance.LEARNER_CONFIGURATIONS["logistic_regression"], max_iter=123):
+                predict()
+            self.assertEqual(fit.call_count, 10)
+            # A cache hit must still reject overlap in patient membership.
+            leaked = held.copy()
+            leaked.loc[0, "subject_id"] = "a"
+            with self.assertRaisesRegex(ValueError, "Patient leakage"):
+                predict(prediction=leaked)
+
+
 class FittingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -236,6 +311,46 @@ class FittingTests(unittest.TestCase):
             self.assertEqual(model["outer_fold"], model["held_out_fold"])
         self.assertTrue(self.folded.groupby("subject_id")[evaluator.FOLD].nunique().eq(1).all())
         self.assertTrue(self.rows.continuation_model_id.isin([m["model_id"] for m in self.audit]).all())
+
+
+    def test_continuation_learners_reuse_behaviour_and_match_uncached_scores(self):
+        cache = {}
+        with patch.object(nuisance, "fit_crossfit_fold_model", wraps=nuisance.fit_crossfit_fold_model) as fit:
+            evaluator.crossfit_policy_scores(self.decisions, self.policies, settings=self.settings,
+                                             behaviour_cache=cache)
+        self.assertEqual(fit.call_count, 3 * (2 + 1))
+        settings = dict(self.settings, continuation_learner="xgboost")
+        with patch.dict(evaluator.LEARNER_CONFIGURATIONS["xgboost"], device="cpu", n_estimators=3, n_jobs=1):
+            with patch.object(nuisance, "fit_crossfit_fold_model", side_effect=AssertionError("Repeated behaviour fit")):
+                reused, audit, _ = evaluator.crossfit_policy_scores(
+                    self.decisions, self.policies, settings=settings, behaviour_cache=cache,
+                )
+            uncached, _, _ = evaluator.crossfit_policy_scores(self.decisions, self.policies, settings=settings)
+        self.assertEqual(sum(item["component"] == "cached_behaviour" for item in audit), 9)
+        pd.testing.assert_frame_equal(reused, uncached)
+
+    def test_refit_bootstrap_reuses_only_corresponding_draws(self):
+        episodes = evaluator.episode_scores(self.rows)
+        cache = {}
+        with TemporaryDirectory() as temporary, redirect_stdout(StringIO()):
+            arguments = dict(mode="refit", settings=self.settings, learner="logistic_regression",
+                             n_bootstrap=2, seed=14)
+            first = evaluator.run_bootstrap(
+                episodes, self.folded, self.policies, Path(temporary) / "first",
+                **arguments, behaviour_cache=cache,
+            )
+            self.assertEqual(set(cache), {("bootstrap", 14, 0), ("bootstrap", 14, 1)})
+            self.assertIsNot(cache[("bootstrap", 14, 0)], cache[("bootstrap", 14, 1)])
+            with patch.object(nuisance, "fit_crossfit_fold_model", side_effect=AssertionError("Repeated draw fit")):
+                second = evaluator.run_bootstrap(
+                    episodes, self.folded, self.policies, Path(temporary) / "second",
+                    **arguments, behaviour_cache=cache,
+                )
+            reference = evaluator.run_bootstrap(
+                episodes, self.folded, self.policies, Path(temporary) / "reference", **arguments,
+            )
+        np.testing.assert_array_equal(second, first)
+        np.testing.assert_array_equal(second, reference)
 
     def test_policy_panel_prescribes_removal_on_later_observed_in_rows(self):
         base = policy_builder.add_stable_ids_and_decision_flag(self.panel.copy())
@@ -339,6 +454,21 @@ class FittingTests(unittest.TestCase):
             rows.qbar + rows.ratio * (rows.reward + rows.next_score - rows.q_observed),
         )
 
+    def test_catboost_continuation_runs_nested_recursion(self):
+        settings = dict(self.settings, continuation_learner="catboost")
+        with patch.dict(evaluator.LEARNER_CONFIGURATIONS["catboost"],
+                        task_type="CPU", iterations=3, thread_count=1):
+            rows, audit, _ = evaluator.crossfit_policy_scores(
+                self.decisions, self.policies, settings=settings,
+            )
+        self.assertEqual(len(rows), len(self.rows))
+        self.assertTrue(np.isfinite(rows.recursive_score).all())
+        self.assertTrue(rows.continuation_model_id.isin([record["model_id"] for record in audit]).all())
+        np.testing.assert_allclose(
+            rows.recursive_score,
+            rows.qbar + rows.ratio * (rows.reward + rows.next_score - rows.q_observed),
+        )
+
     def test_saved_behaviour_reuse_and_probability_validation(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -366,7 +496,8 @@ class FittingTests(unittest.TestCase):
                 [policy_builder.apply_fixed_day_policy(base, day) for day in (1, 2)],
                 ignore_index=True,
             )
-            policy_builder.save_policy_panels(policy_panel, policy_dir / "policy_panels.csv")
+            policy_builder.save_policy_panels(policy_panel, policy_dir / "panels")
+            self.assertFalse((policy_dir / "policy_panels.csv").exists())
             # Change one instruction to show the evaluator reads the saved panel.
             day_one_path = policy_dir / "panels/remove_on_day_1.csv"
             day_one = pd.read_csv(day_one_path)
@@ -376,7 +507,7 @@ class FittingTests(unittest.TestCase):
             day_one.to_csv(day_one_path, index=False)
             with patch.dict(evaluator.run_config.RESULT_DIRS, {"test": root / "results/test"}), \
                  patch.dict(evaluator.run_config.POLICY_DIRS, {"test": policy_dir}), \
-                 patch.object(evaluator.run_config, "POLICY_DAYS", [1, 2]):
+                 patch.object(evaluator.run_config, "POLICY_DAYS", [99]):
                 for mode in ("fixed", "refit"):
                     summary, episodes, rows = evaluator.run_panel_estimation(
                         source,
@@ -387,8 +518,9 @@ class FittingTests(unittest.TestCase):
                         settings=self.settings,
                         n_bootstrap=1,
                     )
-                    output = root / "results/test/policy_dml" / mode
+                    output = root / "results/test/policy_dml/logistic_regression" / self.settings["continuation_learner"] / mode
                     self.assertTrue(set(evaluator.SUMMARY_COLUMNS.values()).issubset(summary.columns))
+                    self.assertEqual(set(rows.policy_name), {"current_practice", "remove_on_day_1", "remove_on_day_2"})
                     selected = rows.loc[
                         rows.policy_name.eq("remove_on_day_1") & rows[evaluator.ROW].eq(decision_id)
                     ]
@@ -398,6 +530,18 @@ class FittingTests(unittest.TestCase):
                     self.assertEqual(metadata["continuation_configuration"], evaluator.LEARNER_CONFIGURATIONS["ridge"])
                     self.assertEqual(metadata["continuation_preprocessing"], evaluator.LEARNER_PREPROCESSING["ridge"])
                     self.assertTrue((output / "policy_differences.csv").exists())
+                    timing = pd.read_csv(output / "fit_timing.csv")
+                    self.assertTrue(timing.fit_seconds.ge(0).all())
+                    self.assertTrue(timing.n_fits.le(timing.n_records).all())
+                    point_timing = timing.loc[timing.phase.eq("point_estimate")].set_index("component")
+                    self.assertGreater(point_timing.loc["behaviour", "n_fits"], 0)
+                    self.assertGreater(point_timing.loc["auxiliary_continuation", "n_fits"], 0)
+                    self.assertGreater(point_timing.loc["continuation", "n_fits"], 0)
+                    self.assertEqual(point_timing.loc["reused_behaviour", "fit_seconds"], 0)
+                    self.assertEqual(point_timing.loc["reused_behaviour", "n_fits"], 0)
+                    self.assertEqual(timing.phase.eq("bootstrap").any(), mode == "refit")
+                    if mode == "refit":
+                        self.assertTrue(timing.loc[timing.phase.eq("bootstrap"), "bootstrap_replicate"].eq(1).all())
                     self.assertFalse((root / "results/test/gformula").exists())
 
 

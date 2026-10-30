@@ -69,6 +69,12 @@ Select stages, panels, learners, policies, and bootstrap modes in
 `pipeline_config.py`. See [RUN_CONFIGURATION.md](RUN_CONFIGURATION.md) for the
 available settings.
 
+`EVALUATION_MODEL_TYPES` selects one or more nuisance learners for both
+evaluators. `POLICY_DML_CONTINUATION_LEARNERS` selects one or more continuation
+learners; Policy-DML runs every selected nuisance/continuation pair.
+It reuses matching behaviour predictions across continuation choices within a
+run, avoiding repeated Super Learner behaviour fits for the same patient splits.
+
 Policy-DML reads the modelling panel and the saved fixed-day policy panels.
 The policy panels must be built for the selected evaluation datasets before
 running either evaluator. In fixed bootstrap mode Policy-DML reuses the saved out-of-fold
@@ -95,7 +101,8 @@ future LTMLE evaluator.
 ## Outputs
 
 Final estimates are under
-`artefacts/results/<panel>/<estimator>/<bootstrap>/`. Start with
+`artefacts/results/<panel>/gformula/<nuisance>/<bootstrap>/` and
+`artefacts/results/<panel>/policy_dml/<nuisance>/<continuation>/<bootstrap>/`. Start with
 `policy_values.csv` and `policy_differences.csv`. Diagnostics and run settings
 sit beside them.
 

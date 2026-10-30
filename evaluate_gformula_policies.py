@@ -16,13 +16,13 @@ from policy_eval_common import (
 
 
 import pipeline_config as run_config
-from pipeline_config import BOOTSTRAP_MODES, NUISANCE_MODEL_TYPE
+from pipeline_config import BOOTSTRAP_MODES, EVALUATION_MODEL_TYPES
 
 
 # Technical settings
 
 REPO_ROOT = Path(__file__).resolve().parent
-N_BOOTSTRAP = 100
+N_BOOTSTRAP = run_config.GFORMULA_N_BOOTSTRAP
 BOOTSTRAP_SEED = 20260923
 REFIT_CROSSFIT_FOLDS = 5
 
@@ -40,7 +40,6 @@ POLICY_TYPE_COL = "policy_type"
 
 EPISODE_KEY_COLS = [
     "subject_id",
-    "hadm_id",
     "stay_id",
     "inserted",
     "removed",
@@ -72,7 +71,6 @@ NUISANCE_COLUMNS = [
 
 EPISODE_FIRST_COLS = [
     "subject_id",
-    "hadm_id",
     "stay_id",
     "inserted",
     "removed",
@@ -245,7 +243,6 @@ def order_episode_columns(df):
     # Order episode-level output columns
     preferred = [
         "subject_id",
-        "hadm_id",
         "stay_id",
         EPISODE_ID_COL,
         "inserted",
@@ -430,12 +427,12 @@ def print_console_summary(
     row_df,
     episode_df,
     output_dir,
-    policy_manifest_path,
+    policy_panel_dir,
     model_type,
 ):
     print()
     print("--- G-FORMULA POLICY EVALUATION COMPLETE ---")
-    print(f"Policy panel index: {policy_manifest_path}")
+    print(f"Policy panels: {policy_panel_dir}")
     print(f"Nuisance model type: {model_type}")
     print(f"Number of policies: {row_df['policy_name'].nunique():,}")
     print(f"Number of patients: {row_df['subject_id'].nunique():,}")
@@ -482,13 +479,13 @@ def evaluate_policy_episodes(policy_df, nuisance_df):
 
 
 def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, panel_name=None, *, output_root=None):
-    policy_manifest_path = run_config.POLICY_DIRS[panel_name] / "policy_panels.csv"
+    policy_panel_dir = run_config.POLICY_DIRS[panel_name] / "panels"
     nuisance_model_dir = Path(artefact_root) / model_type
     nuisance_predictions_path = nuisance_model_dir / "nuisance_predictions.csv"
     outcome_models_path = nuisance_model_dir / "outcome_models.pkl"
-    outdir = (output_root or run_config.RESULT_DIRS[panel_name]) / "gformula" / bootstrap_mode
+    outdir = (output_root or run_config.RESULT_DIRS[panel_name]) / "gformula" / model_type / bootstrap_mode
     outdir.mkdir(exist_ok=True, parents=True)
-    policy_df = read_policy_collection(policy_manifest_path)
+    policy_df = read_policy_collection(policy_panel_dir)
     policy_df["subject_id"] = policy_df.subject_id.astype(str)
     refit_panel = None
     if bootstrap_mode == "refit":
@@ -503,6 +500,7 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
         nuisance_df.columns = nuisance_df.columns.str.strip()
         nuisance_df = fill_missing_counterfactual_predictions(
             nuisance_df, outcome_models_path, current_practice_expected_risk=True,
+            panel_path=panel_path,
         )
     nuisance_df["subject_id"] = nuisance_df.subject_id.astype(str)
     combined_episode_df, row_df, current_rows, current_episode_df = evaluate_policy_episodes(
@@ -520,7 +518,7 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
     # Keep one compact diagnostic table; episode data are only bootstrap inputs.
     pec.save_report_df(diagnostics_df, outdir / "diagnostics.csv")
 
-    print_console_summary(summary_df, row_df, combined_episode_df, outdir, policy_manifest_path, model_type)
+    print_console_summary(summary_df, row_df, combined_episode_df, outdir, policy_panel_dir, model_type)
 
     bootstrap.run_bootstrap(
         combined_episode_df, policy_df, evaluate_policy_episodes, outdir,
@@ -532,10 +530,11 @@ def run_panel_estimation(panel_path, artefact_root, model_type, bootstrap_mode, 
 
 def main():
     for panel_name, panel_path, nuisance_root in PANEL_RUNS:
-        for mode in BOOTSTRAP_MODES:
-            print(f"[PANEL] {panel_name}; estimator=gformula; bootstrap={mode}", flush=True)
-            run_panel_estimation(panel_path, nuisance_root, NUISANCE_MODEL_TYPE, mode,
-                                 panel_name=panel_name)
+        for model_type in EVALUATION_MODEL_TYPES:
+            for mode in BOOTSTRAP_MODES:
+                print(f"[PANEL] {panel_name}; estimator=gformula; model={model_type}; bootstrap={mode}", flush=True)
+                run_panel_estimation(panel_path, nuisance_root, model_type, mode,
+                                     panel_name=panel_name)
 
 
 if __name__ == "__main__":
